@@ -68,8 +68,6 @@ For each function call, return a json object with function name and arguments wi
 {{ end }}
 {{- if and (ne .Role "assistant") $last }}<|im_start|>assistant
 <think>
-
-</think>
 {{ end }}
 {{- end }}"""
 PARAMETER stop <|im_start|>
