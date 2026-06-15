@@ -43,10 +43,12 @@ SCHEMAS = [
         "function": {
             "name": "web_search",
             "description": (
-                "Search the web for current events, recent facts, prices, "
-                "documentation, or anything that may have changed since training "
-                "or that you're unsure about. Returns top results with titles, "
-                "snippets, and URLs."
+                "Search the web for up-to-date or factual information you can't "
+                "reliably answer from memory: current events, sports results, "
+                "match outcomes, news, prices, release/version numbers, dates, or "
+                "anything after your training cutoff. Use it whenever you're not "
+                "certain of a specific real-world fact rather than guessing. "
+                "Returns top results with titles, snippets, and URLs."
             ),
             "parameters": {
                 "type": "object",
