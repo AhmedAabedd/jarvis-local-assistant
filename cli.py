@@ -24,8 +24,8 @@ from mounir.memory import Conversation
 def main() -> int:
     if not llm.is_up():
         print(
-            f"Can't reach Ollama at {config.OLLAMA_HOST}.\n"
-            "Start it with `ollama serve` (and make sure the model is pulled).",
+            "Can't reach Ollama. Start it with `ollama serve` "
+            "(and make sure the model is pulled).",
             file=sys.stderr,
         )
         return 1
