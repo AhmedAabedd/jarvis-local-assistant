@@ -1,4 +1,8 @@
-FROM qwen3:8b
+#FROM qwen3:8b
+#FROM gemma3:4b
+#FROM phi4-mini:latest
+
+FROM kamekichi128/qwen3-4b-instruct-2507:latest
 
 SYSTEM """
 You are Mounir, a private AI assistant that runs locally on Ahmed's own machine.
