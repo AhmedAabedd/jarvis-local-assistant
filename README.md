@@ -3,8 +3,19 @@
 A fully local, private voice-capable assistant. No cloud, no subscriptions.
 See [`../jarvis_project.md`](../jarvis_project.md) for the full vision and stages.
 
-**Status:** Stage 2 (in progress) — voice: push-to-talk, Whisper STT, Piper TTS.
-Stage 1 (streaming text chat + memory) is on `main`.
+**Status:** Stage 3 (in progress) — tools: web search via native function-calling.
+Stages 1 (text chat + memory) and 2 (voice) are on `main`.
+
+## Tools (Stage 3)
+
+Mounir uses **native function-calling**: the model is given tool schemas and
+decides on its own when to call one. The agent runs the tool, feeds the result
+back, and the model answers — the standard agent loop, in `mounir/agent.py`.
+
+Currently available: **`web_search`** (DuckDuckGo via `ddgs`). Ask Mounir
+something current ("what's the latest Python version?") and he'll search, then
+answer. A `[🔍 web_search: …]` line prints when he does. Adding a new tool =
+a function + schema + registry entry in `mounir/tools.py`; the loop is generic.
 
 ## Target hardware (DELL / stage01)
 

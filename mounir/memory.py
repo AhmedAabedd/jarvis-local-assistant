@@ -32,6 +32,10 @@ class Conversation:
     def add_assistant(self, content: str) -> None:
         self._messages.append({"role": "assistant", "content": content})
 
+    def add_message(self, message: dict) -> None:
+        """Append a raw message dict (used for tool calls and tool results)."""
+        self._messages.append(message)
+
     def reset(self) -> None:
         self._messages.clear()
 
