@@ -59,3 +59,17 @@ WHISPER_LANGUAGE: str | None = os.environ.get("MOUNIR_WHISPER_LANG") or None
 PIPER_MODEL: str = os.environ.get(
     "MOUNIR_PIPER_MODEL", str(DATA_DIR / "voices" / "en_US-amy-medium.onnx")
 )
+
+# --- Wake word + hands-free (Stage 4) ---------------------------------------
+
+# openwakeword pretrained model to trigger on. Built-ins include "hey_jarvis",
+# "alexa", "hey_mycroft". A custom "hey_mounir" needs training (see README).
+WAKE_WORD: str = os.environ.get("MOUNIR_WAKE_WORD", "hey_jarvis")
+WAKE_THRESHOLD: float = float(os.environ.get("MOUNIR_WAKE_THRESHOLD", "0.5"))
+
+# Voice-activity detection (webrtcvad) for hands-free recording.
+VAD_AGGRESSIVENESS: int = int(os.environ.get("MOUNIR_VAD_AGGRESSIVENESS", "2"))
+# Stop recording after this much trailing silence once speech has started.
+VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
+# Hard cap on a single utterance.
+VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
