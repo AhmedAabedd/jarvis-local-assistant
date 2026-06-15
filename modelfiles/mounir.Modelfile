@@ -13,10 +13,6 @@ When you don't know something, say so straight instead of making it up. You are
 Mounir and only Mounir — never call yourself Qwen or any other name.
 """
 
-# Patched Qwen3 template: thinking is OFF by default (no /no_think reliance on
-# the API flag). Every original `$.IsThinkSet` gate is replaced with `$.Think`,
-# which is false unless the request explicitly sets think:true — so Mounir never
-# thinks unless you opt in, regardless of Ollama version.
 TEMPLATE """
 {{- $lastUserIdx := -1 -}}
 {{- range $idx, $msg := .Messages -}}
@@ -50,15 +46,9 @@ For each function call, return a json object with function name and arguments wi
 {{- $last := eq (len (slice $.Messages $i)) 1 -}}
 {{- if eq .Role "user" }}<|im_start|>user
 {{ .Content }}
-{{- if eq $i $lastUserIdx }}
-   {{- if $.Think -}}
-      {{- " "}}/think
-   {{- else -}}
-      {{- " "}}/no_think
-   {{- end -}}
-{{- end }}<|im_end|>
+{{- " "}}/no_think<|im_end|>
 {{ else if eq .Role "assistant" }}<|im_start|>assistant
-{{ if (and .Thinking $.Think (or $last (gt $i $lastUserIdx))) -}}
+{{ if (and $.IsThinkSet (and .Thinking (or $last (gt $i $lastUserIdx)))) -}}
 <think>{{ .Thinking }}</think>
 {{ end -}}
 {{ if .Content }}{{ .Content }}
@@ -73,7 +63,7 @@ For each function call, return a json object with function name and arguments wi
 </tool_response><|im_end|>
 {{ end }}
 {{- if and (ne .Role "assistant") $last }}<|im_start|>assistant
-{{ if not $.Think -}}
+{{ if and $.IsThinkSet (not $.Think) -}}
 <think>
 
 </think>
