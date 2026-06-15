@@ -67,8 +67,9 @@ PIPER_MODEL: str = os.environ.get(
 WAKE_WORD: str = os.environ.get("MOUNIR_WAKE_WORD", "hey_jarvis")
 WAKE_THRESHOLD: float = float(os.environ.get("MOUNIR_WAKE_THRESHOLD", "0.5"))
 
-# Voice-activity detection (webrtcvad) for hands-free recording.
-VAD_AGGRESSIVENESS: int = int(os.environ.get("MOUNIR_VAD_AGGRESSIVENESS", "2"))
+# Hands-free recording stops on silence, detected by frame loudness (RMS).
+# Raise if it cuts you off in a noisy room; lower if it won't stop on quiet.
+VAD_ENERGY_THRESHOLD: float = float(os.environ.get("MOUNIR_VAD_ENERGY", "0.015"))
 # Stop recording after this much trailing silence once speech has started.
 VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
 # Hard cap on a single utterance.

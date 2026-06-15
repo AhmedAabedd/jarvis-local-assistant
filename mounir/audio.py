@@ -45,28 +45,27 @@ def record_until_enter(prompt: str = "🎙️  Listening… press Enter to stop.
 def record_until_silence(
     silence_seconds: float | None = None,
     max_seconds: float | None = None,
-    aggressiveness: int | None = None,
+    energy_threshold: float | None = None,
 ) -> "object":
     """Record from the mic and stop automatically after the talker pauses.
 
-    Uses webrtcvad: waits for speech to begin, then ends once there's
-    `silence_seconds` of quiet (or after `max_seconds`). Returns a float32 mono
-    array in [-1, 1] at config.SAMPLE_RATE — the format faster-whisper wants.
+    Detects speech by frame loudness (RMS): waits for speech to begin, then
+    ends once there's `silence_seconds` of quiet (or after `max_seconds`). Pure
+    numpy — no external VAD dependency. Returns a float32 mono array in [-1, 1]
+    at config.SAMPLE_RATE, the format faster-whisper wants.
     """
     import numpy as np
     import sounddevice as sd
-    import webrtcvad
 
     silence_seconds = (
         config.VAD_SILENCE_SECONDS if silence_seconds is None else silence_seconds
     )
     max_seconds = config.VAD_MAX_SECONDS if max_seconds is None else max_seconds
-    aggressiveness = (
-        config.VAD_AGGRESSIVENESS if aggressiveness is None else aggressiveness
+    energy_threshold = (
+        config.VAD_ENERGY_THRESHOLD if energy_threshold is None else energy_threshold
     )
 
-    vad = webrtcvad.Vad(aggressiveness)
-    frame_ms = 30  # webrtcvad accepts 10/20/30 ms frames
+    frame_ms = 30
     frame_len = int(config.SAMPLE_RATE * frame_ms / 1000)
     silence_limit = int(silence_seconds * 1000 / frame_ms)
     max_frames = int(max_seconds * 1000 / frame_ms)
@@ -78,14 +77,15 @@ def record_until_silence(
     with sd.InputStream(
         samplerate=config.SAMPLE_RATE,
         channels=1,
-        dtype="int16",
+        dtype="float32",
         blocksize=frame_len,
     ) as stream:
         for _ in range(max_frames):
             data, _ = stream.read(frame_len)
             pcm = data.flatten()
             frames.append(pcm)
-            if vad.is_speech(pcm.tobytes(), config.SAMPLE_RATE):
+            rms = float(np.sqrt(np.mean(pcm**2))) if pcm.size else 0.0
+            if rms >= energy_threshold:
                 started = True
                 silent_run = 0
             elif started:
@@ -95,4 +95,4 @@ def record_until_silence(
 
     if not frames:
         return np.zeros(0, dtype="float32")
-    return np.concatenate(frames).astype("float32") / 32768.0
+    return np.concatenate(frames)
