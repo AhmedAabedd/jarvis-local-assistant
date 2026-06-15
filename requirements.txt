@@ -1,2 +1,2 @@
 # Stage 1 — core text assistant
-requests>=2.31
+ollama>=0.3

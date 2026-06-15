@@ -1,29 +1,40 @@
-"""Thin client over the Ollama HTTP API.
+"""Thin wrapper over the official `ollama` Python library.
 
-Uses /api/chat with streaming so the rest of the app can speak / print tokens
-as they arrive instead of waiting for the full reply — critical for hiding the
-~8-18 tok/s latency on a CPU-only box.
+Uses streaming chat so the rest of the app can speak / print tokens as they
+arrive instead of waiting for the full reply — critical for hiding the
+~8-18 tok/s latency on a CPU-only box. The library is the same path the
+standalone test scripts use, where `think=False` is confirmed to actually
+disable Qwen3's thinking.
 """
 
 from __future__ import annotations
 
 from typing import Iterator
 
-import requests
+from ollama import Client
 
 from . import config
+
+_client: Client | None = None
 
 
 class OllamaError(RuntimeError):
     """Raised when Ollama is unreachable or returns an error."""
 
 
-def is_up(host: str = config.OLLAMA_HOST, timeout: float = 2.0) -> bool:
+def _get_client() -> Client:
+    global _client
+    if _client is None:
+        _client = Client(host=config.OLLAMA_HOST)
+    return _client
+
+
+def is_up() -> bool:
     """Quick health check so the CLI can fail with a friendly message."""
     try:
-        requests.get(f"{host}/api/tags", timeout=timeout)
+        _get_client().list()
         return True
-    except requests.RequestException:
+    except Exception:
         return False
 
 
@@ -31,7 +42,6 @@ def chat_stream(
     messages: list[dict],
     *,
     model: str = config.MODEL,
-    host: str = config.OLLAMA_HOST,
     think: bool | None = None,
     options: dict | None = None,
     keep_alive: str = config.KEEP_ALIVE,
@@ -43,47 +53,22 @@ def chat_stream(
     `think` resolves to config.THINK at call time when left as None, so a
     runtime toggle (e.g. the CLI's /think) actually takes effect.
     """
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "think": config.THINK if think is None else think,
-        "keep_alive": keep_alive,
-        "options": options if options is not None else config.OPTIONS,
-    }
-
     try:
-        with requests.post(
-            f"{host}/api/chat",
-            json=payload,
+        stream = _get_client().chat(
+            model=model,
+            messages=messages,
             stream=True,
-            timeout=(5, 300),
-        ) as resp:
-            if resp.status_code != 200:
-                raise OllamaError(
-                    f"Ollama returned {resp.status_code}: {resp.text[:200]}"
-                )
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                chunk = _parse_line(line)
-                if chunk is None:
-                    continue
-                # Qwen3 thinking tokens come back under "thinking"; we ignore
-                # them for output but they still cost time when think=True.
-                content = chunk.get("message", {}).get("content", "")
-                if content:
-                    yield content
-                if chunk.get("done"):
-                    break
-    except requests.RequestException as exc:
-        raise OllamaError(f"Could not reach Ollama at {host}: {exc}") from exc
-
-
-def _parse_line(line: bytes) -> dict | None:
-    import json
-
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError:
-        return None
+            think=config.THINK if think is None else think,
+            options=options if options is not None else config.OPTIONS,
+            keep_alive=keep_alive,
+        )
+        for chunk in stream:
+            # Qwen3 thinking tokens come back under message.thinking; we only
+            # surface message.content so thinking is never printed/spoken.
+            content = chunk.message.content
+            if content:
+                yield content
+    except Exception as exc:
+        raise OllamaError(
+            f"Ollama call failed (host {config.OLLAMA_HOST}, model {model}): {exc}"
+        ) from exc
