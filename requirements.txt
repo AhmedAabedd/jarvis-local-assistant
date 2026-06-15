@@ -1,0 +1,2 @@
+# Stage 1 — core text assistant
+requests>=2.31

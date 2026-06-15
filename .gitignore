@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.mounir/
+*.json.bak
+.DS_Store
