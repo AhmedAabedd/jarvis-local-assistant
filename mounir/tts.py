@@ -39,12 +39,15 @@ def speak(text: str) -> None:
     import sounddevice as sd
 
     voice = _load()
-    chunks = [
-        np.frombuffer(raw, dtype=np.int16)
-        for raw in voice.synthesize_stream_raw(text)
-    ]
-    if not chunks:
+    # piper >= 1.3 yields AudioChunk objects from synthesize(); each carries the
+    # int16 PCM bytes and the sample rate.
+    parts: list = []
+    sample_rate = None
+    for chunk in voice.synthesize(text):
+        parts.append(np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16))
+        sample_rate = chunk.sample_rate
+    if not parts:
         return
-    audio = np.concatenate(chunks)
-    sd.play(audio, samplerate=voice.config.sample_rate)
+    audio = np.concatenate(parts)
+    sd.play(audio, samplerate=sample_rate)
     sd.wait()
