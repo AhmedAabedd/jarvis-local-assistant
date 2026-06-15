@@ -1,0 +1,6 @@
+# Stage 2 — voice (install on top of requirements.txt)
+# System deps first:  sudo apt install portaudio19-dev
+faster-whisper>=1.0
+piper-tts>=1.2
+sounddevice>=0.4
+numpy>=1.24
