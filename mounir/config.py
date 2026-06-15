@@ -38,3 +38,24 @@ SYSTEM_PROMPT: str = (
     "straight instead of making it up. You are Mounir and only Mounir — never "
     "call yourself Qwen or any other name."
 )
+
+# --- Voice (Stage 2) --------------------------------------------------------
+
+# Mic capture / Whisper both work at 16 kHz mono.
+SAMPLE_RATE: int = int(os.environ.get("MOUNIR_SAMPLE_RATE", "16000"))
+
+# Speech-to-text via faster-whisper (CTranslate2 — much faster than vanilla
+# Whisper on CPU). "small" is the floor for decent Arabic + English; drop to
+# "base" if you need more speed.
+WHISPER_MODEL: str = os.environ.get("MOUNIR_WHISPER_MODEL", "small")
+WHISPER_DEVICE: str = os.environ.get("MOUNIR_WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE: str = os.environ.get("MOUNIR_WHISPER_COMPUTE", "int8")
+# None = auto-detect language per utterance (good for AR/EN mixing).
+# Set to "en" or "ar" to force it and skip detection.
+WHISPER_LANGUAGE: str | None = os.environ.get("MOUNIR_WHISPER_LANG") or None
+
+# Text-to-speech via Piper. Point this at a downloaded voice (.onnx file);
+# its matching .onnx.json must sit next to it. See README for the download.
+PIPER_MODEL: str = os.environ.get(
+    "MOUNIR_PIPER_MODEL", str(DATA_DIR / "voices" / "en_US-amy-medium.onnx")
+)
