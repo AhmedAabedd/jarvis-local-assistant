@@ -3,8 +3,37 @@
 A fully local, private voice-capable assistant. No cloud, no subscriptions.
 See [`../jarvis_project.md`](../jarvis_project.md) for the full vision and stages.
 
-**Status:** Stage 2 (in progress) — voice: push-to-talk, Whisper STT, Piper TTS.
-Stage 1 (streaming text chat + memory) is on `main`.
+**Status:** Stage 4 (in progress) — hands-free: wake word + voice-activity detection.
+Stages 1 (text chat + memory), 2 (voice), 3 (tools/web search) precede it.
+
+## Hands-free mode (Stage 4)
+
+```bash
+sudo apt install portaudio19-dev          # if not already
+pip install -r requirements-voice.txt     # adds openwakeword, webrtcvad, onnxruntime
+
+python voice_cli.py --wake                # hands-free
+```
+
+Say the wake word (**"Hey Jarvis"** by default) → Mounir starts listening →
+speak → he auto-detects when you stop (webrtcvad) → transcribes, replies, and
+talks back. No Enter key. Plain `python voice_cli.py` is still push-to-talk.
+
+The wake word is set by `MOUNIR_WAKE_WORD` (openwakeword built-ins: `hey_jarvis`,
+`alexa`, `hey_mycroft`). A custom **"Hey Mounir"** isn't pretrained — it needs a
+short training run with openwakeword's notebook (synthetic TTS samples); that's a
+follow-up, the pipeline already works with `hey_jarvis`.
+
+## Tools (Stage 3)
+
+Mounir uses **native function-calling**: the model is given tool schemas and
+decides on its own when to call one. The agent runs the tool, feeds the result
+back, and the model answers — the standard agent loop, in `mounir/agent.py`.
+
+Currently available: **`web_search`** (DuckDuckGo via `ddgs`). Ask Mounir
+something current ("what's the latest Python version?") and he'll search, then
+answer. A `[🔍 web_search: …]` line prints when he does. Adding a new tool =
+a function + schema + registry entry in `mounir/tools.py`; the loop is generic.
 
 ## Target hardware (DELL / stage01)
 

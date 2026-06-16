@@ -1,2 +1,5 @@
 # Stage 1 — core text assistant
 ollama>=0.3
+
+# Stage 3 — tools
+ddgs>=6.0

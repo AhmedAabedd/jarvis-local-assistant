@@ -1,31 +1,43 @@
 #!/usr/bin/env python3
-"""Voice entry point for Mounir (Stage 2).
+"""Voice entry point for Mounir.
 
-    python voice_cli.py
+    python voice_cli.py          # push-to-talk (Enter to start/stop)
+    python voice_cli.py --wake   # hands-free: say the wake word, then talk
 
-Push-to-talk: press Enter to start speaking, Enter again to stop. Mounir
-transcribes (Whisper), thinks (Qwen3 via Ollama), and talks back (Piper),
+Mounir transcribes (Whisper), thinks (Qwen3 via Ollama), and talks back (Piper),
 speaking each sentence as soon as it's ready.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 
-from mounir import config, llm
-from mounir.voice import run_voice_loop
+from mounir import llm
+from mounir.voice import run_hands_free_loop, run_voice_loop
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Talk to Mounir by voice.")
+    parser.add_argument(
+        "--wake",
+        action="store_true",
+        help="hands-free mode: trigger with the wake word instead of Enter",
+    )
+    args = parser.parse_args()
+
     if not llm.is_up():
         print(
-            f"Can't reach Ollama at {config.OLLAMA_HOST}.\n"
-            "Start it with `ollama serve` first.",
+            "Can't reach Ollama. Start it with `ollama serve` first.",
             file=sys.stderr,
         )
         return 1
+
     try:
-        run_voice_loop()
+        if args.wake:
+            run_hands_free_loop()
+        else:
+            run_voice_loop()
     except KeyboardInterrupt:
         print()
     return 0

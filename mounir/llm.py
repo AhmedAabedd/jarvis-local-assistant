@@ -32,18 +32,28 @@ def chat_stream(
     *,
     model: str = config.MODEL,
     think: bool | None = None,
+    tools: list | None = None,
+    tool_calls_out: list | None = None,
 ) -> Iterator[str]:
-    """Stream assistant text chunks. `think` defaults to config.THINK."""
+    """Stream assistant text chunks. `think` defaults to config.THINK.
+
+    If `tools` is given, the model may emit tool calls instead of text; any it
+    emits are appended to `tool_calls_out` (raw ollama ToolCall objects) for the
+    agent to execute. Text and tool calls are mutually exclusive per turn.
+    """
     try:
         stream = ollama.chat(
             model=model,
             messages=messages,
             think=config.THINK if think is None else think,
+            tools=tools,
             stream=True,
         )
         for chunk in stream:
-            content = chunk.message.content
-            if content:
-                yield content
+            message = chunk.message
+            if message.content:
+                yield message.content
+            if tool_calls_out is not None and message.tool_calls:
+                tool_calls_out.extend(message.tool_calls)
     except Exception as exc:
         raise OllamaError(f"Ollama call failed (model {model}): {exc}") from exc

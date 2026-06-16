@@ -6,7 +6,7 @@ Environment variables override the defaults.
 
 from __future__ import annotations
 
-import os
+import os, platform
 from pathlib import Path
 
 # --- Model ------------------------------------------------------------------
@@ -59,3 +59,35 @@ WHISPER_LANGUAGE: str | None = os.environ.get("MOUNIR_WHISPER_LANG") or None
 PIPER_MODEL: str = os.environ.get(
     "MOUNIR_PIPER_MODEL", str(DATA_DIR / "voices" / "en_US-amy-medium.onnx")
 )
+
+# --- Wake word + hands-free (Stage 4) ---------------------------------------
+
+# openwakeword pretrained model to trigger on. Built-ins include "hey_jarvis",
+# "alexa", "hey_mycroft". A custom "hey_mounir" needs training (see README).
+WAKE_WORD: str = os.environ.get("MOUNIR_WAKE_WORD", "hey_jarvis")
+WAKE_THRESHOLD: float = float(os.environ.get("MOUNIR_WAKE_THRESHOLD", "0.5"))
+
+# Hands-free recording stops on silence, detected by frame loudness (RMS).
+# Raise if it cuts you off in a noisy room; lower if it won't stop on quiet.
+VAD_ENERGY_THRESHOLD: float = float(os.environ.get("MOUNIR_VAD_ENERGY", "0.015"))
+# Stop recording after this much trailing silence once speech has started.
+VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
+# Hard cap on a single utterance.
+VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
+
+LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Tunis, Tunisia")
+
+
+def _build_context_message() -> str:
+    h = Path.home()
+    return "\n".join([
+        f"OS: {platform.system()} {platform.release()}",
+        f"Home: {h}",
+        f"Downloads: {h / 'Downloads'}",
+        f"Documents: {h / 'Documents'}",
+        f"Desktop: {h / 'Desktop'}",
+        f"Location: {LOCATION}",
+    ])
+
+
+CONTEXT_MESSAGE: str = _build_context_message()
