@@ -8,12 +8,16 @@ just add a function + schema + registry entry here; the agent loop is generic.
 from __future__ import annotations
 
 import datetime
+import subprocess
 import sys
 from pathlib import Path
 
 WEB_SEARCH_MAX_RESULTS = 5
 # Cap how much of a file we read back so a huge file can't blow up the context.
 MAX_READ_CHARS = 20000
+# run_command: kill a hung command, and cap its output so it can't flood context.
+RUN_COMMAND_TIMEOUT = 30
+RUN_COMMAND_MAX_OUTPUT = 4000
 
 
 def web_search(query: str, max_results: int = WEB_SEARCH_MAX_RESULTS) -> str:
@@ -89,6 +93,54 @@ def list_directory(path: str = ".") -> str:
     lines = [f"Contents of {p}:"]
     lines += [f"  {e.name}/" if e.is_dir() else f"  {e.name}" for e in entries]
     return "\n".join(lines)
+
+
+def _default_confirm(command: str) -> bool:
+    """Ask the user, in the terminal, whether to run a command. y = yes."""
+    try:
+        answer = input(f"  [⚠ run this command?] {command}\n  y/N > ").strip().lower()
+    except EOFError:
+        return False
+    return answer in ("y", "yes")
+
+
+# The confirmation gate. The CLI uses the terminal prompt above; the voice loop
+# can swap in a spoken "yes/no" by reassigning tools.confirm_fn. Whatever it is,
+# run_command never executes anything unless this returns True.
+confirm_fn = _default_confirm
+
+
+def run_command(command: str) -> str:
+    """Run a shell command on the local machine, but only after the user confirms."""
+    command = (command or "").strip()
+    if not command:
+        return "No command given."
+    if not confirm_fn(command):
+        return "Command cancelled by the user — not run."
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=RUN_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Command timed out after {RUN_COMMAND_TIMEOUT}s and was killed."
+    except Exception as exc:
+        return f"Command failed to start: {exc}"
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    parts = [f"Exit code: {proc.returncode}"]
+    if out:
+        parts.append(f"stdout:\n{out}")
+    if err:
+        parts.append(f"stderr:\n{err}")
+    result = "\n".join(parts)
+    if len(result) > RUN_COMMAND_MAX_OUTPUT:
+        result = result[:RUN_COMMAND_MAX_OUTPUT] + "\n… [output truncated]"
+    return result
 
 
 # What the model sees. Descriptions matter — they're how it decides to call.
@@ -179,6 +231,28 @@ SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": (
+                "Run a shell command on the local machine to do things the other "
+                "tools can't — move/rename files, check disk or processes, open "
+                "apps, etc. The user is asked to confirm before it runs, so "
+                "propose the exact command. Returns the exit code and output."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The exact shell command to run.",
+                    }
+                },
+                "required": ["command"],
+            },
+        },
+    },
 ]
 
 _REGISTRY = {
@@ -187,6 +261,7 @@ _REGISTRY = {
     "read_file": read_file,
     "write_file": write_file,
     "list_directory": list_directory,
+    "run_command": run_command,
 }
 
 
