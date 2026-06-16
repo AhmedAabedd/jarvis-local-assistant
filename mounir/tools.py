@@ -236,10 +236,12 @@ SCHEMAS = [
         "function": {
             "name": "run_command",
             "description": (
-                "Run a shell command on the local machine to do things the other "
-                "tools can't — move/rename files, check disk or processes, open "
-                "apps, etc. The user is asked to confirm before it runs, so "
-                "propose the exact command. Returns the exit code and output."
+                "Run a shell command on the local machine to actually DO things "
+                "the other tools can't — open an application, move or rename "
+                "files, start a program, check disk or processes. When the user "
+                "asks you to do something on the machine, carry it out by calling "
+                "this tool. The user confirms before it runs, so propose the exact "
+                "command. Returns the exit code and output."
             ),
             "parameters": {
                 "type": "object",
