@@ -50,7 +50,10 @@ class Conversation:
         base = []
         if self.system_prompt:
             base.append({"role": "system", "content": self.system_prompt})
-        base.append({"role": "assistant", "content": config.CONTEXT_MESSAGE})
+        # Machine facts as a system message: authoritative context the model
+        # should rely on, not a fake assistant turn (which would also make the
+        # `mounir` build — system_prompt=None — start on an assistant message).
+        base.append({"role": "system", "content": config.CONTEXT_MESSAGE})
         return base + window
 
     def __len__(self) -> int:

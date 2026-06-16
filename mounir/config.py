@@ -75,6 +75,9 @@ VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
 # Hard cap on a single utterance.
 VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
 
+LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Tunis, Tunisia")
+
+
 def _build_context_message() -> str:
     h = Path.home()
     return "\n".join([
@@ -86,5 +89,5 @@ def _build_context_message() -> str:
         f"Location: {LOCATION}",
     ])
 
-LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Tunis, Tunisia")
+
 CONTEXT_MESSAGE: str = _build_context_message()
