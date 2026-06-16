@@ -48,6 +48,7 @@ def chat_stream(
             think=config.THINK if think is None else think,
             tools=tools,
             stream=True,
+            options={"num_ctx": 32768}
         )
         for chunk in stream:
             message = chunk.message
