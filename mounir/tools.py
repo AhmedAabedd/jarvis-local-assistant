@@ -118,17 +118,6 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_datetime",
-            "description": (
-                "Get the current local date and time. Use this whenever the "
-                "answer depends on what day or time it is right now."
-            ),
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "read_file",
             "description": (
                 "Read the contents of a text file on the local machine. Use "

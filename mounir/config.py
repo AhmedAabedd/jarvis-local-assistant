@@ -6,7 +6,7 @@ Environment variables override the defaults.
 
 from __future__ import annotations
 
-import os
+import os, platform
 from pathlib import Path
 
 # --- Model ------------------------------------------------------------------
@@ -74,3 +74,17 @@ VAD_ENERGY_THRESHOLD: float = float(os.environ.get("MOUNIR_VAD_ENERGY", "0.015")
 VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
 # Hard cap on a single utterance.
 VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
+
+def _build_context_message() -> str:
+    h = Path.home()
+    return "\n".join([
+        f"OS: {platform.system()} {platform.release()}",
+        f"Home: {h}",
+        f"Downloads: {h / 'Downloads'}",
+        f"Documents: {h / 'Documents'}",
+        f"Desktop: {h / 'Desktop'}",
+        f"Location: {LOCATION}",
+    ])
+
+LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Tunis, Tunisia")
+CONTEXT_MESSAGE: str = _build_context_message()

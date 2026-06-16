@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+import datetime
 from pathlib import Path
 
 from . import config
@@ -27,7 +28,9 @@ class Conversation:
     # --- mutation -----------------------------------------------------------
 
     def add_user(self, content: str) -> None:
-        self._messages.append({"role": "user", "content": content})
+        now = datetime.datetime.now().strftime("%A, %d %B %Y, %H:%M:%S")
+        stamped = f"[{now}]\n{content}"
+        self._messages.append({"role": "user", "content": stamped})
 
     def add_assistant(self, content: str) -> None:
         self._messages.append({"role": "assistant", "content": content})
@@ -42,11 +45,13 @@ class Conversation:
     # --- access -------------------------------------------------------------
 
     def to_messages(self) -> list[dict]:
-        """Build the message list sent to Ollama: system prompt + window."""
+        """Build the message list sent to Ollama: system prompt + OS context + window."""
         window = self._messages[-self.max_messages :]
+        base = []
         if self.system_prompt:
-            return [{"role": "system", "content": self.system_prompt}, *window]
-        return list(window)
+            base.append({"role": "system", "content": self.system_prompt})
+        base.append({"role": "assistant", "content": config.CONTEXT_MESSAGE})
+        return base + window
 
     def __len__(self) -> int:
         return len(self._messages)
