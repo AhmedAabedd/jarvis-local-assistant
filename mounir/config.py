@@ -75,6 +75,17 @@ VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
 # Hard cap on a single utterance.
 VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
 
+# --- Email (send) -----------------------------------------------------------
+
+# SMTP for the send_email tool. Defaults target Gmail. Credentials come from
+# the environment ONLY — never hard-code them here or they'd land in git.
+# SMTP_PASS must be a Gmail "App Password" (16 chars, needs 2-Step Verification),
+# not your normal account password.
+SMTP_HOST: str = os.environ.get("MOUNIR_SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT: int = int(os.environ.get("MOUNIR_SMTP_PORT", "587"))
+SMTP_USER: str = os.environ.get("MOUNIR_SMTP_USER", "")  # full email address
+SMTP_PASS: str = os.environ.get("MOUNIR_SMTP_PASS", "")  # Gmail App Password
+
 LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Tunis, Tunisia")
 
 

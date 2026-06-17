@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import config
+
 WEB_SEARCH_MAX_RESULTS = 5
 # How far back to restrict results, mapped to what ddgs/DuckDuckGo accepts.
 _RECENCY = {"day": "d", "week": "w", "month": "m", "year": "y"}
@@ -151,18 +153,19 @@ def list_directory(path: str = ".") -> str:
     return "\n".join(lines)
 
 
-def _default_confirm(command: str) -> bool:
-    """Ask the user, in the terminal, whether to run a command. y = yes."""
+def _default_confirm(action: str) -> bool:
+    """Ask the user, in the terminal, to confirm an action. y = yes."""
     try:
-        answer = input(f"  [⚠ run this command?] {command}\n  y/N > ").strip().lower()
+        answer = input(f"  [⚠ confirm?]\n{action}\n  y/N > ").strip().lower()
     except EOFError:
         return False
     return answer in ("y", "yes")
 
 
-# The confirmation gate. The CLI uses the terminal prompt above; the voice loop
-# can swap in a spoken "yes/no" by reassigning tools.confirm_fn. Whatever it is,
-# run_command never executes anything unless this returns True.
+# The confirmation gate for anything outward-facing or irreversible (running a
+# command, sending an email). The CLI uses the terminal prompt above; the voice
+# loop can swap in a spoken "yes/no" by reassigning tools.confirm_fn. Whatever it
+# is, those tools never act unless this returns True.
 confirm_fn = _default_confirm
 
 
@@ -197,6 +200,39 @@ def run_command(command: str) -> str:
     if len(result) > RUN_COMMAND_MAX_OUTPUT:
         result = result[:RUN_COMMAND_MAX_OUTPUT] + "\n… [output truncated]"
     return result
+
+
+def send_email(to: str, subject: str, body: str) -> str:
+    """Send an email from the user's account, but only after the user confirms."""
+    to = (to or "").strip()
+    if not to:
+        return "No recipient given."
+    if not (config.SMTP_USER and config.SMTP_PASS):
+        return (
+            "Email isn't set up: the MOUNIR_SMTP_USER and MOUNIR_SMTP_PASS "
+            "environment variables (a Gmail App Password) aren't configured."
+        )
+
+    preview = f"To: {to}\nSubject: {subject}\n\n{body}"
+    if not confirm_fn(f"send this email?\n{preview}"):
+        return "Email cancelled by the user — not sent."
+
+    import smtplib
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = config.SMTP_USER
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+    try:
+        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
+            server.starttls()
+            server.login(config.SMTP_USER, config.SMTP_PASS)
+            server.send_message(msg)
+    except Exception as exc:
+        return f"Failed to send email: {exc}"
+    return f"Email sent to {to}."
 
 
 # What the model sees. Descriptions matter — they're how it decides to call.
@@ -340,6 +376,35 @@ SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": (
+                "Send an email from the user's own account. The user confirms "
+                "before it's sent, so fill in the exact recipient, subject, and "
+                "body. Write the body yourself unless the user dictates it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient email address.",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "The subject line.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "The full message body.",
+                    },
+                },
+                "required": ["to", "subject", "body"],
+            },
+        },
+    },
 ]
 
 _REGISTRY = {
@@ -350,6 +415,7 @@ _REGISTRY = {
     "write_file": write_file,
     "list_directory": list_directory,
     "run_command": run_command,
+    "send_email": send_email,
 }
 
 
