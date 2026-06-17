@@ -8,6 +8,7 @@ just add a function + schema + registry entry here; the agent loop is generic.
 from __future__ import annotations
 
 import datetime
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -167,6 +168,76 @@ def _default_confirm(action: str) -> bool:
 # loop can swap in a spoken "yes/no" by reassigning tools.confirm_fn. Whatever it
 # is, those tools never act unless this returns True.
 confirm_fn = _default_confirm
+
+
+# Friendly app names -> candidate binaries, first one found on PATH wins. Lets
+# the model say "chrome" without knowing the exact binary on this distro.
+_APP_ALIASES = {
+    "chrome": ["google-chrome-stable", "google-chrome", "chromium-browser", "chromium"],
+    "chromium": ["chromium-browser", "chromium"],
+    "firefox": ["firefox"],
+    "code": ["code"],
+    "vscode": ["code"],
+    "vs code": ["code"],
+    "files": ["nautilus", "nemo", "dolphin", "thunar"],
+    "file manager": ["nautilus", "nemo", "dolphin", "thunar"],
+    "terminal": ["gnome-terminal", "konsole", "xfce4-terminal", "xterm"],
+    "calculator": ["gnome-calculator", "kcalc"],
+    "text editor": ["gedit", "kate", "mousepad"],
+}
+
+
+def _launch_detached(argv: list[str]) -> None:
+    """Start a process fully detached so it survives past this turn."""
+    subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def open_target(target: str) -> str:
+    """Open a URL, a file/folder, or an application by name — always detached.
+
+    Figures out what `target` is so the model doesn't have to: a web address,
+    a path on disk, or an app name (resolved against common binaries). No shell
+    command to build, no background flag to remember — it can't half-open.
+    """
+    target = (target or "").strip()
+    if not target:
+        return "Nothing to open."
+    low = target.lower()
+    path = Path(target).expanduser()
+
+    try:
+        # 1) explicit web address
+        if low.startswith(("http://", "https://")):
+            _launch_detached(["xdg-open", target])
+            return f"Opening {target}"
+        # 2) a real file or folder on disk
+        if path.exists():
+            _launch_detached(["xdg-open", str(path)])
+            return f"Opening {path}"
+        # 3) looks like a bare domain (youtube.com, www.x.org) -> treat as URL
+        if low.startswith("www.") or ("." in target and " " not in target):
+            url = "https://" + target
+            _launch_detached(["xdg-open", url])
+            return f"Opening {url}"
+        # 4) otherwise an application name
+        candidates = _APP_ALIASES.get(low, [target])
+        for binary in candidates:
+            found = shutil.which(binary)
+            if found:
+                _launch_detached([found])
+                return f"Opening {target}"
+        return (
+            f"Couldn't find an app called '{target}' (tried: {', '.join(candidates)}). "
+            "Try run_command if you know the exact command."
+        )
+    except Exception as exc:
+        return f"Could not open {target}: {exc}"
 
 
 def run_command(command: str, background: bool = False) -> str:
@@ -377,6 +448,30 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "open",
+            "description": (
+                "Open something for the user: a website/URL, a file or folder on "
+                "disk, or an application by name (e.g. 'chrome', 'youtube.com', "
+                "'~/Documents'). Prefer this over run_command whenever the user "
+                "just wants to open or launch something — it handles the details."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "What to open: a URL, a file/folder path, or an app name."
+                        ),
+                    }
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": (
                 "Run a shell command on the local machine to actually DO things "
@@ -446,6 +541,7 @@ _REGISTRY = {
     "read_file": read_file,
     "write_file": write_file,
     "list_directory": list_directory,
+    "open": open_target,
     "run_command": run_command,
     "send_email": send_email,
 }
