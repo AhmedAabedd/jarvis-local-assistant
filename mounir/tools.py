@@ -103,11 +103,6 @@ def fetch_url(url: str) -> str:
     return head + body
 
 
-def get_datetime() -> str:
-    """Return the current local date and time — the model has no clock of its own."""
-    return datetime.datetime.now().strftime("%A, %d %B %Y, %H:%M:%S")
-
-
 def _resolve(path: str) -> Path:
     """Expand ~ and make paths predictable before touching the filesystem."""
     return Path(path).expanduser()
@@ -398,8 +393,7 @@ SCHEMAS = [
             "name": "open_browser",
             "description": (
                 "Open the web browser. Pass a URL or site to open it in a tab "
-                "(e.g. 'youtube.com' when the user says 'open youtube'); omit it "
-                "to just open the browser. Use this for anything web/browser."
+                "Use this for anything web/browser."
             ),
             "parameters": {
                 "type": "object",
@@ -469,7 +463,6 @@ SCHEMAS = [
 _REGISTRY = {
     "web_search": web_search,
     "fetch_url": fetch_url,
-    "get_datetime": get_datetime,
     "read_file": read_file,
     "write_file": write_file,
     "list_directory": list_directory,
