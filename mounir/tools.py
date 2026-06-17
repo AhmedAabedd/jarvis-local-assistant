@@ -244,10 +244,9 @@ def run_command(command: str, background: bool = False) -> str:
     """Run a shell command on the local machine, but only after the user confirms.
 
     With background=True the command is launched detached: we don't wait for it
-    and don't capture its output. This is what you want for opening apps or URLs
-    (a browser, xdg-open, an editor) or starting anything long-running — those
-    never "finish", so waiting on them would hang and falsely look like a failure
-    even though the app opened.
+    and don't capture its output. Use it for long-running programs (e.g. a
+    server) that never "finish" — waiting on those would hang until the timeout.
+    Opening apps/URLs/files is the `open` tool's job, not this.
     """
     command = (command or "").strip()
     if not command:
@@ -474,12 +473,12 @@ SCHEMAS = [
         "function": {
             "name": "run_command",
             "description": (
-                "Run a shell command on the local machine to actually DO things "
-                "the other tools can't — open an application, move or rename "
-                "files, start a program, check disk or processes. When the user "
-                "asks you to do something on the machine, carry it out by calling "
-                "this tool. The user confirms before it runs, so propose the exact "
-                "command. Returns the exit code and output."
+                "Run a shell command on the local machine to DO things the other "
+                "tools can't — move or rename files, manage processes, check disk, "
+                "run scripts. When the user asks you to do something, carry it out "
+                "instead of just describing it. The user confirms before it runs. "
+                "Returns the exit code and output. (To open an app/URL/file, use "
+                "`open` instead.)"
             ),
             "parameters": {
                 "type": "object",
@@ -491,11 +490,8 @@ SCHEMAS = [
                     "background": {
                         "type": "boolean",
                         "description": (
-                            "Set true when opening an app, a browser, or a URL "
-                            "(e.g. xdg-open), or starting anything that keeps "
-                            "running. It launches without waiting, so it won't "
-                            "hang or look like it failed. Leave false (default) "
-                            "for normal commands whose output you need to see."
+                            "Set true to start a long-running program without "
+                            "waiting for it; leave false to capture its output."
                         ),
                     },
                 },
