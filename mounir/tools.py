@@ -169,13 +169,35 @@ def _default_confirm(action: str) -> bool:
 confirm_fn = _default_confirm
 
 
-def run_command(command: str) -> str:
-    """Run a shell command on the local machine, but only after the user confirms."""
+def run_command(command: str, background: bool = False) -> str:
+    """Run a shell command on the local machine, but only after the user confirms.
+
+    With background=True the command is launched detached: we don't wait for it
+    and don't capture its output. This is what you want for opening apps or URLs
+    (a browser, xdg-open, an editor) or starting anything long-running — those
+    never "finish", so waiting on them would hang and falsely look like a failure
+    even though the app opened.
+    """
     command = (command or "").strip()
     if not command:
         return "No command given."
     if not confirm_fn(command):
         return "Command cancelled by the user — not run."
+
+    if background:
+        try:
+            subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,  # detach so it survives this turn
+            )
+        except Exception as exc:
+            return f"Command failed to start: {exc}"
+        return f"Launched (running in the background): {command}"
+
     try:
         proc = subprocess.run(
             command,
@@ -370,7 +392,17 @@ SCHEMAS = [
                     "command": {
                         "type": "string",
                         "description": "The exact shell command to run.",
-                    }
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when opening an app, a browser, or a URL "
+                            "(e.g. xdg-open), or starting anything that keeps "
+                            "running. It launches without waiting, so it won't "
+                            "hang or look like it failed. Leave false (default) "
+                            "for normal commands whose output you need to see."
+                        ),
+                    },
                 },
                 "required": ["command"],
             },
