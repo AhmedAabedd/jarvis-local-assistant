@@ -170,103 +170,51 @@ def _default_confirm(action: str) -> bool:
 confirm_fn = _default_confirm
 
 
-# Friendly app names -> candidate binaries, first one found on PATH wins. Lets
-# the model say "chrome" without knowing the exact binary on this distro.
-_APP_ALIASES = {
-    "chrome": ["google-chrome-stable", "google-chrome", "chromium-browser", "chromium"],
-    "chromium": ["chromium-browser", "chromium"],
-    "firefox": ["firefox"],
-    "code": ["code"],
-    "vscode": ["code"],
-    "vs code": ["code"],
-    "files": ["nautilus", "nemo", "dolphin", "thunar"],
-    "file manager": ["nautilus", "nemo", "dolphin", "thunar"],
-    "terminal": ["gnome-terminal", "konsole", "xfce4-terminal", "xterm"],
-    "calculator": ["gnome-calculator", "kcalc"],
-    "text editor": ["gedit", "kate", "mousepad"],
-}
+# Browser binaries to try, in order; first one on PATH wins.
+_BROWSERS = [
+    "google-chrome-stable",
+    "google-chrome",
+    "chromium-browser",
+    "chromium",
+    "firefox",
+    "brave-browser",
+]
 
 
-def _launch_detached(argv: list[str]) -> None:
-    """Start a process fully detached so it survives past this turn."""
-    subprocess.Popen(
-        argv,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+def open_browser(url: str = "") -> str:
+    """Open the web browser, optionally to a URL (a new tab if it's running).
 
-
-def open_target(target: str) -> str:
-    """Open a URL, a file/folder, or an application by name — always detached.
-
-    Figures out what `target` is so the model doesn't have to: a web address,
-    a path on disk, or an app name (resolved against common binaries). No shell
-    command to build, no background flag to remember — it can't half-open.
+    Launched detached so it never blocks. Pass nothing to just open the browser,
+    or a URL/site (the model supplies "youtube.com" for "open youtube").
     """
-    target = (target or "").strip()
-    if not target:
-        return "Nothing to open."
-    low = target.lower()
-    path = Path(target).expanduser()
+    url = (url or "").strip()
+    browser = next((shutil.which(b) for b in _BROWSERS if shutil.which(b)), None)
+    if browser is None:
+        return "No web browser found on this machine."
 
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    argv = [browser, url] if url else [browser]
     try:
-        # 1) explicit web address
-        if low.startswith(("http://", "https://")):
-            _launch_detached(["xdg-open", target])
-            return f"Opening {target}"
-        # 2) a real file or folder on disk
-        if path.exists():
-            _launch_detached(["xdg-open", str(path)])
-            return f"Opening {path}"
-        # 3) looks like a bare domain (youtube.com, www.x.org) -> treat as URL
-        if low.startswith("www.") or ("." in target and " " not in target):
-            url = "https://" + target
-            _launch_detached(["xdg-open", url])
-            return f"Opening {url}"
-        # 4) otherwise an application name
-        candidates = _APP_ALIASES.get(low, [target])
-        for binary in candidates:
-            found = shutil.which(binary)
-            if found:
-                _launch_detached([found])
-                return f"Opening {target}"
-        return (
-            f"Couldn't find an app called '{target}' (tried: {', '.join(candidates)}). "
-            "Try run_command if you know the exact command."
+        subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,  # detach so it survives this turn
         )
     except Exception as exc:
-        return f"Could not open {target}: {exc}"
+        return f"Could not open the browser: {exc}"
+    return f"Opening {url} in the browser." if url else "Opening the browser."
 
 
-def run_command(command: str, background: bool = False) -> str:
-    """Run a shell command on the local machine, but only after the user confirms.
-
-    With background=True the command is launched detached: we don't wait for it
-    and don't capture its output. Use it for long-running programs (e.g. a
-    server) that never "finish" — waiting on those would hang until the timeout.
-    Opening apps/URLs/files is the `open` tool's job, not this.
-    """
+def run_command(command: str) -> str:
+    """Run a shell command on the local machine, but only after the user confirms."""
     command = (command or "").strip()
     if not command:
         return "No command given."
     if not confirm_fn(command):
         return "Command cancelled by the user — not run."
-
-    if background:
-        try:
-            subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,  # detach so it survives this turn
-            )
-        except Exception as exc:
-            return f"Command failed to start: {exc}"
-        return f"Launched (running in the background): {command}"
 
     try:
         proc = subprocess.run(
@@ -447,24 +395,21 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "open",
+            "name": "open_browser",
             "description": (
-                "Open something for the user: a website/URL, a file or folder on "
-                "disk, or an application by name (e.g. 'chrome', 'youtube.com', "
-                "'~/Documents'). Prefer this over run_command whenever the user "
-                "just wants to open or launch something — it handles the details."
+                "Open the web browser. Pass a URL or site to open it in a tab "
+                "(e.g. 'youtube.com' when the user says 'open youtube'); omit it "
+                "to just open the browser. Use this for anything web/browser."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target": {
+                    "url": {
                         "type": "string",
-                        "description": (
-                            "What to open: a URL, a file/folder path, or an app name."
-                        ),
+                        "description": "Optional URL or site to open. Omit to just open the browser.",
                     }
                 },
-                "required": ["target"],
+                "required": [],
             },
         },
     },
@@ -473,12 +418,10 @@ SCHEMAS = [
         "function": {
             "name": "run_command",
             "description": (
-                "Run a shell command on the local machine to DO things the other "
-                "tools can't — move or rename files, manage processes, check disk, "
-                "run scripts. When the user asks you to do something, carry it out "
-                "instead of just describing it. The user confirms before it runs. "
-                "Returns the exit code and output. (To open an app/URL/file, use "
-                "`open` instead.)"
+                "Run a shell command on the local machine and return its exit code "
+                "and output. Use it to DO things — move or rename files, manage "
+                "processes, check disk, run scripts. The user confirms before it "
+                "runs. Does not open the browser; use open_browser for that."
             ),
             "parameters": {
                 "type": "object",
@@ -486,14 +429,7 @@ SCHEMAS = [
                     "command": {
                         "type": "string",
                         "description": "The exact shell command to run.",
-                    },
-                    "background": {
-                        "type": "boolean",
-                        "description": (
-                            "Set true to start a long-running program without "
-                            "waiting for it; leave false to capture its output."
-                        ),
-                    },
+                    }
                 },
                 "required": ["command"],
             },
@@ -537,7 +473,7 @@ _REGISTRY = {
     "read_file": read_file,
     "write_file": write_file,
     "list_directory": list_directory,
-    "open": open_target,
+    "open_browser": open_browser,
     "run_command": run_command,
     "send_email": send_email,
 }
