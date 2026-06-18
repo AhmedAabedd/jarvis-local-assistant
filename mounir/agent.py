@@ -30,7 +30,7 @@ class Agent:
         model: str = config.MODEL,
         use_tools: bool = True,
     ) -> None:
-        system = None if model == "mounir" else config.SYSTEM_PROMPT
+        system = config.SYSTEM_PROMPT
         if conversation is None:
             conversation = Conversation(system_prompt=system)
         self.conversation = conversation

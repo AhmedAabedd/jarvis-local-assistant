@@ -108,3 +108,9 @@ CONTEXT_MESSAGE: str = _build_context_message()
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 USE_GEMINI: bool = os.environ.get("USE_GEMINI", "false").lower() in ("1", "true", "yes")
+
+
+# --- Groq ---------------------------------------------------------------
+GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "qwen/qwen3-32b")
+USE_GROQ: bool = os.environ.get("USE_GROQ", "false").lower() in ("1", "true", "yes")

@@ -7,8 +7,8 @@ class OllamaError(RuntimeError):
     pass
 
 def is_up() -> bool:
-    if config.USE_GEMINI:
-        return bool(config.GEMINI_API_KEY)
+    if config.USE_GROQ:
+        return bool(config.GROQ_API_KEY)
     try:
         ollama.list()
         return True
@@ -23,8 +23,8 @@ def chat_stream(
     tools: list | None = None,
     tool_calls_out: list | None = None,
 ) -> Iterator[str]:
-    if config.USE_GEMINI:
-        yield from _gemini_stream(messages, tools=tools, tool_calls_out=tool_calls_out)
+    if config.USE_GROQ:
+        yield from _groq_stream(messages, tools=tools, tool_calls_out=tool_calls_out)
     else:
         yield from _ollama_stream(messages, model=model, think=think, tools=tools, tool_calls_out=tool_calls_out)
 
@@ -44,79 +44,84 @@ def _ollama_stream(messages, *, model, think, tools, tool_calls_out) -> Iterator
     except Exception as exc:
         raise OllamaError(f"Ollama call failed (model {model}): {exc}") from exc
 
-def _gemini_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
+def _groq_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
     try:
-        from google import genai
-        from google.genai import types
+        from groq import Groq
 
-        client = genai.Client(api_key=config.GEMINI_API_KEY)
+        client = Groq(api_key=config.GROQ_API_KEY)
 
-        # Convert messages to Gemini format
-        system_prompt = None
-        history = []
+        # Groq is OpenAI-compatible — messages format is basically identical
+        # to what you already build, just strip non-standard keys.
+        clean_messages = []
         for m in messages:
-            if m["role"] == "system":
-                system_prompt = (system_prompt or "") + "\n" + m["content"]
-            elif m["role"] == "user":
-                history.append(types.Content(role="user", parts=[types.Part(text=m["content"])]))
-            elif m["role"] == "assistant":
-                history.append(types.Content(role="model", parts=[types.Part(text=m.get("content") or "")]))
+            entry = {"role": m["role"], "content": m.get("content") or ""}
+            if m["role"] == "tool":
+                entry["role"] = "tool"
+                entry["name"] = m.get("tool_name", "")
+            if m.get("tool_calls"):
+                entry["tool_calls"] = [
+                    {
+                        "id": f"call_{i}",
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": _to_json_str(tc["function"]["arguments"]),
+                        },
+                    }
+                    for i, tc in enumerate(m["tool_calls"])
+                ]
+            clean_messages.append(entry)
 
-        # Last message is the user turn
-        last = history.pop() if history else None
-        if last is None:
-            return
-
-        config_kwargs = {}
-        if system_prompt:
-            config_kwargs["system_instruction"] = system_prompt.strip()
-        if tools:
-            config_kwargs["tools"] = _convert_tools(tools)
-
-        response = client.models.generate_content_stream(
-            model=config.GEMINI_MODEL,
-            contents=history + [last],
-            config=types.GenerateContentConfig(**config_kwargs) if config_kwargs else None,
+        kwargs = dict(
+            model=config.GROQ_MODEL,
+            messages=clean_messages,
+            stream=True,
         )
+        if tools:
+            kwargs["tools"] = tools  # same JSON schema shape as Ollama — no conversion needed
 
-        for chunk in response:
-            # Handle tool calls — guard against chunks with no candidates,
-            # or a candidate whose content/parts is None (happens on some
-            # streaming chunks, e.g. the final one).
-            if tool_calls_out is not None and chunk.candidates:
-                content = chunk.candidates[0].content
-                parts = content.parts if content is not None else None
-                if parts:
-                    for part in parts:
-                        if hasattr(part, "function_call") and part.function_call:
-                            tool_calls_out.append(_wrap_gemini_tool_call(part.function_call))
-            # Handle text
-            if chunk.text:
-                yield chunk.text
+        stream = client.chat.completions.create(**kwargs)
+
+        collected_calls = {}
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+
+            if delta.content:
+                yield delta.content
+
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in collected_calls:
+                        collected_calls[idx] = {"name": "", "arguments": ""}
+                    if tc.function.name:
+                        collected_calls[idx]["name"] += tc.function.name
+                    if tc.function.arguments:
+                        collected_calls[idx]["arguments"] += tc.function.arguments
+
+        if tool_calls_out is not None and collected_calls:
+            import json
+            for call in collected_calls.values():
+                tool_calls_out.append(_wrap_groq_tool_call(call["name"], json.loads(call["arguments"])))
 
     except Exception as exc:
-        raise OllamaError(f"Gemini call failed: {exc}") from exc
+        raise OllamaError(f"Groq call failed: {exc}") from exc
 
-def _convert_tools(schemas: list) -> list:
-    """Convert Ollama-style tool schemas to Gemini format."""
-    from google.genai import types
-    gemini_tools = []
-    for s in schemas:
-        fn = s["function"]
-        gemini_tools.append(types.Tool(function_declarations=[
-            types.FunctionDeclaration(
-                name=fn["name"],
-                description=fn["description"],
-                parameters=fn.get("parameters"),
-            )
-        ]))
-    return gemini_tools
+def _to_json_str(args) -> str:
+    import json
+    if isinstance(args, str):
+        return args
+    return json.dumps(args)
 
-def _wrap_gemini_tool_call(fc):
-    """Wrap a Gemini function_call into the same shape agent.py expects."""
+def _wrap_groq_tool_call(name: str, arguments: dict):
+    """Wrap a Groq tool call into the same shape agent.py expects."""
     class _Fn:
-        name = fc.name
-        arguments = dict(fc.args)
+        pass
+    fn = _Fn()
+    fn.name = name
+    fn.arguments = arguments
     class _TC:
-        function = _Fn()
-    return _TC()
+        pass
+    tc = _TC()
+    tc.function = fn
+    return tc
