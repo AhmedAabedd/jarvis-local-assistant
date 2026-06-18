@@ -102,3 +102,9 @@ def _build_context_message() -> str:
 
 
 CONTEXT_MESSAGE: str = _build_context_message()
+
+
+# --- Gemini -----------------------------------------------------------------
+GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+USE_GEMINI: bool = os.environ.get("USE_GEMINI", "false").lower() in ("1", "true", "yes")
