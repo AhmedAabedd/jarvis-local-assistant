@@ -50,18 +50,29 @@ def _groq_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
 
         client = Groq(api_key=config.GROQ_API_KEY)
 
-        # Groq is OpenAI-compatible — messages format is basically identical
-        # to what you already build, just strip non-standard keys.
         clean_messages = []
+        last_tool_call_ids: list[str] = []  # ids generated for the most recent assistant tool_calls
+
         for m in messages:
-            entry = {"role": m["role"], "content": m.get("content") or ""}
             if m["role"] == "tool":
-                entry["role"] = "tool"
-                entry["name"] = m.get("tool_name", "")
+                # Pop ids in order — matches the order tools were dispatched in agent.py
+                tool_call_id = last_tool_call_ids.pop(0) if last_tool_call_ids else "call_0"
+                clean_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": m.get("tool_name", ""),
+                    "content": m.get("content") or "",
+                })
+                continue
+
+            entry = {"role": m["role"], "content": m.get("content") or ""}
+
             if m.get("tool_calls"):
+                ids = [f"call_{i}" for i in range(len(m["tool_calls"]))]
+                last_tool_call_ids = ids.copy()
                 entry["tool_calls"] = [
                     {
-                        "id": f"call_{i}",
+                        "id": ids[i],
                         "type": "function",
                         "function": {
                             "name": tc["function"]["name"],
@@ -70,6 +81,7 @@ def _groq_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
                     }
                     for i, tc in enumerate(m["tool_calls"])
                 ]
+
             clean_messages.append(entry)
 
         kwargs = dict(
@@ -78,7 +90,7 @@ def _groq_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
             stream=True,
         )
         if tools:
-            kwargs["tools"] = tools  # same JSON schema shape as Ollama — no conversion needed
+            kwargs["tools"] = tools
 
         stream = client.chat.completions.create(**kwargs)
 
