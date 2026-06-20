@@ -74,11 +74,14 @@ class Agent:
                     for tc in tool_calls
                 ],
             })
-            for tc in tool_calls:
+            for i, tc in enumerate(tool_calls):
                 result = tools.dispatch(tc.function.name, dict(tc.function.arguments))
-                conversation.append(
-                    {"role": "tool", "tool_name": tc.function.name, "content": result}
-                )
+                conversation.append({
+                    "role": "tool",
+                    "tool_name": tc.function.name,
+                    "tool_call_id": f"call_{i}",
+                    "content": result,
+                })
 
         # Cap reached — final tool-free pass.
         parts = []

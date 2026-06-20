@@ -114,3 +114,9 @@ USE_GEMINI: bool = os.environ.get("USE_GEMINI", "false").lower() in ("1", "true"
 GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "qwen/qwen3-32b")
 USE_GROQ: bool = os.environ.get("USE_GROQ", "false").lower() in ("1", "true", "yes")
+
+
+# --- Mistral ----------------------------------------------------------------
+MISTRAL_API_KEY: str = os.environ.get("MISTRAL_API_KEY", "")
+MISTRAL_MODEL: str = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
+USE_MISTRAL: bool = os.environ.get("USE_MISTRAL", "false").lower() in ("1", "true", "yes")
