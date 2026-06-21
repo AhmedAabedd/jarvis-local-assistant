@@ -20,9 +20,9 @@ WEB_SEARCH_MAX_RESULTS = 5
 # Specialist agents (lazy imports — only load ollama when actually called)
 def delegate_to_coder(task: str, context: str = "") -> str:
     """Ask the coder agent to write or fix code for a given task."""
-    from .specialists.coder import code
+    from .specialists.coder import run
     print(f"  [💻 coder delegated]", file=sys.stderr, flush=True)
-    return code(task, context)
+    return run(task)
 
 
 # How far back to restrict results, mapped to what ddgs/DuckDuckGo accepts.

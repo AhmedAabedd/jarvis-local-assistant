@@ -17,7 +17,7 @@ from pathlib import Path
 import ollama
 
 # Swap to "qwen2.5-coder:7b" once the download finishes
-CODER_MODEL: str = "qwen2.5-coder:7b"
+CODER_MODEL: str = "gemma4:e4b"
 
 MAX_TOOL_ROUNDS = 10
 MAX_READ_CHARS = 20000
