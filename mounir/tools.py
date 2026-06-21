@@ -16,6 +16,15 @@ from pathlib import Path
 from . import config
 
 WEB_SEARCH_MAX_RESULTS = 5
+
+# Specialist agents (lazy imports — only load ollama when actually called)
+def delegate_to_coder(task: str, context: str = "") -> str:
+    """Ask the coder agent to write or fix code for a given task."""
+    from .specialists.coder import code
+    print(f"  [💻 coder delegated]", file=sys.stderr, flush=True)
+    return code(task, context)
+
+
 # How far back to restrict results, mapped to what ddgs/DuckDuckGo accepts.
 _RECENCY = {"day": "d", "week": "w", "month": "m", "year": "y"}
 # fetch_url: network timeout, how much page text to keep, and a real browser
@@ -460,6 +469,32 @@ SCHEMAS = [
     },
 ]
 
+SCHEMAS += [
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_to_coder",
+            "description": (
+                "Delegate ANY coding task to the coder agent: writing new code, "
+                "editing existing files, debugging, refactoring. "
+                "The coder reads and writes files itself — you never see the code. "
+                "You only get back a short summary of what was done. "
+                "Include the full file path(s) in the task description."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "What code to write, fix, or explain. Be specific about language, requirements, and any constraints.",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+]
+
 _REGISTRY = {
     "web_search": web_search,
     "fetch_url": fetch_url,
@@ -469,6 +504,7 @@ _REGISTRY = {
     "open_browser": open_browser,
     "run_command": run_command,
     "send_email": send_email,
+    "delegate_to_coder": delegate_to_coder,
 }
 
 
