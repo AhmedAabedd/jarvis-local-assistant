@@ -26,14 +26,17 @@ follow-up, the pipeline already works with `hey_jarvis`.
 
 ## Tools (Stage 3)
 
-Mounir uses **native function-calling**: the model is given tool schemas and
-decides on its own when to call one. The agent runs the tool, feeds the result
-back, and the model answers — the standard agent loop, in `mounir/agent.py`.
+Mounir now uses a **LangGraph supervisor** for orchestration. The supervisor
+handles general work with the shared tool set, and a dedicated coder node
+handles coding-only tasks with its own isolated tools. The public entry point
+is still `mounir/agent.py`, but the real workflow now lives in the graph-backed
+implementation.
 
-Currently available: **`web_search`** (DuckDuckGo via `ddgs`). Ask Mounir
-something current ("what's the latest Python version?") and he'll search, then
-answer. A `[🔍 web_search: …]` line prints when he does. Adding a new tool =
-a function + schema + registry entry in `mounir/tools.py`; the loop is generic.
+Currently available general tools include **`web_search`** (DuckDuckGo via
+`ddgs`). Ask Mounir something current ("what's the latest Python version?")
+and he'll search, then answer. A `[🔍 web_search: …]` line prints when he does.
+Adding a new general tool means adding a function + schema + registry entry in
+`mounir/tools.py`. Coding tools stay isolated in `mounir/specialists/coder.py`.
 
 ## Target hardware (DELL / stage01)
 
@@ -110,7 +113,8 @@ mounir/
   config.py     all tunables (env-overridable)
   llm.py        streaming Ollama client
   memory.py     conversation history + JSON persistence
-  agent.py      orchestration — where Stage 3 tools will hook in
+  agent.py      compatibility wrapper for the LangGraph agent
+  langgraph_agent.py  LangGraph orchestration (supervisor + coder)
   sentences.py  stream → sentence splitter (for speak-as-you-go)
   audio.py      microphone capture (push-to-talk)
   stt.py        speech-to-text (faster-whisper)
