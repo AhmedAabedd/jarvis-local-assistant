@@ -12,12 +12,14 @@ using the assistant without knowing about the graph internals.
 
 from __future__ import annotations
 
+import queue
+import sys
+import threading
 from importlib import import_module
 from typing import Iterator, TypedDict
 
 from . import config, llm, tools
 from .memory import Conversation
-from .sentences import iter_sentences
 from .specialists.coder import run as run_coder
 
 _langgraph_graph = import_module("langgraph.graph")
@@ -27,6 +29,12 @@ StateGraph = _langgraph_graph.StateGraph
 
 MAX_TOOL_ROUNDS = 10
 ROUTER_MODEL = config.MODEL
+
+_RESET = "\033[0m"
+_YELLOW = "\033[33m"
+_CYAN = "\033[36m"
+_MAGENTA = "\033[35m"
+_GREEN = "\033[32m"
 
 
 class TurnState(TypedDict, total=False):
@@ -39,30 +47,7 @@ class TurnState(TypedDict, total=False):
     model: str
     use_tools: bool
     reply: str
-
-
-_CODING_HINTS = (
-    "code",
-    "coding",
-    "bug",
-    "fix",
-    "refactor",
-    "implement",
-    "write a script",
-    "edit",
-    "modify",
-    "file",
-    "module",
-    "function",
-    "class",
-    "test",
-    "patch",
-    "repository",
-    "langgraph",
-    "python",
-    "javascript",
-    "typescript",
-)
+    stream_queue: queue.Queue[str | None]
 
 
 def _latest_user_message(messages: list[dict]) -> str:
@@ -83,19 +68,27 @@ def _recent_dialogue(messages: list[dict], limit: int = 6) -> str:
     return "\n".join(lines)
 
 
-def _looks_like_coding_task(text: str) -> bool:
-    normalized = f" {text.lower()} "
-    return any(f" {hint} " in normalized for hint in _CODING_HINTS)
+def _preview(text: str, limit: int) -> str:
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit]
 
 
 def _route_request(state: TurnState) -> str:
     messages = state.get("messages", [])
     latest_user = _latest_user_message(messages)
+    decision = "supervisor"
     if not latest_user:
-        return "supervisor"
-
-    if _looks_like_coding_task(latest_user):
-        return "coder"
+        print(
+            f"{_YELLOW}╔══ ROUTER ══╗{_RESET}",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(f"{_YELLOW}  input: {_preview(latest_user, 120)}{_RESET}", file=sys.stderr, flush=True)
+        print(f"{_YELLOW}  decision: {decision.upper()}{_RESET}", file=sys.stderr, flush=True)
+        print(f"{_YELLOW}╚════════════╝{_RESET}", file=sys.stderr, flush=True)
+        return decision
 
     routing_prompt = [
         {
@@ -132,8 +125,17 @@ def _route_request(state: TurnState) -> str:
 
     lowered = "".join(chunks).strip().lower()
     if "coder" in lowered:
-        return "coder"
-    return "supervisor"
+        decision = "coder"
+
+    print(
+        f"{_YELLOW}╔══ ROUTER ══╗{_RESET}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(f"{_YELLOW}  input: {_preview(latest_user, 120)}{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_YELLOW}  decision: {decision.upper()}{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_YELLOW}╚════════════╝{_RESET}", file=sys.stderr, flush=True)
+    return decision
 
 
 def _run_tool_loop(
@@ -141,6 +143,7 @@ def _run_tool_loop(
     *,
     model: str,
     schemas: list[dict],
+    stream_queue: queue.Queue[str | None] | None = None,
 ) -> tuple[str, list[dict]]:
     conversation = [dict(message) for message in messages]
     tool_results: list[dict] = []
@@ -156,6 +159,8 @@ def _run_tool_loop(
             tool_calls_out=tool_calls,
         ):
             parts.append(chunk)
+            if stream_queue is not None:
+                stream_queue.put(chunk)
 
         if not tool_calls:
             return "".join(parts).strip(), tool_results
@@ -177,13 +182,25 @@ def _run_tool_loop(
         )
 
         for index, call in enumerate(tool_calls):
-            result = tools.dispatch(call.function.name, dict(call.function.arguments))
+            args = dict(call.function.arguments)
+            result = tools.dispatch(call.function.name, args)
             tool_results.append(
                 {
                     "name": call.function.name,
-                    "arguments": dict(call.function.arguments),
+                    "arguments": args,
                     "result": result,
                 }
+            )
+            print(
+                f"{_GREEN}  ⚙ tool call: {call.function.name}{_RESET}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(f"{_GREEN}    args: {args}{_RESET}", file=sys.stderr, flush=True)
+            print(
+                f"{_GREEN}    result preview: {_preview(result, 100)}{_RESET}",
+                file=sys.stderr,
+                flush=True,
             )
             conversation.append(
                 {
@@ -197,6 +214,8 @@ def _run_tool_loop(
     parts: list[str] = []
     for chunk in llm.chat_stream(conversation, model=model, tools=None):
         parts.append(chunk)
+        if stream_queue is not None:
+            stream_queue.put(chunk)
     return "".join(parts).strip(), tool_results
 
 
@@ -214,13 +233,21 @@ def _ensure_task_tracking(state: TurnState) -> tuple[str, list[str]]:
 
 def _supervisor_turn(state: TurnState) -> TurnState:
     schemas = tools.SUPERVISOR_SCHEMAS if state.get("use_tools", True) else []
+    print(f"{_CYAN}┌─ SUPERVISOR starting ─────────────────{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_CYAN}  model: {str(state.get('model') or config.MODEL)}{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_CYAN}  tools available: {len(schemas)}{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_CYAN}└───────────────────────────────────────{_RESET}", file=sys.stderr, flush=True)
     reply, tool_results = _run_tool_loop(
         state.get("messages", []),
         model=str(state.get("model") or config.MODEL),
         schemas=schemas,
+        stream_queue=state.get("stream_queue"),
     )
     current_task, completed_tasks = _ensure_task_tracking(state)
     updated_messages = _append_assistant_message(state.get("messages", []), reply)
+    print(f"{_CYAN}┌─ SUPERVISOR done ─────────────────────{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_CYAN}  reply preview: {_preview(reply, 120)}{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_CYAN}└───────────────────────────────────────{_RESET}", file=sys.stderr, flush=True)
     return {
         "messages": updated_messages,
         "tool_results": {"general": tool_results},
@@ -257,9 +284,15 @@ def _build_coder_task(messages: list[dict]) -> str:
 
 def _coder_turn(state: TurnState) -> TurnState:
     task = _build_coder_task(state.get("messages", []))
+    print(f"{_MAGENTA}┌─ CODER NODE called ───────────────────{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_MAGENTA}  task preview: {_preview(task, 200)}{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_MAGENTA}└───────────────────────────────────────{_RESET}", file=sys.stderr, flush=True)
     reply = run_coder(task).strip()
     current_task, completed_tasks = _ensure_task_tracking(state)
     updated_messages = _append_assistant_message(state.get("messages", []), reply)
+    print(f"{_MAGENTA}┌─ CODER NODE done ─────────────────────{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_MAGENTA}  summary: {reply}{_RESET}", file=sys.stderr, flush=True)
+    print(f"{_MAGENTA}└───────────────────────────────────────{_RESET}", file=sys.stderr, flush=True)
     return {
         "messages": updated_messages,
         "tool_results": {"coder": reply},
@@ -305,6 +338,7 @@ class Agent:
     def respond(self, user_input: str) -> Iterator[str]:
         """Run one user turn through the LangGraph workflow."""
         self.conversation.add_user(user_input)
+        stream_queue: queue.Queue[str | None] = queue.Queue()
         state: TurnState = {
             "messages": self.conversation.to_messages(),
             "memory_results": [],
@@ -314,19 +348,30 @@ class Agent:
             "completed_tasks": [],
             "model": self.model,
             "use_tools": self.use_tools,
+            "stream_queue": stream_queue,
         }
-        result = _GRAPH.invoke(state)
-        messages = result.get("messages") or []
-        reply = str(result.get("reply") or "").strip()
-        if not reply:
-            for message in reversed(messages):
-                if message.get("role") == "assistant":
-                    reply = str(message.get("content") or "").strip()
-                    if reply:
-                        break
 
+        def _run_graph() -> None:
+            try:
+                _GRAPH.invoke(state)
+            finally:
+                stream_queue.put(None)
+
+        worker = threading.Thread(target=_run_graph, daemon=True)
+        worker.start()
+
+        chunks: list[str] = []
+        while True:
+            chunk = stream_queue.get()
+            if chunk is None:
+                break
+            chunks.append(chunk)
+            yield chunk
+
+        worker.join()
+
+        reply = "".join(chunks).strip()
         if reply:
-            yield from iter_sentences([reply])
             self.conversation.add_assistant(reply)
 
 
