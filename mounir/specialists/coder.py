@@ -11,29 +11,69 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from pathlib import Path
 
-import ollama
+import requests
 
-# Swap to "qwen2.5-coder:7b" once the download finishes
-CODER_MODEL: str = "gemma4:e4b"
+from .. import config
+from .. import trace
 
 MAX_TOOL_ROUNDS = 10
 MAX_READ_CHARS = 20000
 
 SYSTEM_PROMPT = """\
-You are an expert software engineer. You write clean, correct, production-quality code.
-You have tools to read, create, modify, delete, and search files directly — use them.
+You are an expert software engineer working as Mounir's dedicated coder agent.
+You write clean, correct, production-quality code. You have tools to read,
+create, modify, delete, and search files directly — use them.
 
-Rules:
-- Never output code in your final reply. Write it to files using your tools.
-- Use search_file to find the exact line before modifying — never guess.
-- Use modify_file for surgical edits (change a line, a word, a block).
-- Use create_file for new files — it fails if the file already exists.
-- When done, reply with a SHORT summary: what files you created/modified and what they do.
+WORKING RULES
+- Never output code in your reply. Write it to files using your tools.
+- create_file for new files (it fails if the file exists). modify_file for surgical
+  edits to an existing file (a line, a word, a block).
+- To edit: locate the spot with search_file first — it returns the matching line
+  WITH surrounding context and line numbers. Copy enough of that context into old_str
+  so it matches EXACTLY ONCE, then modify_file. Never guess at the text.
+- read_file shows line numbers and accepts start_line/end_line — read a NARROW range,
+  never the whole file just to look around. Use search_file to navigate.
+- TRUST your tools: create_file and modify_file report success in their result. Do NOT
+  re-read a file you just wrote to "double-check" it. Do not search for the same thing
+  twice. Do not read a file you just created.
+- The moment the file is written and correct, STOP and write the report. No extra
+  verification passes.
+- If the task is ambiguous, make a reasonable assumption and proceed; record it in the report.
 - No fluff, no "certainly!", get straight to work.
-- If the task is ambiguous, make reasonable assumptions and proceed.
+
+FINAL REPORT (MANDATORY)
+Your last message is read by the SUPERVISOR, not the user. It must let the
+supervisor understand exactly what happened without ever seeing the code.
+Always end with EXACTLY this structure and nothing after it:
+
+## Coder Report
+**Status:** done | partial | failed
+**Summary:** <one sentence on what was accomplished>
+
+**Files:**
+- `<absolute/path>` (created|modified|deleted) — <what it contains or what changed>
+- ... one line per file, list EVERY file you touched ...
+
+**Notes:** <assumptions made, anything left undone, how to run/verify — or "none">
+
+Report rules:
+- List every file you created, modified, or deleted. Never omit one. Always use absolute paths.
+- Each file line = full path, the action in parentheses, then a short plain-English description of the contents/change.
+- If you created and changed nothing, write "- none" under Files.
+- Keep it tight. No code blocks, no fluff.
+
+EXAMPLE REPORT
+## Coder Report
+**Status:** done
+**Summary:** Added a JSON benchmark script and a make target to run it.
+
+**Files:**
+- `/home/ahmed/bench.py` (created) — benchmarks orjson vs ujson vs json; run_bench() loops N times and prints an ops/sec table; runnable under __main__.
+- `/home/ahmed/mounir_assistant/jarvis-local-assistant/Makefile` (modified) — added a `bench` target that runs `python bench.py`.
+
+**Notes:** Assumed orjson is already installed. Run with `python /home/ahmed/bench.py` or `make bench`.
 """
 
 # ---------------------------------------------------------------------------
@@ -44,17 +84,28 @@ def _resolve(path: str) -> Path:
     return Path(path).expanduser().resolve()
 
 
-def read_file(path: str) -> str:
+def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
+    """Read a file (optionally a line range) with line numbers, like `cat -n`."""
     p = _resolve(path)
     if not p.is_file():
         return f"No such file: {p}"
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except Exception as exc:
         return f"Could not read {p}: {exc}"
-    if len(text) > MAX_READ_CHARS:
-        return text[:MAX_READ_CHARS] + f"\n… [truncated, {len(text)} chars total]"
-    return text or "(empty file)"
+    if not lines:
+        return "(empty file)"
+
+    total = len(lines)
+    start = max(1, start_line)
+    end = total if end_line is None else min(total, end_line)
+    if start > total:
+        return f"{p} has {total} lines; start_line {start} is past the end."
+
+    body = "\n".join(f"{start + i:>5}\t{line}" for i, line in enumerate(lines[start - 1:end]))
+    if len(body) > MAX_READ_CHARS:
+        body = body[:MAX_READ_CHARS] + "\n… [truncated — read a narrower line range]"
+    return f"{p} (lines {start}-{end} of {total}):\n{body}"
 
 
 def create_file(path: str, content: str) -> str:
@@ -106,8 +157,9 @@ def delete_file(path: str) -> str:
     return f"Deleted {p}."
 
 
-def search_file(path: str, pattern: str) -> str:
-    """Search for a regex pattern in a file. Returns matching lines with numbers."""
+def search_file(path: str, pattern: str, context: int = 2) -> str:
+    """Find a regex in a file. Returns each match with `context` lines around it,
+    numbered, so you can copy an exact, unique block straight into modify_file."""
     p = _resolve(path)
     if not p.is_file():
         return f"No such file: {p}"
@@ -119,14 +171,23 @@ def search_file(path: str, pattern: str) -> str:
     except Exception as exc:
         return f"Could not read {p}: {exc}"
 
-    matches = [
-        f"  line {i+1}: {line}"
-        for i, line in enumerate(lines)
-        if regex.search(line)
-    ]
-    if not matches:
+    hits = [i for i, line in enumerate(lines) if regex.search(line)]
+    if not hits:
         return f"No matches for '{pattern}' in {p}."
-    return f"Matches for '{pattern}' in {p}:\n" + "\n".join(matches)
+
+    blocks: list[str] = []
+    for idx in hits:
+        lo = max(0, idx - context)
+        hi = min(len(lines), idx + context + 1)
+        block = "\n".join(
+            f"{'>' if j == idx else ' '}{j + 1:>5}\t{lines[j]}" for j in range(lo, hi)
+        )
+        blocks.append(block)
+    out = f"Matches for '{pattern}' in {p} ({len(hits)} hit(s), '>' marks the match):\n"
+    out += "\n  --\n".join(blocks)
+    if len(out) > MAX_READ_CHARS:
+        out = out[:MAX_READ_CHARS] + "\n… [truncated]"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +199,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file. Use before modifying to understand the current state.",
+            "description": (
+                "Read a file with line numbers. Pass start_line/end_line to read only a "
+                "range — read a narrow slice, not the whole file. Use search_file to find "
+                "where to look first."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the file (~ allowed)."}
+                    "path": {"type": "string", "description": "Path to the file (~ allowed)."},
+                    "start_line": {"type": "integer", "description": "First line to read (1-based). Optional."},
+                    "end_line": {"type": "integer", "description": "Last line to read (inclusive). Optional; defaults to end of file."},
                 },
                 "required": ["path"],
             },
@@ -202,14 +269,16 @@ TOOLS = [
         "function": {
             "name": "search_file",
             "description": (
-                "Search for a regex pattern in a file. Returns matching lines with their line numbers. "
-                "Use this before modify_file to find the exact text to replace."
+                "Find a regex in a file. Returns each match WITH surrounding context lines "
+                "and line numbers ('>' marks the matched line). Use this to locate code and "
+                "copy an exact, unique block into modify_file — no full re-read needed."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file to search."},
                     "pattern": {"type": "string", "description": "Regex pattern to search for."},
+                    "context": {"type": "integer", "description": "Lines of context to show around each match (default 2)."},
                 },
                 "required": ["path", "pattern"],
             },
@@ -230,7 +299,6 @@ def _dispatch(name: str, arguments: dict) -> str:
     fn = _REGISTRY.get(name)
     if fn is None:
         return f"Unknown tool: {name}"
-    print(f"\n  [💻🔧 {name}: {arguments}]", file=sys.stderr, flush=True)
     try:
         return fn(**arguments)
     except TypeError as exc:
@@ -240,61 +308,82 @@ def _dispatch(name: str, arguments: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Model call (NVIDIA build.nvidia.com — OpenAI-compatible chat completions)
+# ---------------------------------------------------------------------------
+
+def _nvidia_chat(messages: list[dict]) -> dict:
+    """One non-streaming chat-completion call. Returns the assistant message dict."""
+    payload = {
+        "model": config.CODER_MODEL,
+        "messages": messages,
+        "tools": TOOLS,
+        "max_tokens": 8192,
+        "temperature": 0.2,
+        "top_p": 0.95,
+        "stream": False,
+        "chat_template_kwargs": {"thinking_mode": "disabled"},
+    }
+    headers = {
+        "Authorization": f"Bearer {config.NVIDIA_API_KEY}",
+        "Accept": "application/json",
+    }
+    resp = requests.post(
+        f"{config.NVIDIA_BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=180,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
 def run(task: str) -> str:
-    """Run the coder agent on a task. Returns a short status summary."""
+    """Run the coder agent on a task. Returns its structured status report."""
+    if not config.NVIDIA_API_KEY:
+        return "Coder failed: NVIDIA_API_KEY is not set."
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": task},
     ]
 
-    print(f"\n  [💻 coder starting...]\n", file=sys.stderr, flush=True)
-
     for round_num in range(MAX_TOOL_ROUNDS):
-        print(f"\n  [💻 coder thinking... round {round_num + 1}]", file=sys.stderr, flush=True)
-        # ollama tool calling (non-streaming for tool rounds — streaming +
-        # tool_calls don't mix cleanly in ollama's API yet)
         try:
-            response = ollama.chat(
-                model=CODER_MODEL,
-                messages=messages,
-                tools=TOOLS,
-                options={"num_ctx": 16384},
-                think=False,
-            )
+            message = _nvidia_chat(messages)
         except Exception as exc:
             return f"Coder failed: {exc}"
 
-        message = response.message
-        content = message.content or ""
-        tool_calls = message.tool_calls or []
-
-        # Stream the content to stderr so user sees progress
-        if content:
-            print(content, file=sys.stderr, flush=True)
+        content = message.get("content") or ""
+        tool_calls = message.get("tool_calls") or []
 
         if not tool_calls:
-            # No more tool calls — this is the final summary
-            print(f"\n  [💻 coder done after {round_num+1} round(s)]\n",
-                  file=sys.stderr, flush=True)
+            trace.event(f"{round_num + 1} round(s)")
             return content.strip() or "Done."
 
-        # Append assistant turn
-        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+        # Record the assistant turn (with its tool calls) verbatim.
+        messages.append(
+            {"role": "assistant", "content": content, "tool_calls": tool_calls}
+        )
 
-        # Execute tools and append results
+        # Execute each requested tool and feed the result back.
         for tc in tool_calls:
-            name = tc.function.name
+            name = tc["function"]["name"]
             try:
-                args = dict(tc.function.arguments) if tc.function.arguments else {}
+                args = json.loads(tc["function"].get("arguments") or "{}")
             except Exception:
                 args = {}
             result = _dispatch(name, args)
-            messages.append({
-                "role": "tool",
-                "content": result,
-            })
+            trace.tool(name, args, result)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", "call_0"),
+                    "content": result,
+                }
+            )
 
     return "Coder reached max tool rounds — task may be incomplete."

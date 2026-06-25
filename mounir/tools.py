@@ -495,13 +495,6 @@ SCHEMAS += [
     },
 ]
 
-# Supervisor-only tool list. The coder node keeps its own isolated tool set.
-SUPERVISOR_SCHEMAS = [
-    schema
-    for schema in SCHEMAS
-    if schema.get("function", {}).get("name") != "delegate_to_coder"
-]
-
 _REGISTRY = {
     "web_search": web_search,
     "fetch_url": fetch_url,

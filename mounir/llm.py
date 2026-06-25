@@ -6,6 +6,14 @@ from . import config
 class OllamaError(RuntimeError):
     pass
 
+def active_model(default: str) -> str:
+    """The model actually used, given the active provider (for display)."""
+    if config.USE_MISTRAL:
+        return config.MISTRAL_MODEL
+    if config.USE_GROQ:
+        return config.GROQ_MODEL
+    return default
+
 def is_up() -> bool:
     if config.USE_MISTRAL:
         return bool(config.MISTRAL_API_KEY)

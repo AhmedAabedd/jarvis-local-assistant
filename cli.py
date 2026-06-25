@@ -16,7 +16,7 @@ from __future__ import annotations
 import sys
 import time
 
-from mounir import config, llm
+from mounir import config, llm, trace
 from mounir.agent import Agent
 from mounir.memory import Conversation
 
@@ -31,8 +31,14 @@ def main() -> int:
         return 1
 
     agent = Agent()
-    print(f"Mounir online — model '{agent.model}', think={config.THINK}.")
-    print("Type a message, or /exit to quit.\n")
+    trace.banner("knuckles cracked. no cloud, no fluff. let's cook.")
+    trace.rule()
+    trace.kv("model", llm.active_model(agent.model))
+    trace.kv("coder", f"{config.CODER_MODEL}  ·  nvidia")
+    trace.kv("thinking", "on" if config.THINK else "off")
+    trace.kv("status", "online")
+    trace.rule()
+    print("  Type a message, or /exit to quit.\n")
 
     while True:
         try:
