@@ -151,4 +151,4 @@ NVIDIA_BASE_URL: str = os.environ.get(
     "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
 )
 CODER_MODEL: str = os.environ.get("CODER_MODEL", "minimaxai/minimax-m3")
-RESEARCHER_MODEL: str = os.environ.get("RESEARCHER_MODEL", "meta/llama-3.3-70b-instruct")
+RESEARCHER_MODEL: str = os.environ.get("RESEARCHER_MODEL", "nvidia/llama-3.3-nemotron-super-49b-v1.5")
