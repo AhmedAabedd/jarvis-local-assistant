@@ -34,6 +34,7 @@ from typing import Annotated, Iterator, TypedDict
 from . import config as cfg, llm, tools
 from .memory import Conversation
 from .specialists.coder import run as run_coder
+from .specialists.researcher import run as run_researcher
 from . import trace
 
 _langgraph_graph = import_module("langgraph.graph")
@@ -44,9 +45,15 @@ Command = import_module("langgraph.types").Command
 
 # Safety cap on tool rounds inside one supervisor invocation.
 MAX_TOOL_ROUNDS = 10
-# Safety cap on supervisor -> coder -> supervisor hand-offs per turn, so a model
-# that keeps re-delegating can't loop forever.
+# Safety cap on supervisor -> specialist -> supervisor hand-offs per turn, so a
+# model that keeps re-delegating can't loop forever.
 MAX_DELEGATIONS = 3
+
+# Delegation tools mapped to the node they hand off to.
+_DELEGATES = {
+    "delegate_to_coder": "coder",
+    "delegate_to_researcher": "researcher",
+}
 
 
 class TurnState(TypedDict):
@@ -62,18 +69,40 @@ def _count_delegations(messages: list[dict]) -> int:
     return sum(
         1
         for m in messages
-        if m.get("role") == "tool" and m.get("tool_name") == "delegate_to_coder"
+        if m.get("role") == "tool" and m.get("tool_name") in _DELEGATES
     )
 
 
-def _extract_delegate(messages: list[dict]) -> tuple[str, str]:
-    """Find the most recent delegate_to_coder call; return (task, call_id)."""
+def _collect_reports(messages: list[dict]) -> list[tuple[str, str]]:
+    """Pull (specialist, report) for each specialist hand-back this turn."""
+    return [
+        (_DELEGATES[m["tool_name"]], str(m.get("content") or ""))
+        for m in messages
+        if m.get("role") == "tool" and m.get("tool_name") in _DELEGATES
+    ]
+
+
+def _persisted_turn(reply: str, reports: list[tuple[str, str]]) -> str:
+    """The assistant text to store: the reply plus specialist reports as notes.
+
+    The reply is what the user saw; the notes are extra context the supervisor
+    keeps for follow-ups (so it doesn't re-run the specialist to recall sources).
+    """
+    parts = [reply] if reply else []
+    for name, report in reports:
+        if report:
+            parts.append(f"[{name} findings this turn — keep for follow-ups]\n{report}")
+    return "\n\n".join(parts).strip()
+
+
+def _extract_delegate(messages: list[dict], tool_name: str) -> tuple[str, str]:
+    """Find the most recent call to `tool_name`; return (task, call_id)."""
     for message in reversed(messages):
         if message.get("role") != "assistant" or not message.get("tool_calls"):
             continue
         for call in message["tool_calls"]:
             fn = call.get("function", {})
-            if fn.get("name") != "delegate_to_coder":
+            if fn.get("name") != tool_name:
                 continue
             args = fn.get("arguments")
             if isinstance(args, str):
@@ -94,9 +123,9 @@ def _supervisor(
     use_tools: bool,
 ) -> Command:
     schemas = list(tools.SCHEMAS) if use_tools else []
-    # Stop offering the coder once we've delegated enough this turn.
+    # Stop offering specialists once we've delegated enough this turn.
     if _count_delegations(state["messages"]) >= MAX_DELEGATIONS:
-        schemas = [s for s in schemas if s["function"]["name"] != "delegate_to_coder"]
+        schemas = [s for s in schemas if s["function"]["name"] not in _DELEGATES]
 
     trace.node("supervisor", f"{llm.active_model(model)} · {len(schemas)} tools")
 
@@ -119,12 +148,12 @@ def _supervisor(
             trace.event("replied")
             return Command(goto=END, update={"messages": new_messages})
 
-        # Hand off to the coder instead of running delegate_to_coder inline.
+        # Hand off to a specialist node instead of running the delegate inline.
         delegate = next(
-            (tc for tc in tool_calls if tc.function.name == "delegate_to_coder"), None
+            (tc for tc in tool_calls if tc.function.name in _DELEGATES), None
         )
         if delegate is not None:
-            task = dict(delegate.function.arguments).get("task", "")
+            target = _DELEGATES[delegate.function.name]
             new_messages.append(
                 {
                     "role": "assistant",
@@ -133,15 +162,15 @@ def _supervisor(
                         {
                             "id": "call_0",
                             "function": {
-                                "name": "delegate_to_coder",
+                                "name": delegate.function.name,
                                 "arguments": delegate.function.arguments,
                             },
                         }
                     ],
                 }
             )
-            trace.event("→ delegating to coder")
-            return Command(goto="coder", update={"messages": new_messages})
+            trace.event(f"→ delegating to {target}")
+            return Command(goto=target, update={"messages": new_messages})
 
         # Otherwise run the general tools inline and loop with their results.
         assistant_msg = {
@@ -184,7 +213,7 @@ def _supervisor(
 # --- coder node -------------------------------------------------------------
 
 def _coder(state: TurnState) -> Command:
-    task, call_id = _extract_delegate(state["messages"])
+    task, call_id = _extract_delegate(state["messages"], "delegate_to_coder")
     trace.node("coder")
     trace.block("received  ← supervisor", task)
 
@@ -208,6 +237,33 @@ def _coder(state: TurnState) -> Command:
     )
 
 
+# --- researcher node --------------------------------------------------------
+
+def _researcher(state: TurnState) -> Command:
+    task, call_id = _extract_delegate(state["messages"], "delegate_to_researcher")
+    trace.node("researcher")
+    trace.block("received  ← supervisor", task)
+
+    report = run_researcher(task).strip() if task else "No task was provided to the researcher."
+
+    trace.block("returned  → supervisor", report)
+    # Only the synthesized report (with sources) crosses back; the search/fetch
+    # chatter and raw page text stay inside this node.
+    return Command(
+        goto="supervisor",
+        update={
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_name": "delegate_to_researcher",
+                    "tool_call_id": call_id,
+                    "content": report,
+                }
+            ]
+        },
+    )
+
+
 # --- graph ------------------------------------------------------------------
 
 def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
@@ -215,8 +271,8 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
 
     The runtime values (stream queue, model, tool toggle) are captured by the
     node closures rather than threaded through state or config — simplest and
-    most robust with LangGraph's node-signature handling. supervisor and coder
-    route dynamically via Command(goto=...).
+    most robust with LangGraph's node-signature handling. The supervisor and the
+    specialist nodes route dynamically via Command(goto=...).
     """
     graph = StateGraph(TurnState)
     graph.add_node(
@@ -224,6 +280,7 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
         lambda state: _supervisor(state, stream_q, model, use_tools),
     )
     graph.add_node("coder", _coder)
+    graph.add_node("researcher", _researcher)
     graph.add_edge(START, "supervisor")
     return graph.compile()
 
@@ -247,10 +304,11 @@ class Agent:
         stream_q: queue.Queue[str | None] = queue.Queue()
         state: TurnState = {"messages": self.conversation.to_messages()}
         graph = _compile_graph(stream_q, self.model, self.use_tools)
+        result: dict = {}
 
         def _run_graph() -> None:
             try:
-                graph.invoke(state)
+                result["state"] = graph.invoke(state)
             except Exception as exc:  # surface failures to the stream
                 stream_q.put(f"\n[agent error: {exc}]")
             finally:
@@ -268,9 +326,15 @@ class Agent:
             yield chunk
         worker.join()
 
+        # Persist the reply plus any specialist reports from this turn, so the
+        # supervisor remembers their findings (and sources) on follow-ups. Only
+        # the compact reports are kept — never the raw page text / file contents,
+        # which stayed inside the specialist's own context. The conversation
+        # window trims this naturally, so it stays bounded.
         reply = "".join(chunks).strip()
-        if reply:
-            self.conversation.add_assistant(reply)
+        reports = _collect_reports((result.get("state") or {}).get("messages", []))
+        if reply or reports:
+            self.conversation.add_assistant(_persisted_turn(reply, reports))
 
 
 def build_graph():

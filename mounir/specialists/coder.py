@@ -13,9 +13,7 @@ import json
 import re
 from pathlib import Path
 
-import requests
-
-from .. import config
+from .. import config, llm
 from .. import trace
 
 MAX_TOOL_ROUNDS = 10
@@ -312,29 +310,10 @@ def _dispatch(name: str, arguments: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def _nvidia_chat(messages: list[dict]) -> dict:
-    """One non-streaming chat-completion call. Returns the assistant message dict."""
-    payload = {
-        "model": config.CODER_MODEL,
-        "messages": messages,
-        "tools": TOOLS,
-        "max_tokens": 8192,
-        "temperature": 0.2,
-        "top_p": 0.95,
-        "stream": False,
-        "chat_template_kwargs": {"thinking_mode": "disabled"},
-    }
-    headers = {
-        "Authorization": f"Bearer {config.NVIDIA_API_KEY}",
-        "Accept": "application/json",
-    }
-    resp = requests.post(
-        f"{config.NVIDIA_BASE_URL}/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=180,
+    """One non-streaming call to the coder's model. Returns the message dict."""
+    return llm.nvidia_chat(
+        messages, tools=TOOLS, model=config.CODER_MODEL, disable_thinking=True
     )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]
 
 
 # ---------------------------------------------------------------------------

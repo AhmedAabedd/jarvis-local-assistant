@@ -14,6 +14,40 @@ def active_model(default: str) -> str:
         return config.GROQ_MODEL
     return default
 
+def nvidia_chat(messages, tools=None, model=None, *, disable_thinking=False,
+                temperature=0.2, max_tokens=8192) -> dict:
+    """One non-streaming NVIDIA chat-completion (OpenAI-compatible).
+
+    Returns the assistant message dict ({content, tool_calls}). Used by the
+    coder and researcher specialists, each with their own model.
+    """
+    import requests
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": 0.95,
+        "stream": False,
+    }
+    if tools:
+        payload["tools"] = tools
+    if disable_thinking:  # only for reasoning models (e.g. minimax)
+        payload["chat_template_kwargs"] = {"thinking_mode": "disabled"}
+    headers = {
+        "Authorization": f"Bearer {config.NVIDIA_API_KEY}",
+        "Accept": "application/json",
+    }
+    resp = requests.post(
+        f"{config.NVIDIA_BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=180,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]
+
 def is_up() -> bool:
     if config.USE_MISTRAL:
         return bool(config.MISTRAL_API_KEY)

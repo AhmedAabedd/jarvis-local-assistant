@@ -15,101 +15,26 @@ from pathlib import Path
 
 from . import config
 
-WEB_SEARCH_MAX_RESULTS = 5
-
-# Specialist agents (lazy imports — only load ollama when actually called)
+# Specialist agents (lazy imports — only load the specialist when actually
+# called). These are reached via handoff in the graph; the registry entries are
+# fallbacks and aren't normally dispatched.
 def delegate_to_coder(task: str, context: str = "") -> str:
     """Ask the coder agent to write or fix code for a given task."""
     from .specialists.coder import run
-    print(f"  [💻 coder delegated]", file=sys.stderr, flush=True)
     return run(task)
 
 
-# How far back to restrict results, mapped to what ddgs/DuckDuckGo accepts.
-_RECENCY = {"day": "d", "week": "w", "month": "m", "year": "y"}
-# fetch_url: network timeout, how much page text to keep, and a real browser
-# User-Agent (many sites reject the default python one).
-FETCH_TIMEOUT = 15
-FETCH_URL_MAX_CHARS = 6000
-_FETCH_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
+def delegate_to_researcher(task: str) -> str:
+    """Ask the researcher agent to look something up on the web."""
+    from .specialists.researcher import run
+    return run(task)
+
+
 # Cap how much of a file we read back so a huge file can't blow up the context.
 MAX_READ_CHARS = 20000
 # run_command: kill a hung command, and cap its output so it can't flood context.
 RUN_COMMAND_TIMEOUT = 30
 RUN_COMMAND_MAX_OUTPUT = 4000
-
-
-def web_search(
-    query: str, max_results: int = WEB_SEARCH_MAX_RESULTS, recency: str = ""
-) -> str:
-    """Search the web (DuckDuckGo) and return ranked title/snippet/URL results.
-
-    `recency` limits how old results may be: "day", "week", "month", or "year"
-    (empty = no limit). Use it for current events so stale pages don't win.
-    """
-    timelimit = _RECENCY.get(recency.strip().lower()) if recency else None
-    try:
-        from ddgs import DDGS
-
-        with DDGS() as ddgs:
-            results = list(
-                ddgs.text(query, max_results=max_results, timelimit=timelimit)
-            )
-    except ImportError:
-        return "Web search unavailable: the 'ddgs' package isn't installed."
-    except Exception as exc:
-        return f"Web search failed: {exc}"
-
-    if not results:
-        return f"No results found for '{query}'."
-
-    lines = [f"Search results for '{query}':"]
-    for i, r in enumerate(results, 1):
-        title = r.get("title", "").strip()
-        body = r.get("body", "").strip()
-        href = r.get("href", "").strip()
-        lines.append(f"{i}. {title}\n   {body}\n   ({href})")
-    lines.append("\nTo read any result in full, call fetch_url with its URL.")
-    return "\n".join(lines)
-
-
-def fetch_url(url: str) -> str:
-    """Download a web page (or any URL) and return its readable text, no HTML."""
-    url = (url or "").strip()
-    if not url:
-        return "No URL given."
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-    except ImportError:
-        return "Page fetch unavailable: install 'requests' and 'beautifulsoup4'."
-    try:
-        resp = requests.get(
-            url, timeout=FETCH_TIMEOUT, headers={"User-Agent": _FETCH_UA}
-        )
-        resp.raise_for_status()
-    except Exception as exc:
-        return f"Could not fetch {url}: {exc}"
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    # Drop boilerplate so the model reads content, not menus and scripts.
-    for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside"]):
-        tag.decompose()
-    text = " ".join(soup.get_text(separator=" ").split())
-    if not text:
-        return f"Fetched {url} but found no readable text."
-
-    title = soup.title.string.strip() if soup.title and soup.title.string else ""
-    head = f"{title}\n{url}\n\n" if title else f"{url}\n\n"
-    body = text[:FETCH_URL_MAX_CHARS]
-    if len(text) > FETCH_URL_MAX_CHARS:
-        body += " … [truncated]"
-    return head + body
 
 
 def _resolve(path: str) -> Path:
@@ -284,57 +209,6 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "web_search",
-            "description": (
-                "Search the web for current events, recent facts, prices, "
-                "documentation, or anything that may have changed since training "
-                "or that you're unsure about. Returns top results with titles, "
-                "snippets, and URLs."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "A concise search-engine-style query.",
-                    },
-                    "recency": {
-                        "type": "string",
-                        "enum": ["day", "week", "month", "year"],
-                        "description": (
-                            "Optional. Limit results to the last day/week/month/"
-                            "year. Use it for current events; omit otherwise."
-                        ),
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_url",
-            "description": (
-                "Download a web page and return its readable text. Use it to read "
-                "a search result in full instead of relying on the short snippet, "
-                "or to read any URL the user gives you."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The full URL of the page to read.",
-                    }
-                },
-                "required": ["url"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "read_file",
             "description": (
                 "Read the contents of a text file on the local machine. Use "
@@ -493,11 +367,33 @@ SCHEMAS += [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_to_researcher",
+            "description": (
+                "Delegate ANY web lookup to the researcher agent: current events, "
+                "facts that may have changed, prices, documentation, product or "
+                "tech comparisons — anything you'd need the internet for. The "
+                "researcher searches, reads pages, cross-checks, and returns a "
+                "concise report WITH sources. You have no web tools yourself, so "
+                "always delegate lookups here. State exactly what you need to know."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The research question or topic, with any specifics (timeframe, what to compare, what detail you need).",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
 ]
 
 _REGISTRY = {
-    "web_search": web_search,
-    "fetch_url": fetch_url,
     "read_file": read_file,
     "write_file": write_file,
     "list_directory": list_directory,
@@ -505,6 +401,7 @@ _REGISTRY = {
     "run_command": run_command,
     "send_email": send_email,
     "delegate_to_coder": delegate_to_coder,
+    "delegate_to_researcher": delegate_to_researcher,
 }
 
 
