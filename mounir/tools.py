@@ -137,6 +137,49 @@ def open_browser(url: str = "") -> str:
     return f"Opening {url} in the browser." if url else "Opening the browser."
 
 
+def open_path(target: str) -> str:
+    """Open a file, folder, or URL with the system default app (via xdg-open).
+
+    Opens `target` the way double-clicking it would: a PDF in the PDF viewer, an
+    image in the image viewer, a folder in the file manager, a URL in the
+    browser. Launched detached so it never blocks.
+    """
+    target = (target or "").strip()
+    if not target:
+        return "Nothing to open — give a file, folder, or URL."
+
+    opener = shutil.which("xdg-open")
+    if opener is None:
+        return "Can't open it: xdg-open isn't available (install the xdg-utils package)."
+
+    # Expand ~ for local paths; a bare domain like "youtube.com" gets an
+    # https:// scheme so xdg-open treats it as a URL, not a filename.
+    if not target.startswith(("http://", "https://", "mailto:", "file://")):
+        looks_like_path = target.startswith(("/", "~", ".")) or "/" in target
+        p = _resolve(target)
+        if p.exists():
+            target = str(p)
+        elif looks_like_path:
+            return f"No such file or directory: {p}"
+        elif "." in target and " " not in target:
+            target = "https://" + target  # a bare domain like "youtube.com"
+
+    try:
+        code = subprocess.Popen(
+            [opener, target],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,  # detach the opened app so it survives this turn
+        ).wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return f"Opening {target}."
+    except Exception as exc:
+        return f"Could not open {target}: {exc}"
+
+    return f"Opening {target}." if code == 0 else f"Could not open {target}."
+
+
 def run_command(command: str) -> str:
     """Run a shell command on the local machine, but only after the user confirms."""
     command = (command or "").strip()
@@ -171,8 +214,11 @@ def run_command(command: str) -> str:
     return result
 
 
-def send_email(to: str, subject: str, body: str) -> str:
-    """Send an email from the user's account, but only after the user confirms."""
+def send_email(to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
+    """Send an email from the user's account, but only after the user confirms.
+
+    attachments: optional list of file paths to attach (PDF, image, …).
+    """
     to = (to or "").strip()
     if not to:
         return "No recipient given."
@@ -182,11 +228,22 @@ def send_email(to: str, subject: str, body: str) -> str:
             "environment variables (a Gmail App Password) aren't configured."
         )
 
+    # Resolve attachments up front so we fail before sending, not after.
+    files = []
+    for raw in attachments or []:
+        p = _resolve(raw)
+        if not p.is_file():
+            return f"Attachment not found: {p}"
+        files.append(p)
+
     preview = f"To: {to}\nSubject: {subject}\n\n{body}"
+    if files:
+        preview += "\n\n[Attachments: " + ", ".join(p.name for p in files) + "]"
     if not confirm_fn(f"send this email?\n{preview}"):
         return "Email cancelled by the user — not sent."
 
     import smtplib
+    import mimetypes
     from email.message import EmailMessage
 
     msg = EmailMessage()
@@ -194,6 +251,13 @@ def send_email(to: str, subject: str, body: str) -> str:
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(body)
+    for p in files:
+        ctype, _ = mimetypes.guess_type(p.name)
+        maintype, subtype = ctype.split("/", 1) if ctype else ("application", "octet-stream")
+        try:
+            msg.add_attachment(p.read_bytes(), maintype=maintype, subtype=subtype, filename=p.name)
+        except Exception as exc:
+            return f"Could not attach {p}: {exc}"
     try:
         with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
             server.starttls()
@@ -201,6 +265,8 @@ def send_email(to: str, subject: str, body: str) -> str:
             server.send_message(msg)
     except Exception as exc:
         return f"Failed to send email: {exc}"
+    if files:
+        return f"Email sent to {to} with {len(files)} attachment(s)."
     return f"Email sent to {to}."
 
 
@@ -293,6 +359,29 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "open_path",
+            "description": (
+                "Open a file, folder, or URL with the system's DEFAULT app, the "
+                "way double-clicking it would (PDF viewer, image viewer, file "
+                "manager, browser…). Use this to open a document, picture, or "
+                "directory the user names — e.g. 'open my CV', 'open the "
+                "Downloads folder'. For plain web pages prefer open_browser."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "A file path, folder path (~ allowed), or URL to open.",
+                    }
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": (
                 "Run a shell command on the local machine and return its exit code "
@@ -335,6 +424,11 @@ SCHEMAS = [
                     "body": {
                         "type": "string",
                         "description": "The full message body.",
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of file paths to attach (PDF, image, etc.). Omit if none.",
                     },
                 },
                 "required": ["to", "subject", "body"],
@@ -398,6 +492,7 @@ _REGISTRY = {
     "write_file": write_file,
     "list_directory": list_directory,
     "open_browser": open_browser,
+    "open_path": open_path,
     "run_command": run_command,
     "send_email": send_email,
     "delegate_to_coder": delegate_to_coder,
