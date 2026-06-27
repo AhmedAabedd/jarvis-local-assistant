@@ -420,8 +420,7 @@ SCHEMAS = [
                 "Surgically change part of an EXISTING text file — a line, a word, "
                 "a block — without rewriting the whole file. Read the file first to "
                 "copy the exact text into old_str (it must match exactly and be "
-                "unique unless replace_all is set). Use this for non-code text "
-                "files; for code, delegate to the coder instead."
+                "unique unless replace_all is set)."
             ),
             "parameters": {
                 "type": "object",
