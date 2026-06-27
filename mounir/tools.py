@@ -32,9 +32,11 @@ def delegate_to_researcher(task: str) -> str:
 
 # Cap how much of a file we read back so a huge file can't blow up the context.
 MAX_READ_CHARS = 20000
-# run_command: kill a hung command, and cap its output so it can't flood context.
-RUN_COMMAND_TIMEOUT = 30
-RUN_COMMAND_MAX_OUTPUT = 4000
+# bash: default timeout (s) to kill a hung command, a hard ceiling the model
+# can't exceed, and an output cap so a chatty command can't flood the context.
+BASH_DEFAULT_TIMEOUT = 30
+BASH_MAX_TIMEOUT = 600
+BASH_MAX_OUTPUT = 4000
 
 
 def _resolve(path: str) -> Path:
@@ -180,13 +182,38 @@ def open_path(target: str) -> str:
     return f"Opening {target}." if code == 0 else f"Could not open {target}."
 
 
-def run_command(command: str) -> str:
-    """Run a shell command on the local machine, but only after the user confirms."""
+def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: bool = False) -> str:
+    """Run a shell command on the local machine, but only after the user confirms.
+
+    timeout: seconds before a foreground command is killed (clamped to BASH_MAX_TIMEOUT).
+    run_in_background: launch the command detached and return immediately, without
+    waiting for output — use it for long-running things (a server, a watcher).
+    """
     command = (command or "").strip()
     if not command:
         return "No command given."
     if not confirm_fn(command):
         return "Command cancelled by the user — not run."
+
+    if run_in_background:
+        try:
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,  # detach so it survives this turn
+            )
+        except Exception as exc:
+            return f"Command failed to start: {exc}"
+        return f"Started in the background (PID {proc.pid}): {command}"
+
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        timeout = BASH_DEFAULT_TIMEOUT
+    timeout = max(1, min(timeout, BASH_MAX_TIMEOUT))
 
     try:
         proc = subprocess.run(
@@ -194,10 +221,10 @@ def run_command(command: str) -> str:
             shell=True,
             capture_output=True,
             text=True,
-            timeout=RUN_COMMAND_TIMEOUT,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return f"Command timed out after {RUN_COMMAND_TIMEOUT}s and was killed."
+        return f"Command timed out after {timeout}s and was killed."
     except Exception as exc:
         return f"Command failed to start: {exc}"
 
@@ -209,8 +236,8 @@ def run_command(command: str) -> str:
     if err:
         parts.append(f"stderr:\n{err}")
     result = "\n".join(parts)
-    if len(result) > RUN_COMMAND_MAX_OUTPUT:
-        result = result[:RUN_COMMAND_MAX_OUTPUT] + "\n… [output truncated]"
+    if len(result) > BASH_MAX_OUTPUT:
+        result = result[:BASH_MAX_OUTPUT] + "\n… [output truncated]"
     return result
 
 
@@ -382,12 +409,11 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "run_command",
+            "name": "bash",
             "description": (
-                "Run a shell command on the local machine and return its exit code "
-                "and output. Use it to DO things — move or rename files, manage "
-                "processes, check disk, run scripts. The user confirms before it "
-                "runs. Does not open the browser; use open_browser for that."
+                "Run a shell command on the local machine and return its exit code and output."
+                "Set run_in_background for long-running commands (a server, a "
+                "watcher): they launch detached and return immediately without output."
             ),
             "parameters": {
                 "type": "object",
@@ -395,7 +421,15 @@ SCHEMAS = [
                     "command": {
                         "type": "string",
                         "description": "The exact shell command to run.",
-                    }
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Seconds before a foreground command is killed (default 30, max 600).",
+                    },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "Launch detached and return immediately without waiting for output. Use for long-running commands.",
+                    },
                 },
                 "required": ["command"],
             },
@@ -493,7 +527,7 @@ _REGISTRY = {
     "list_directory": list_directory,
     "open_browser": open_browser,
     "open_path": open_path,
-    "run_command": run_command,
+    "bash": bash,
     "send_email": send_email,
     "delegate_to_coder": delegate_to_coder,
     "delegate_to_researcher": delegate_to_researcher,

@@ -46,7 +46,7 @@ class Conversation:
 
     def to_messages(self) -> list[dict]:
         """Build the message list sent to Ollama: system prompt + OS context + window."""
-        window = self._messages[-self.max_messages :]
+        window = _ensure_tool_call_pairs(self._messages[-self.max_messages :])
         base = []
         if self.system_prompt:
             base.append({"role": "system", "content": self.system_prompt})
@@ -81,6 +81,48 @@ class Conversation:
         if data.get("system_prompt"):
             self.system_prompt = data["system_prompt"]
         return True
+
+
+def _ensure_tool_call_pairs(window: list[dict]) -> list[dict]:
+    """Keep every tool result paired with the assistant turn that called it.
+
+    The history now stores the full turn — assistant tool-call messages and their
+    tool results. Trimming to the window can drop the assistant message while
+    keeping its result, leaving an orphan the chat API rejects ("tool result with
+    no preceding tool call"). For each orphan (most often a delegated specialist's
+    report whose delegate call got trimmed), synthesize the missing assistant
+    chat-completion that 'called' the tool, so the pair is whole again.
+    """
+    declared: set[str] = set()
+    out: list[dict] = []
+    for m in window:
+        role = m.get("role")
+        if role == "assistant":
+            for tc in m.get("tool_calls") or []:
+                if tc.get("id"):
+                    declared.add(tc["id"])
+            out.append(m)
+        elif role == "tool":
+            tid = m.get("tool_call_id", "call_0")
+            if tid not in declared:
+                out.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": tid,
+                            "function": {
+                                "name": m.get("tool_name", "tool"),
+                                "arguments": {},
+                            },
+                        }
+                    ],
+                })
+                declared.add(tid)
+            out.append(m)
+        else:
+            out.append(m)
+    return out
 
 
 def _default_path() -> Path:

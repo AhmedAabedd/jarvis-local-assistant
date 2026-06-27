@@ -73,28 +73,6 @@ def _count_delegations(messages: list[dict]) -> int:
     )
 
 
-def _collect_reports(messages: list[dict]) -> list[tuple[str, str]]:
-    """Pull (specialist, report) for each specialist hand-back this turn."""
-    return [
-        (_DELEGATES[m["tool_name"]], str(m.get("content") or ""))
-        for m in messages
-        if m.get("role") == "tool" and m.get("tool_name") in _DELEGATES
-    ]
-
-
-def _persisted_turn(reply: str, reports: list[tuple[str, str]]) -> str:
-    """The assistant text to store: the reply plus specialist reports as notes.
-
-    The reply is what the user saw; the notes are extra context the supervisor
-    keeps for follow-ups (so it doesn't re-run the specialist to recall sources).
-    """
-    parts = [reply] if reply else []
-    for name, report in reports:
-        if report:
-            parts.append(f"[{name} findings this turn — keep for follow-ups]\n{report}")
-    return "\n\n".join(parts).strip()
-
-
 def _extract_delegate(messages: list[dict], tool_name: str) -> tuple[str, str]:
     """Find the most recent call to `tool_name`; return (task, call_id)."""
     for message in reversed(messages):
@@ -303,6 +281,7 @@ class Agent:
         self.conversation.add_user(user_input)
         stream_q: queue.Queue[str | None] = queue.Queue()
         state: TurnState = {"messages": self.conversation.to_messages()}
+        input_len = len(state["messages"])  # everything after this is new this turn
         graph = _compile_graph(stream_q, self.model, self.use_tools)
         result: dict = {}
 
@@ -326,15 +305,20 @@ class Agent:
             yield chunk
         worker.join()
 
-        # Persist the reply plus any specialist reports from this turn, so the
-        # supervisor remembers their findings (and sources) on follow-ups. Only
-        # the compact reports are kept — never the raw page text / file contents,
-        # which stayed inside the specialist's own context. The conversation
-        # window trims this naturally, so it stays bounded.
-        reply = "".join(chunks).strip()
-        reports = _collect_reports((result.get("state") or {}).get("messages", []))
-        if reply or reports:
-            self.conversation.add_assistant(_persisted_turn(reply, reports))
+        # Persist the FULL turn — every assistant tool-call and tool result this
+        # turn produced, not just the final reply — so the next turn replays the
+        # real history and the supervisor keeps the paths/values/sources it found.
+        # Specialist internals (file/web chatter) never entered `messages`, so only
+        # their compact reports cross over. to_messages() trims this to the window
+        # and re-pairs any tool result whose call got trimmed off.
+        produced = (result.get("state") or {}).get("messages", [])[input_len:]
+        if produced:
+            for message in produced:
+                self.conversation.add_message(message)
+        else:  # graph errored before returning state — at least keep the reply
+            reply = "".join(chunks).strip()
+            if reply:
+                self.conversation.add_assistant(reply)
 
 
 def build_graph():
