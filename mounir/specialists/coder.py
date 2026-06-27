@@ -17,7 +17,15 @@ from .. import config, llm
 from .. import trace
 
 MAX_TOOL_ROUNDS = 10
-MAX_READ_CHARS = 20000
+# The coder runs on a capable cloud model (large context) doing real code work,
+# so it can read meatier chunks than the supervisor. It still pages with
+# start_line and navigates with search_file instead of reading whole files.
+MAX_READ_LINES = 1200   # lines per read when no range is given
+MAX_READ_CHARS = 24000  # hard char ceiling per read
+
+# Files seen this task (via read_file / search_file). modify_file refuses to edit
+# a file that wasn't looked at first. Cleared at the start of every run().
+_files_read: set[str] = set()
 
 SYSTEM_PROMPT = """\
 You are an expert software engineer working as Mounir's dedicated coder agent.
@@ -83,7 +91,11 @@ def _resolve(path: str) -> Path:
 
 
 def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
-    """Read a file (optionally a line range) with line numbers, like `cat -n`."""
+    """Read a file (optionally a line range) with line numbers, like `cat -n`.
+
+    Reads up to MAX_READ_LINES lines from start_line by default; page further or
+    read a narrow slice with start_line/end_line.
+    """
     p = _resolve(path)
     if not p.is_file():
         return f"No such file: {p}"
@@ -92,18 +104,21 @@ def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> st
     except Exception as exc:
         return f"Could not read {p}: {exc}"
     if not lines:
+        _files_read.add(str(p))
         return "(empty file)"
 
     total = len(lines)
     start = max(1, start_line)
-    end = total if end_line is None else min(total, end_line)
     if start > total:
         return f"{p} has {total} lines; start_line {start} is past the end."
+    end = min(total, start + MAX_READ_LINES - 1) if end_line is None else min(total, end_line)
 
     body = "\n".join(f"{start + i:>5}\t{line}" for i, line in enumerate(lines[start - 1:end]))
     if len(body) > MAX_READ_CHARS:
         body = body[:MAX_READ_CHARS] + "\n… [truncated — read a narrower line range]"
-    return f"{p} (lines {start}-{end} of {total}):\n{body}"
+    more = f"\n… {total - end} more line(s) below — read again with start_line={end + 1}." if end < total else ""
+    _files_read.add(str(p))
+    return f"{p} (lines {start}-{end} of {total}):\n{body}{more}"
 
 
 def create_file(path: str, content: str) -> str:
@@ -115,14 +130,17 @@ def create_file(path: str, content: str) -> str:
         p.write_text(content, encoding="utf-8")
     except Exception as exc:
         return f"Could not create {p}: {exc}"
+    _files_read.add(str(p))  # just created it — counts as "seen" for modify_file
     return f"Created {p} ({len(content)} chars)."
 
 
-def modify_file(path: str, old_str: str, new_str: str) -> str:
-    """Surgical find-and-replace. old_str must match exactly once."""
+def modify_file(path: str, old_str: str, new_str: str, replace_all: bool = False) -> str:
+    """Surgical find-and-replace. old_str must match exactly once, unless replace_all."""
     p = _resolve(path)
     if not p.is_file():
         return f"No such file: {p}"
+    if str(p) not in _files_read:
+        return f"Look at {p} first with search_file or read_file before modifying it."
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
@@ -131,15 +149,15 @@ def modify_file(path: str, old_str: str, new_str: str) -> str:
     count = text.count(old_str)
     if count == 0:
         return f"String not found in {p}. Use search_file to find the exact text."
-    if count > 1:
-        return f"Found {count} occurrences of that string in {p} — too ambiguous. Make old_str more specific."
+    if count > 1 and not replace_all:
+        return f"Found {count} occurrences of that string in {p} — too ambiguous. Make old_str more specific, or set replace_all to change all."
 
-    new_text = text.replace(old_str, new_str, 1)
+    new_text = text.replace(old_str, new_str) if replace_all else text.replace(old_str, new_str, 1)
     try:
         p.write_text(new_text, encoding="utf-8")
     except Exception as exc:
         return f"Could not write {p}: {exc}"
-    return f"Modified {p} — replaced 1 occurrence."
+    return f"Modified {p} — replaced {count if replace_all else 1} occurrence(s)."
 
 
 def delete_file(path: str) -> str:
@@ -172,6 +190,7 @@ def search_file(path: str, pattern: str, context: int = 2) -> str:
     hits = [i for i, line in enumerate(lines) if regex.search(line)]
     if not hits:
         return f"No matches for '{pattern}' in {p}."
+    _files_read.add(str(p))  # saw the file's content — counts as "seen" for modify_file
 
     blocks: list[str] = []
     for idx in hits:
@@ -235,14 +254,16 @@ TOOLS = [
             "description": (
                 "Surgically edit a file by replacing an exact string with a new one. "
                 "old_str must match exactly once in the file — use search_file first if unsure. "
-                "Use this for changing a line, a word, or a block without rewriting the whole file."
+                "Use this for changing a line, a word, or a block without rewriting the whole file. "
+                "Set replace_all to change every occurrence (e.g. renaming a symbol)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file."},
-                    "old_str": {"type": "string", "description": "The exact string to find and replace (must be unique in the file)."},
+                    "old_str": {"type": "string", "description": "The exact string to find and replace (must be unique unless replace_all is set)."},
                     "new_str": {"type": "string", "description": "The string to replace it with."},
+                    "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique match. Defaults to false."},
                 },
                 "required": ["path", "old_str", "new_str"],
             },
@@ -322,6 +343,7 @@ def _nvidia_chat(messages: list[dict]) -> dict:
 
 def run(task: str) -> str:
     """Run the coder agent on a task. Returns its structured status report."""
+    _files_read.clear()  # fresh task — must look at a file before modifying it
     if not config.NVIDIA_API_KEY:
         return "Coder failed: NVIDIA_API_KEY is not set."
 

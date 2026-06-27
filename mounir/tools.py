@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 from . import config
@@ -30,8 +29,16 @@ def delegate_to_researcher(task: str) -> str:
     return run(task)
 
 
-# Cap how much of a file we read back so a huge file can't blow up the context.
-MAX_READ_CHARS = 20000
+# The supervisor runs on a small, local model with a modest context window, and
+# reads files only incidentally (a note, a config, a path the user mentions) —
+# heavy code reading is the coder's job. So keep a read to a quick glance the
+# model can actually digest; it pages for more with start_line.
+MAX_READ_LINES = 300    # lines per read when no range is given
+MAX_READ_CHARS = 12000  # hard char ceiling so one read can't flood the context
+
+# Files the model has read this process. edit_file refuses to touch a file that
+# wasn't read first, so it never blind-edits text it hasn't actually seen.
+_files_read: set[str] = set()
 # bash: default timeout (s) to kill a hung command, a hard ceiling the model
 # can't exceed, and an output cap so a chatty command can't flood the context.
 BASH_DEFAULT_TIMEOUT = 30
@@ -44,18 +51,37 @@ def _resolve(path: str) -> Path:
     return Path(path).expanduser()
 
 
-def read_file(path: str) -> str:
-    """Read a UTF-8 text file and return its contents (truncated if very large)."""
+def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
+    """Read a text file with line numbers (like `cat -n`), optionally a line range.
+
+    Line numbers let you copy an exact block straight into edit_file. Reads up to
+    MAX_READ_LINES lines from start_line by default; pass start_line/end_line to
+    page through or read a narrow slice of a large file.
+    """
     p = _resolve(path)
     try:
         if not p.is_file():
             return f"No such file: {p}"
-        text = p.read_text(encoding="utf-8", errors="replace")
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except Exception as exc:
         return f"Could not read {p}: {exc}"
-    if len(text) > MAX_READ_CHARS:
-        return text[:MAX_READ_CHARS] + f"\n… [truncated, {len(text)} chars total]"
-    return text or "(file is empty)"
+    if not lines:
+        _files_read.add(str(p))
+        return "(file is empty)"
+
+    total = len(lines)
+    start = max(1, start_line)
+    if start > total:
+        return f"{p} has {total} lines; start_line {start} is past the end."
+    # Default to a page of MAX_READ_LINES rather than the whole file.
+    end = min(total, start + MAX_READ_LINES - 1) if end_line is None else min(total, end_line)
+
+    body = "\n".join(f"{start + i:>5}\t{line}" for i, line in enumerate(lines[start - 1:end]))
+    if len(body) > MAX_READ_CHARS:
+        body = body[:MAX_READ_CHARS] + "\n… [truncated — read a narrower line range]"
+    more = f"\n… {total - end} more line(s) below — read again with start_line={end + 1}." if end < total else ""
+    _files_read.add(str(p))
+    return f"{p} (lines {start}-{end} of {total}):\n{body}{more}"
 
 
 def write_file(path: str, content: str) -> str:
@@ -66,7 +92,41 @@ def write_file(path: str, content: str) -> str:
         p.write_text(content, encoding="utf-8")
     except Exception as exc:
         return f"Could not write {p}: {exc}"
+    _files_read.add(str(p))  # we just wrote it, so it counts as "seen" for edit_file
     return f"Wrote {len(content)} characters to {p}."
+
+
+def edit_file(path: str, old_str: str, new_str: str, replace_all: bool = False) -> str:
+    """Surgically replace exact text in a file, without rewriting the whole thing.
+
+    old_str must match EXACTLY (whitespace included). It must be unique unless
+    replace_all is set. Read the file first to copy the exact text.
+    """
+    p = _resolve(path)
+    if not p.is_file():
+        return f"No such file: {p}"
+    if str(p) not in _files_read:
+        return f"Read {p} with read_file before editing it, so you edit its real current text."
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"Could not read {p}: {exc}"
+
+    count = text.count(old_str)
+    if count == 0:
+        return f"Text not found in {p}. Read the file to copy the exact text."
+    if count > 1 and not replace_all:
+        return (
+            f"Found {count} matches in {p} — too ambiguous. Make old_str more "
+            f"specific (add surrounding lines), or set replace_all to change all."
+        )
+
+    new_text = text.replace(old_str, new_str) if replace_all else text.replace(old_str, new_str, 1)
+    try:
+        p.write_text(new_text, encoding="utf-8")
+    except Exception as exc:
+        return f"Could not write {p}: {exc}"
+    return f"Edited {p} — replaced {count if replace_all else 1} occurrence(s)."
 
 
 def list_directory(path: str = ".") -> str:
@@ -304,8 +364,9 @@ SCHEMAS = [
         "function": {
             "name": "read_file",
             "description": (
-                "Read the contents of a text file on the local machine. Use "
-                "this to look at a file the user mentions before answering."
+                "Read a text file on the local machine, shown with line numbers. "
+                "Use it to look at a file before answering or before editing it. "
+                "Pass start_line/end_line to read just a range of a large file."
             ),
             "parameters": {
                 "type": "object",
@@ -313,7 +374,15 @@ SCHEMAS = [
                     "path": {
                         "type": "string",
                         "description": "Path to the file (~ for the home folder is fine).",
-                    }
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "First line to read (1-based). Optional; defaults to the start.",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Last line to read (inclusive). Optional; defaults to the end of the file.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -340,6 +409,41 @@ SCHEMAS = [
                     },
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Surgically change part of an EXISTING text file — a line, a word, "
+                "a block — without rewriting the whole file. Read the file first to "
+                "copy the exact text into old_str (it must match exactly and be "
+                "unique unless replace_all is set). Use this for non-code text "
+                "files; for code, delegate to the coder instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to edit.",
+                    },
+                    "old_str": {
+                        "type": "string",
+                        "description": "The exact text to find and replace (must be unique in the file unless replace_all is true).",
+                    },
+                    "new_str": {
+                        "type": "string",
+                        "description": "The text to replace it with.",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every occurrence instead of requiring a unique match. Defaults to false.",
+                    },
+                },
+                "required": ["path", "old_str", "new_str"],
             },
         },
     },
@@ -524,6 +628,7 @@ SCHEMAS += [
 _REGISTRY = {
     "read_file": read_file,
     "write_file": write_file,
+    "edit_file": edit_file,
     "list_directory": list_directory,
     "open_browser": open_browser,
     "open_path": open_path,
@@ -539,8 +644,6 @@ def dispatch(name: str, arguments: dict) -> str:
     fn = _REGISTRY.get(name)
     if fn is None:
         return f"Unknown tool: {name}"
-    # Printed (not yielded) so it shows on screen but is never spoken by TTS.
-    print(f"  [🔧 {name}: {arguments}]", file=sys.stderr, flush=True)
     try:
         return fn(**arguments)
     except TypeError as exc:

@@ -57,8 +57,10 @@ SYSTEM_PROMPT: str = (
     "changed, prices, docs, comparisons — you MUST call delegate_to_researcher. "
     "It returns a synthesized answer with sources; pass the sources along when "                             
     "they matter. Never answer a lookup from memory if it could be stale.\n"
-    "4. write_file is only for simple, non-code text (a quick note or plain-text "
-    "file). Never use it to create or edit code.\n"
+    "4. write_file and edit_file are only for simple, non-code text (a note, a "
+    "plain-text or config file): write_file creates or overwrites a whole file, "
+    "edit_file makes a surgical change to an existing one. Never use either to "
+    "create or edit code — that always goes to delegate_to_coder.\n"
     "5. When you don't know something, say so straight instead of making it up."
 )
 
