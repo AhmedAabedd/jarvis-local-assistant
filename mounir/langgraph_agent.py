@@ -105,8 +105,6 @@ def _supervisor(
     if _count_delegations(state["messages"]) >= MAX_DELEGATIONS:
         schemas = [s for s in schemas if s["function"]["name"] not in _DELEGATES]
 
-    trace.node("supervisor", f"{llm.active_model(model)} · {len(schemas)} tools")
-
     convo = [dict(m) for m in state["messages"]]
     new_messages: list[dict] = []
 
@@ -123,7 +121,6 @@ def _supervisor(
         if not tool_calls:
             final = "".join(parts).strip()
             new_messages.append({"role": "assistant", "content": final})
-            trace.event("replied")
             return Command(goto=END, update={"messages": new_messages})
 
         # Hand off to a specialist node instead of running the delegate inline.

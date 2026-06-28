@@ -111,6 +111,9 @@ SMTP_PORT: int = int(os.environ.get("MOUNIR_SMTP_PORT", "587"))
 SMTP_USER: str = os.environ.get("MOUNIR_SMTP_USER", "")  # full email address
 SMTP_PASS: str = os.environ.get("MOUNIR_SMTP_PASS", "")  # Gmail App Password
 
+# IMAP for reading the inbox (read_emails tool). Reuses SMTP_USER / SMTP_PASS.
+IMAP_HOST: str = os.environ.get("MOUNIR_IMAP_HOST", "imap.gmail.com")
+
 LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Tunis, Tunisia")
 
 

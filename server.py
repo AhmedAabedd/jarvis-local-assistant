@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import threading
 import time
+import uuid
 
 import psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
@@ -27,12 +29,45 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from mounir.agent import Agent
-from mounir import stt, tts, audio as audio_mod
+from mounir import stt, tts, audio as audio_mod, tools
 
 app = FastAPI(title="Mounir")
 
 # One shared agent instance = one shared conversation memory across the UI.
 agent = Agent()
+
+# --- in-browser tool confirmation -------------------------------------------
+# Tools like bash / send_email gate on tools.confirm_fn before acting. By
+# default that prompts on the SERVER's terminal, which is useless from the web
+# UI. We redirect it here: send the action to the open browser over the chat
+# WebSocket and block the worker thread until the user clicks Confirm/Cancel.
+_ui = {"ws": None, "loop": None, "out": None}     # the live dashboard socket
+_pending: dict[str, tuple[threading.Event, dict]] = {}  # confirm id -> (event, result)
+
+
+def _web_confirm(action: str) -> bool:
+    """Confirm hook called from the agent's worker thread.
+
+    Pushes a confirm request to the browser and waits for the answer. If no
+    dashboard is connected, refuse the outward action rather than hang.
+    """
+    ws, loop, out = _ui["ws"], _ui["loop"], _ui["out"]
+    if ws is None or loop is None or out is None:
+        return False
+
+    cid = uuid.uuid4().hex
+    event = threading.Event()
+    result = {"approved": False}
+    _pending[cid] = (event, result)
+    loop.call_soon_threadsafe(
+        out.put_nowait, {"type": "confirm", "id": cid, "prompt": action}
+    )
+    answered = event.wait(timeout=300)  # 5 min, then treat as cancel
+    _pending.pop(cid, None)
+    return result["approved"] if answered else False
+
+
+tools.confirm_fn = _web_confirm
 
 # --- network rate tracking ---------------------------------------------------
 _last_net = psutil.net_io_counters()
@@ -69,49 +104,74 @@ async def stats():
 
 @app.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket):
-    """Text chat over WebSocket. Client sends raw text, server streams reply chunks.
+    """Text chat + tool confirmation over one WebSocket.
 
-    Message protocol (server -> client), one JSON object per line:
-      {"type": "chunk", "text": "..."}      partial token
-      {"type": "tool",  "name": "...", "args": {...}}   tool call fired
-      {"type": "done"}                      reply finished
+    Client -> server:
+      {"type": "user", "text": "..."}                   a chat message
+      {"type": "confirm_response", "id": "..", "approved": bool}
+    Server -> client:
+      {"type": "chunk", "text": "..."}                  partial reply token
+      {"type": "confirm", "id": "..", "prompt": "..."}  tool wants approval
+      {"type": "done"}                                  reply finished
       {"type": "error", "message": "..."}
+
+    The reply is produced on a worker thread; a sender task drains an outgoing
+    queue so the receive loop stays free to handle confirm responses while the
+    agent is still working (otherwise a tool waiting on confirmation deadlocks).
     """
     await ws.accept()
+    loop = asyncio.get_event_loop()
+    out: asyncio.Queue = asyncio.Queue()
+    _ui.update(ws=ws, loop=loop, out=out)
+    busy = {"flag": False}
+
+    async def sender():
+        while True:
+            msg = await out.get()
+            if msg is None:
+                break
+            try:
+                await ws.send_json(msg)
+            except Exception:
+                break
+
+    sender_task = asyncio.create_task(sender())
+
+    def produce(text: str):
+        try:
+            for chunk in agent.respond(text):
+                loop.call_soon_threadsafe(out.put_nowait, {"type": "chunk", "text": chunk})
+        except Exception as exc:
+            loop.call_soon_threadsafe(out.put_nowait, {"type": "error", "message": str(exc)})
+        finally:
+            loop.call_soon_threadsafe(out.put_nowait, {"type": "done"})
+            busy["flag"] = False
+
     try:
         while True:
-            user_input = await ws.receive_text()
-            try:
-                # agent.respond is a sync generator; run it in a thread so we
-                # don't block the event loop, forwarding chunks as they arrive.
-                loop = asyncio.get_event_loop()
-                queue: asyncio.Queue = asyncio.Queue()
-
-                def produce():
-                    try:
-                        for chunk in agent.respond(user_input):
-                            loop.call_soon_threadsafe(queue.put_nowait, ("chunk", chunk))
-                    except Exception as exc:
-                        loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
-                    finally:
-                        loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
-
-                loop.run_in_executor(None, produce)
-
-                while True:
-                    kind, payload = await queue.get()
-                    if kind == "chunk":
-                        await ws.send_json({"type": "chunk", "text": payload})
-                    elif kind == "error":
-                        await ws.send_json({"type": "error", "message": payload})
-                        break
-                    elif kind == "done":
-                        await ws.send_json({"type": "done"})
-                        break
-            except Exception as exc:
-                await ws.send_json({"type": "error", "message": str(exc)})
+            data = await ws.receive_json()
+            kind = data.get("type")
+            if kind == "confirm_response":
+                entry = _pending.get(data.get("id"))
+                if entry:
+                    entry[1]["approved"] = bool(data.get("approved"))
+                    entry[0].set()
+            elif kind == "user":
+                if busy["flag"]:
+                    continue  # one turn at a time (shared conversation)
+                busy["flag"] = True
+                loop.run_in_executor(None, produce, data.get("text", ""))
     except WebSocketDisconnect:
         pass
+    finally:
+        # Release any worker thread still blocked on a confirm, then tear down.
+        for event, result in _pending.values():
+            result["approved"] = False
+            event.set()
+        await out.put(None)
+        sender_task.cancel()
+        if _ui.get("ws") is ws:
+            _ui.update(ws=None, loop=None, out=None)
 
 
 @app.post("/api/voice")
@@ -149,10 +209,10 @@ async def voice_turn(file: UploadFile = File(...)):
     if not text:
         return JSONResponse({"text": "", "reply": "", "audio_b64": ""})
 
-    reply_parts = []
-    for chunk in agent.respond(text):
-        reply_parts.append(chunk)
-    reply = "".join(reply_parts)
+    # Run the (blocking) agent off the event loop so a tool confirmation can
+    # still be delivered to the browser over the chat WebSocket mid-turn.
+    loop = asyncio.get_event_loop()
+    reply = await loop.run_in_executor(None, lambda: "".join(agent.respond(text)))
 
     # Synthesize reply to WAV bytes (in-memory, no playback on server side).
     audio_b64 = ""

@@ -357,6 +357,114 @@ def send_email(to: str, subject: str, body: str, attachments: list[str] | None =
     return f"Email sent to {to}."
 
 
+def _plain_text(msg) -> str:
+    """Pull readable plain text out of an email message.
+
+    Prefer a text/plain part; fall back to stripping tags off the HTML.
+    """
+    import re
+    from html import unescape
+
+    body = ""
+    if msg.is_multipart():
+        # Grab the first text/plain part; remember HTML as a fallback.
+        html = ""
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            if part.get("Content-Disposition", "").startswith("attachment"):
+                continue
+            try:
+                text = part.get_payload(decode=True).decode(
+                    part.get_content_charset() or "utf-8", "replace"
+                )
+            except Exception:
+                continue
+            if ctype == "text/plain" and not body:
+                body = text
+            elif ctype == "text/html" and not html:
+                html = text
+        if not body:
+            body = html
+    else:
+        try:
+            body = msg.get_payload(decode=True).decode(
+                msg.get_content_charset() or "utf-8", "replace"
+            )
+        except Exception:
+            body = msg.get_payload() or ""
+
+    # If we ended up with HTML, strip it down to text.
+    if "<" in body and ">" in body:
+        body = re.sub(r"(?is)<(script|style).*?</\1>", " ", body)
+        body = re.sub(r"(?s)<[^>]+>", " ", body)
+        body = unescape(body)
+
+    # Collapse the blank-line/whitespace storm HTML leaves behind.
+    lines = [ln.strip() for ln in body.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def read_emails(count: int = 5, unread_only: bool = False, sender: str = "") -> str:
+    """Read recent emails from the user's inbox, as plain text.
+
+    count: how many of the most recent matching emails to fetch.
+    unread_only: only return unread emails.
+    sender: only emails from this address/name (substring match).
+    """
+    if not (config.SMTP_USER and config.SMTP_PASS):
+        return (
+            "Email isn't set up: the MOUNIR_SMTP_USER and MOUNIR_SMTP_PASS "
+            "environment variables (a Gmail App Password) aren't configured."
+        )
+
+    import imaplib
+    import email as emaillib
+    from email.header import decode_header, make_header
+
+    count = max(1, min(int(count), 20))
+    # Split a fixed total budget across the emails: ask for 1 and get the full
+    # body, ask for 10 and get short snippets. Keeps total output bounded for
+    # the small local model either way.
+    per_email_cap = max(1500, 12000 // count)
+
+    criteria = []
+    if unread_only:
+        criteria.append("UNSEEN")
+    if sender.strip():
+        criteria += ["FROM", f'"{sender.strip()}"']
+    if not criteria:
+        criteria = ["ALL"]
+
+    try:
+        with imaplib.IMAP4_SSL(config.IMAP_HOST) as imap:
+            imap.login(config.SMTP_USER, config.SMTP_PASS)
+            imap.select("INBOX", readonly=True)  # readonly: don't mark as read
+            status, data = imap.search(None, *criteria)
+            if status != "OK":
+                return "Could not search the inbox."
+            ids = data[0].split()
+            if not ids:
+                return "No matching emails found."
+
+            out = []
+            for num in reversed(ids[-count:]):  # newest first
+                status, raw = imap.fetch(num, "(RFC822)")
+                if status != "OK" or not raw or not raw[0]:
+                    continue
+                msg = emaillib.message_from_bytes(raw[0][1])
+                frm = str(make_header(decode_header(msg.get("From", "?"))))
+                subj = str(make_header(decode_header(msg.get("Subject", "(no subject)"))))
+                date = msg.get("Date", "?")
+                text = _plain_text(msg)
+                if len(text) > per_email_cap:
+                    text = text[:per_email_cap] + "\n… (read this email alone for the rest)"
+                out.append(f"From: {frm}\nSubject: {subj}\nDate: {date}\n\n{text}")
+    except Exception as exc:
+        return f"Failed to read email: {exc}"
+
+    return ("\n\n" + "—" * 40 + "\n\n").join(out)
+
+
 # What the model sees. Descriptions matter — they're how it decides to call.
 SCHEMAS = [
     {
@@ -572,6 +680,38 @@ SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_emails",
+            "description": (
+                "Read recent emails from the user's own inbox, returned as plain "
+                "text (From, Subject, Date, and the message). Use it to check the "
+                "inbox, summarize new mail, or find a message. Filter with "
+                "unread_only or sender when the user is specific. To read ONE "
+                "email's full body, call again with count=1 and a sender filter — "
+                "fewer emails means each is returned in full instead of clipped."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "description": "How many of the most recent matching emails to read (default 5, max 20).",
+                    },
+                    "unread_only": {
+                        "type": "boolean",
+                        "description": "Only return unread emails. Default false.",
+                    },
+                    "sender": {
+                        "type": "string",
+                        "description": "Only emails from this address or name (substring match). Omit for all senders.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 SCHEMAS += [
@@ -633,6 +773,7 @@ _REGISTRY = {
     "open_path": open_path,
     "bash": bash,
     "send_email": send_email,
+    "read_emails": read_emails,
     "delegate_to_coder": delegate_to_coder,
     "delegate_to_researcher": delegate_to_researcher,
 }

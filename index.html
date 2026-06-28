@@ -5,20 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MOUNIR</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
   :root {
-    --bg: #0a0b0d;
-    --bg-panel: #111317;
-    --line: #1f2329;
-    --amber: #d97b3e;
-    --amber-dim: #8a5430;
-    --amber-glow: rgba(217, 123, 62, 0.35);
-    --text: #e8e6e1;
-    --text-dim: #6b6f76;
-    --text-mid: #9a9ea5;
-    --ok: #5fa777;
-    --warn: #c9694a;
+    /* Mounir CLI palette: purple accent (#a855f7), lavender (#c4b5fd). */
+    --bg:        #0b0a10;
+    --bg-panel:  #110f18;
+    --bg-elev:   #16131f;
+    --line:      #232030;
+    --purple:    #a855f7;
+    --purple-dim:#7c43c2;
+    --soft:      rgba(168,85,247,0.13);
+    --glow:      rgba(168,85,247,0.40);
+    --lav:       #c4b5fd;
+    --text:      #ece9f3;
+    --text-mid:  #9b95ad;
+    --text-dim:  #635d73;
+    --ok:        #5fb487;
+    --warn:      #e07a4a;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -30,225 +34,242 @@
     height: 100%;
     overflow: hidden;
   }
-
   .mono { font-family: 'JetBrains Mono', monospace; }
 
-  /* ---------- background texture ---------- */
-  .grain {
-    position: fixed; inset: 0; pointer-events: none; z-index: 1;
-    background-image: radial-gradient(circle at 20% 30%, rgba(217,123,62,0.04), transparent 45%),
-                       radial-gradient(circle at 80% 70%, rgba(217,123,62,0.03), transparent 45%);
-  }
-  .scanline {
-    position: fixed; inset: 0; pointer-events: none; z-index: 2; opacity: 0.025;
-    background: repeating-linear-gradient(0deg, #fff 0px, transparent 1px, transparent 2px);
+  /* soft purple ambient glow */
+  .ambient {
+    position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background:
+      radial-gradient(circle at 18% 12%, rgba(168,85,247,0.06), transparent 42%),
+      radial-gradient(circle at 85% 88%, rgba(168,85,247,0.05), transparent 45%);
   }
 
   /* ---------- layout ---------- */
   .app {
-    position: relative; z-index: 3;
+    position: relative; z-index: 1;
     display: grid;
-    grid-template-columns: 300px 1fr 300px;
-    grid-template-rows: 64px 1fr 220px;
+    grid-template-columns: 280px 1fr 280px;
+    grid-template-rows: 60px 1fr;
     height: 100vh;
-    gap: 1px;
   }
 
   /* ---------- header ---------- */
   .header {
     grid-column: 1 / 4;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0 28px;
+    padding: 0 24px;
     border-bottom: 1px solid var(--line);
+    background: rgba(17,15,24,0.6);
+    backdrop-filter: blur(6px);
   }
   .brand { display: flex; align-items: center; gap: 12px; }
   .brand-mark {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--amber);
-    box-shadow: 0 0 12px var(--amber-glow);
-    animation: pulse-dot 2.4s ease-in-out infinite;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--purple);
+    box-shadow: 0 0 14px var(--glow);
+    animation: pulse 2.4s ease-in-out infinite;
   }
-  @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.35} }
-  .brand-name { font-size: 15px; letter-spacing: 0.32em; font-weight: 600; }
-  .brand-sub { font-size: 11px; color: var(--text-dim); letter-spacing: 0.05em; margin-left: 4px; }
-
-  .clock { font-size: 13px; color: var(--text-mid); letter-spacing: 0.05em; }
-  .clock span { color: var(--amber); }
+  @keyframes pulse { 0%,100%{opacity:1; transform:scale(1)} 50%{opacity:.4; transform:scale(.85)} }
+  .brand-name { font-size: 15px; letter-spacing: 0.34em; font-weight: 600; }
+  .brand-sub { font-size: 11px; color: var(--text-dim); letter-spacing: 0.05em; }
+  .header-right { display: flex; align-items: center; gap: 20px; }
+  .pill {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 11px; color: var(--text-mid); letter-spacing: 0.05em;
+  }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px rgba(95,180,135,.5); }
+  .clock { font-size: 13px; color: var(--text-mid); }
+  .clock b { color: var(--lav); font-weight: 500; }
 
   /* ---------- side panels ---------- */
-  .panel {
-    border-right: 1px solid var(--line);
-    padding: 22px 20px;
-    overflow-y: auto;
-  }
-  .panel.right { border-right: none; border-left: 1px solid var(--line); }
+  .panel { padding: 22px 20px; overflow-y: auto; }
+  .panel.left  { border-right: 1px solid var(--line); }
+  .panel.right { border-left: 1px solid var(--line); }
 
   .panel-title {
     font-size: 10px; letter-spacing: 0.22em; color: var(--text-dim);
-    text-transform: uppercase; margin-bottom: 18px;
+    text-transform: uppercase; margin-bottom: 16px;
     display: flex; align-items: center; gap: 8px;
   }
-  .panel-title::after {
-    content: ''; flex: 1; height: 1px; background: var(--line);
-  }
+  .panel-title::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+  .panel-title + .panel-title, .stat + .panel-title { margin-top: 28px; }
 
-  /* ---------- stat rows ---------- */
-  .stat { margin-bottom: 20px; }
-  .stat-head {
-    display: flex; justify-content: space-between; align-items: baseline;
-    margin-bottom: 7px;
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 22px; }
+  .stat-box {
+    border: 1px solid var(--line); border-radius: 10px; padding: 13px 14px;
+    background: linear-gradient(180deg, var(--soft), transparent);
   }
+  .stat-box .num { font-size: 22px; font-weight: 600; color: var(--text); }
+  .stat-box .lbl { font-size: 10px; color: var(--text-dim); letter-spacing: 0.06em; margin-top: 3px; text-transform: uppercase; }
+
+  .stat { margin-bottom: 18px; }
+  .stat-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 7px; }
   .stat-label { font-size: 11px; color: var(--text-mid); letter-spacing: 0.04em; }
   .stat-value { font-size: 13px; font-weight: 500; color: var(--text); }
-  .stat-value.accent { color: var(--amber); }
-  .bar-track {
-    height: 3px; background: var(--line); border-radius: 2px; overflow: hidden;
-  }
+  .stat-value.accent { color: var(--lav); }
+  .bar-track { height: 4px; background: var(--line); border-radius: 3px; overflow: hidden; }
   .bar-fill {
-    height: 100%; background: var(--amber);
-    box-shadow: 0 0 8px var(--amber-glow);
+    height: 100%; border-radius: 3px;
+    background: linear-gradient(90deg, var(--purple-dim), var(--purple));
+    box-shadow: 0 0 10px var(--glow);
     transition: width 0.6s ease;
-    border-radius: 2px;
   }
+  .spark { width: 100%; height: 30px; margin-top: 8px; }
 
-  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 22px; }
-  .stat-box {
-    border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px;
-    background: linear-gradient(180deg, rgba(255,255,255,0.012), transparent);
-  }
-  .stat-box .num { font-size: 20px; font-weight: 500; }
-  .stat-box .lbl { font-size: 10px; color: var(--text-dim); letter-spacing: 0.05em; margin-top: 4px; text-transform: uppercase; }
-
-  /* sparkline */
-  .spark { width: 100%; height: 32px; margin-top: 8px; }
-
-  /* ---------- tools / status log right panel ---------- */
+  /* ---------- activity log ---------- */
   .log-entry {
-    font-size: 11.5px; line-height: 1.6; color: var(--text-mid);
-    padding: 8px 0; border-bottom: 1px solid var(--line);
+    font-size: 11.5px; line-height: 1.55; color: var(--text-mid);
+    padding: 9px 0; border-bottom: 1px solid var(--line);
   }
-  .log-entry .t { color: var(--text-dim); font-size: 10px; display: block; margin-bottom: 2px; }
-  .log-entry.tool .t { color: var(--amber-dim); }
-  .log-entry.tool b { color: var(--amber); }
+  .log-entry .t { color: var(--text-dim); font-size: 10px; display: block; margin-bottom: 3px; letter-spacing: .04em; }
+  .log-entry.tool .t { color: var(--purple-dim); }
+  .log-entry.tool b { color: var(--lav); }
 
-  /* ---------- center stage ---------- */
+  /* ---------- center: the Jarvis orb is the hero ---------- */
+  .chat { display: flex; flex-direction: column; min-height: 0; }
+
   .stage {
+    flex: 1; min-height: 0; overflow: hidden;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    position: relative;
+    gap: 14px; position: relative; padding: 14px;
   }
-
-  .bubble-zone {
-    position: relative; width: 320px; height: 320px;
-    display: flex; align-items: center; justify-content: center;
-  }
-
-  .ring {
-    position: absolute; border-radius: 50%;
-    border: 1px solid var(--line);
-  }
-  .ring.r1 { width: 320px; height: 320px; }
-  .ring.r2 { width: 250px; height: 250px; border-color: rgba(217,123,62,0.15); }
-
-  .ring.spin {
-    animation: spin 40s linear infinite;
-    border-style: dashed;
-    border-color: rgba(217,123,62,0.18);
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  .core {
-    width: 168px; height: 168px; border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, #1a1510, #0d0e10 70%);
-    border: 1px solid var(--amber-dim);
-    display: flex; align-items: center; justify-content: center;
+  /* Holder flexes to whatever height is left after the transcript grows, and
+     the orb scales to fit it — so the orb/hint never overlap the conversation. */
+  .orb-hold { flex: 1; min-height: 0; width: 100%; display: flex; align-items: center; justify-content: center; }
+  /* Siri-style fluid blob, rendered on canvas. */
+  #orb {
+    height: 100%; width: auto; max-height: 400px; max-width: 100%; aspect-ratio: 1 / 1;
     cursor: pointer;
-    position: relative;
-    box-shadow: 0 0 40px rgba(217,123,62,0.08), inset 0 0 30px rgba(0,0,0,0.6);
-    transition: box-shadow 0.4s ease, border-color 0.4s ease;
+    filter: drop-shadow(0 0 30px rgba(168,85,247,0.26));
+    transition: filter .4s;
   }
-  .core:hover { box-shadow: 0 0 60px rgba(217,123,62,0.16), inset 0 0 30px rgba(0,0,0,0.6); }
+  #orb:hover { filter: drop-shadow(0 0 46px rgba(168,85,247,0.42)); }
 
-  .core.listening {
-    border-color: var(--amber);
-    box-shadow: 0 0 70px var(--amber-glow), inset 0 0 30px rgba(0,0,0,0.5);
+  .status {
+    font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--text-dim); display: flex; align-items: center; gap: 10px;
   }
-  .core.speaking {
-    border-color: var(--amber);
-    animation: speak-pulse 0.9s ease-in-out infinite;
-  }
-  @keyframes speak-pulse {
-    0%,100% { box-shadow: 0 0 50px var(--amber-glow), inset 0 0 30px rgba(0,0,0,0.5); }
-    50% { box-shadow: 0 0 90px var(--amber-glow), inset 0 0 30px rgba(0,0,0,0.5); }
-  }
-
-  .core-icon {
-    width: 46px; height: 46px;
-    position: relative; z-index: 2;
-  }
-
-  .breathe { animation: breathe 4.5s ease-in-out infinite; }
-  @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.035); } }
-
-  .wave-bars {
-    position: absolute; display: flex; align-items: center; gap: 3px; z-index: 2;
-  }
-  .wave-bars span {
-    display: block; width: 3px; border-radius: 2px;
-    background: var(--amber); opacity: 0.85;
-    height: 6px;
-  }
-
-  .status-label {
-    margin-top: 30px; font-size: 11px; letter-spacing: 0.18em;
-    color: var(--text-dim); text-transform: uppercase;
-    display: flex; align-items: center; gap: 10px;
-  }
-  .status-label .dot {
-    width: 5px; height: 5px; border-radius: 50%; background: var(--text-dim);
-  }
-  .status-label.active { color: var(--amber); }
-  .status-label.active .dot { background: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
-
-  .hint { margin-top: 10px; font-size: 11px; color: var(--text-dim); }
+  .status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); }
+  .status.active { color: var(--lav); }
+  .status.active .dot { background: var(--purple); box-shadow: 0 0 10px var(--glow); }
+  .hint { font-size: 11px; color: var(--text-dim); }
   .hint kbd {
-    background: var(--bg-panel); border: 1px solid var(--line); border-radius: 4px;
+    background: var(--bg-elev); border: 1px solid var(--line); border-radius: 5px;
     padding: 2px 7px; font-family: 'JetBrains Mono', monospace; color: var(--text-mid);
   }
 
-  /* ---------- bottom transcript ---------- */
-  .transcript-bar {
-    grid-column: 1 / 4;
+  /* ---------- transcript (secondary, scrollable) ---------- */
+  .transcript {
+    max-height: 28vh; overflow-y: auto; border-top: 1px solid var(--line);
+    padding: 14px 16px;
+  }
+  .transcript-inner { width: 100%; max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+  .row { display: flex; flex-direction: column; gap: 5px; }
+  .row.user { align-items: flex-end; }
+  .row.assistant { align-items: flex-start; }
+  .cap { font-size: 10px; letter-spacing: 0.12em; color: var(--text-dim); text-transform: uppercase; padding: 0 4px; }
+  .row.assistant .cap { color: var(--purple-dim); }
+  .bubble {
+    max-width: 80%; padding: 11px 15px; border-radius: 15px;
+    font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word;
+  }
+  .row.user .bubble {
+    background: linear-gradient(140deg, var(--purple), var(--purple-dim));
+    color: #fff; border-bottom-right-radius: 5px; box-shadow: 0 4px 18px rgba(168,85,247,0.22);
+  }
+  .row.assistant .bubble {
+    background: var(--bg-elev); border: 1px solid var(--line);
+    color: var(--text); border-bottom-left-radius: 5px;
+  }
+  .bubble code {
+    font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 5px;
+  }
+
+  /* ---------- composer: small, secondary text fallback ---------- */
+  .composer {
     border-top: 1px solid var(--line);
-    padding: 18px 28px;
-    overflow-y: auto;
-    display: flex; flex-direction: column-reverse;
+    padding: 11px 16px; display: flex; align-items: center; gap: 9px;
+    max-width: 720px; margin: 0 auto; width: 100%;
   }
-  .transcript-inner { display: flex; flex-direction: column; gap: 10px; max-width: 980px; margin: 0 auto; width: 100%; }
-
-  .msg { display: flex; gap: 14px; font-size: 13.5px; line-height: 1.55; }
-  .msg .who {
-    flex-shrink: 0; width: 64px; font-size: 10px; letter-spacing: 0.1em;
-    color: var(--text-dim); text-transform: uppercase; padding-top: 2px;
+  .input-wrap {
+    flex: 1; display: flex; align-items: center; gap: 8px;
+    background: var(--bg-elev); border: 1px solid var(--line); border-radius: 11px;
+    padding: 3px 5px 3px 14px; transition: border-color .2s, box-shadow .2s;
   }
-  .msg.user .who { color: var(--text-mid); }
-  .msg.assistant .who { color: var(--amber); }
-  .msg .body { color: var(--text); }
-  .msg.user .body { color: var(--text-mid); }
+  .input-wrap:focus-within { border-color: var(--purple-dim); box-shadow: 0 0 0 3px var(--soft); }
+  #msgInput {
+    flex: 1; background: transparent; border: none; outline: none; resize: none;
+    color: var(--text); font-family: inherit; font-size: 13.5px; line-height: 1.45;
+    max-height: 88px; padding: 6px 0;
+  }
+  #msgInput::placeholder { color: var(--text-dim); }
+  .icon-btn {
+    flex-shrink: 0; width: 32px; height: 32px; border-radius: 9px;
+    border: none; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: transform .15s, box-shadow .2s;
+  }
+  .icon-btn:active { transform: scale(.92); }
+  .send-btn { background: linear-gradient(140deg, var(--purple), var(--purple-dim)); }
+  .send-btn:hover { box-shadow: 0 0 14px var(--glow); }
+  .send-btn svg { stroke: #fff; }
 
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  /* ---------- confirm modal ---------- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(7,6,11,0.66); backdrop-filter: blur(5px);
+  }
+  .overlay.show { display: flex; animation: fade .18s ease; }
+  @keyframes fade { from{opacity:0} to{opacity:1} }
+  .modal {
+    width: min(540px, 92vw); background: var(--bg-panel);
+    border: 1px solid var(--line); border-radius: 18px; padding: 26px;
+    box-shadow: 0 24px 70px rgba(0,0,0,.6), 0 0 0 1px var(--soft);
+    animation: rise .2s ease;
+  }
+  @keyframes rise { from{transform:translateY(12px); opacity:0} to{transform:translateY(0); opacity:1} }
+  .modal-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .modal-icon {
+    width: 38px; height: 38px; border-radius: 11px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(224,122,74,0.13); border: 1px solid rgba(224,122,74,0.3);
+  }
+  .modal-title { font-size: 16px; font-weight: 600; }
+  .modal-sub { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
+  .modal-body {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    color: var(--lav); white-space: pre-wrap; word-break: break-word;
+    max-height: 240px; overflow-y: auto; margin-bottom: 22px;
+  }
+  .modal-actions { display: flex; gap: 12px; justify-content: flex-end; }
+  .btn {
+    padding: 10px 22px; border-radius: 11px; border: 1px solid var(--line);
+    font-family: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer;
+    background: transparent; color: var(--text-mid); transition: all .15s;
+  }
+  .btn:hover { color: var(--text); border-color: var(--text-dim); }
+  .btn.primary {
+    background: linear-gradient(140deg, var(--purple), var(--purple-dim));
+    color: #fff; border-color: transparent;
+  }
+  .btn.primary:hover { box-shadow: 0 0 18px var(--glow); }
+
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--purple-dim); }
   ::-webkit-scrollbar-track { background: transparent; }
 
-  @media (max-width: 980px) {
-    .app { grid-template-columns: 1fr; grid-template-rows: 56px auto 1fr 180px; }
+  @media (max-width: 920px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: 56px 1fr; }
     .panel { display: none; }
   }
 </style>
 </head>
 <body>
 
-<div class="grain"></div>
-<div class="scanline"></div>
+<div class="ambient"></div>
 
 <div class="app">
 
@@ -256,323 +277,394 @@
     <div class="brand">
       <div class="brand-mark"></div>
       <div class="brand-name">MOUNIR</div>
-      <div class="brand-sub mono">local assistant · v0.1</div>
+      <div class="brand-sub mono">local assistant</div>
     </div>
-    <div class="clock mono" id="clock">—</div>
+    <div class="header-right">
+      <div class="pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+      <div class="clock mono" id="clock">—</div>
+    </div>
   </div>
 
-  <!-- LEFT PANEL: system vitals -->
+  <!-- LEFT: system vitals -->
   <div class="panel left">
     <div class="panel-title">System</div>
-
     <div class="stat-grid">
-      <div class="stat-box">
-        <div class="num mono" id="cpuNum">—%</div>
-        <div class="lbl">CPU</div>
-      </div>
-      <div class="stat-box">
-        <div class="num mono" id="ramNum">—%</div>
-        <div class="lbl">Memory</div>
-      </div>
+      <div class="stat-box"><div class="num mono" id="cpuNum">—%</div><div class="lbl">CPU</div></div>
+      <div class="stat-box"><div class="num mono" id="ramNum">—%</div><div class="lbl">Memory</div></div>
     </div>
 
     <div class="stat">
-      <div class="stat-head">
-        <span class="stat-label">CPU LOAD</span>
-        <span class="stat-value mono accent" id="cpuVal">0%</span>
-      </div>
+      <div class="stat-head"><span class="stat-label">CPU LOAD</span><span class="stat-value mono accent" id="cpuVal">0%</span></div>
       <div class="bar-track"><div class="bar-fill" id="cpuBar" style="width:0%"></div></div>
-      <svg class="spark" id="cpuSpark" viewBox="0 0 280 32" preserveAspectRatio="none"></svg>
+      <svg class="spark" id="cpuSpark" viewBox="0 0 280 30" preserveAspectRatio="none"></svg>
     </div>
-
     <div class="stat">
-      <div class="stat-head">
-        <span class="stat-label">MEMORY</span>
-        <span class="stat-value mono accent" id="ramVal">0%</span>
-      </div>
+      <div class="stat-head"><span class="stat-label">MEMORY</span><span class="stat-value mono accent" id="ramVal">0%</span></div>
       <div class="bar-track"><div class="bar-fill" id="ramBar" style="width:0%"></div></div>
-      <svg class="spark" id="ramSpark" viewBox="0 0 280 32" preserveAspectRatio="none"></svg>
+      <svg class="spark" id="ramSpark" viewBox="0 0 280 30" preserveAspectRatio="none"></svg>
     </div>
 
-    <div class="panel-title" style="margin-top:30px;">Network</div>
-    <div class="stat">
-      <div class="stat-head">
-        <span class="stat-label">↓ DOWN</span>
-        <span class="stat-value mono" id="netDown">0 KB/s</span>
-      </div>
-    </div>
-    <div class="stat">
-      <div class="stat-head">
-        <span class="stat-label">↑ UP</span>
-        <span class="stat-value mono" id="netUp">0 KB/s</span>
-      </div>
-    </div>
-
-    <div class="panel-title" style="margin-top:30px;">Model</div>
-    <div class="stat">
-      <div class="stat-head">
-        <span class="stat-label">ACTIVE</span>
-        <span class="stat-value mono" id="modelName">groq · qwen3-32b</span>
-      </div>
-    </div>
-    <div class="stat">
-      <div class="stat-head">
-        <span class="stat-label">LATENCY</span>
-        <span class="stat-value mono" id="latency">— ms</span>
-      </div>
-    </div>
+    <div class="panel-title">Network</div>
+    <div class="stat"><div class="stat-head"><span class="stat-label">↓ DOWN</span><span class="stat-value mono" id="netDown">0 KB/s</span></div></div>
+    <div class="stat"><div class="stat-head"><span class="stat-label">↑ UP</span><span class="stat-value mono" id="netUp">0 KB/s</span></div></div>
   </div>
 
-  <!-- CENTER: voice bubble -->
-  <div class="stage">
-    <div class="bubble-zone">
-      <div class="ring r1 spin"></div>
-      <div class="ring r2"></div>
-      <div class="core breathe" id="core">
-        <svg class="core-icon" id="idleIcon" viewBox="0 0 24 24" fill="none">
-          <circle cx="12" cy="12" r="3" stroke="#d97b3e" stroke-width="1.4"/>
-          <circle cx="12" cy="12" r="8.2" stroke="#8a5430" stroke-width="0.8" stroke-dasharray="2 3"/>
-        </svg>
-        <div class="wave-bars" id="waveBars" style="display:none;">
-          <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+  <!-- CENTER: the voice orb (primary) + transcript + small text fallback -->
+  <div class="chat">
+    <div class="stage">
+      <div class="orb-hold">
+        <canvas id="orb" width="640" height="640" title="Click or press Space to talk"></canvas>
+      </div>
+      <div class="status" id="status"><span class="dot"></span> IDLE</div>
+      <div class="hint">Click the orb or press <kbd>Space</kbd> to talk</div>
+    </div>
+
+    <div class="transcript">
+      <div class="transcript-inner" id="transcript">
+        <div class="row assistant">
+          <div class="cap">Mounir</div>
+          <div class="bubble">Online. No cloud, no fluff — say the word, Ahmed.</div>
         </div>
       </div>
     </div>
-    <div class="status-label" id="statusLabel">
-      <span class="dot"></span> IDLE
+
+    <div class="composer">
+      <div class="input-wrap">
+        <textarea id="msgInput" rows="1" placeholder="…if voice isn't an option"></textarea>
+      </div>
+      <button class="icon-btn send-btn" id="sendBtn" title="Send">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 19V5M6 11l6-6 6 6"/>
+        </svg>
+      </button>
     </div>
-    <div class="hint">Press <kbd>SPACE</kbd> or click the core to talk</div>
   </div>
 
-  <!-- RIGHT PANEL: activity log -->
+  <!-- RIGHT: activity -->
   <div class="panel right">
     <div class="panel-title">Activity</div>
     <div id="logList">
-      <div class="log-entry mono">
-        <span class="t">SYSTEM</span>
-        Mounir initialized. Awaiting input.
-      </div>
-    </div>
-  </div>
-
-  <!-- BOTTOM: transcript -->
-  <div class="transcript-bar">
-    <div class="transcript-inner" id="transcript">
-      <div class="msg assistant">
-        <div class="who">MOUNIR</div>
-        <div class="body">Online. Say the word, Ahmed.</div>
-      </div>
+      <div class="log-entry mono"><span class="t">SYSTEM</span>Dashboard ready. Awaiting input.</div>
     </div>
   </div>
 
 </div>
 
+<!-- confirm modal -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e07a4a" stroke-width="1.8" stroke-linecap="round">
+          <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="modal-title">Confirm action</div>
+        <div class="modal-sub">Mounir wants to do something on your machine.</div>
+      </div>
+    </div>
+    <div class="modal-body mono" id="modalBody"></div>
+    <div class="modal-actions">
+      <button class="btn" id="cancelBtn">Cancel</button>
+      <button class="btn primary" id="confirmBtn">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
-/* ============================================================
-   CLOCK
-============================================================ */
+/* ---------------- clock ---------------- */
 function tickClock(){
-  const d = new Date();
-  const h = String(d.getHours()).padStart(2,'0');
-  const m = String(d.getMinutes()).padStart(2,'0');
-  const s = String(d.getSeconds()).padStart(2,'0');
-  document.getElementById('clock').innerHTML = `${h}:${m}<span>:${s}</span>`;
+  const d = new Date(), p = n => String(n).padStart(2,'0');
+  document.getElementById('clock').innerHTML = `${p(d.getHours())}:${p(d.getMinutes())}<b>:${p(d.getSeconds())}</b>`;
 }
 setInterval(tickClock, 1000); tickClock();
 
-/* ============================================================
-   SPARKLINE RENDERER
-============================================================ */
-function makeSpark(svgEl, color){
+/* ---------------- sparklines ---------------- */
+function makeSpark(svg, color){
   const data = new Array(40).fill(0);
-  return {
-    push(v){
-      data.shift(); data.push(v);
-      const w = 280, h = 32, step = w/(data.length-1);
-      let d = '';
-      data.forEach((val,i)=>{
-        const x = i*step;
-        const y = h - (val/100)*h;
-        d += (i===0 ? `M${x},${y}` : ` L${x},${y}`);
-      });
-      svgEl.innerHTML = `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.4" opacity="0.85"/>`;
-    }
-  };
+  return { push(v){
+    data.shift(); data.push(v);
+    const w=280,h=30,step=w/(data.length-1);
+    let d=''; data.forEach((val,i)=>{ const x=i*step, y=h-(val/100)*h; d+=(i===0?`M${x},${y}`:` L${x},${y}`); });
+    svg.innerHTML = `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.9"/>`;
+  }};
 }
-const cpuSpark = makeSpark(document.getElementById('cpuSpark'), '#d97b3e');
-const ramSpark = makeSpark(document.getElementById('ramSpark'), '#9a9ea5');
+const cpuSpark = makeSpark(document.getElementById('cpuSpark'), '#a855f7');
+const ramSpark = makeSpark(document.getElementById('ramSpark'), '#c4b5fd');
 
-/* ============================================================
-   SYSTEM STATS — polls FastAPI backend (/stats)
-   Falls back to simulated data if backend isn't reachable,
-   so the UI is testable standalone.
-============================================================ */
+/* ---------------- system stats ---------------- */
 async function pollStats(){
   let data;
-  try {
-    const res = await fetch('/api/stats');
-    data = await res.json();
-  } catch(e){
-    // fallback simulated data for standalone preview
-    data = {
-      cpu: 15 + Math.random()*25,
-      ram: 40 + Math.random()*15,
-      net_down: Math.random()*120,
-      net_up: Math.random()*40,
-    };
-  }
-  document.getElementById('cpuNum').textContent = Math.round(data.cpu)+'%';
-  document.getElementById('ramNum').textContent = Math.round(data.ram)+'%';
-  document.getElementById('cpuVal').textContent = Math.round(data.cpu)+'%';
-  document.getElementById('ramVal').textContent = Math.round(data.ram)+'%';
-  document.getElementById('cpuBar').style.width = data.cpu+'%';
-  document.getElementById('ramBar').style.width = data.ram+'%';
-  document.getElementById('netDown').textContent = Math.round(data.net_down)+' KB/s';
-  document.getElementById('netUp').textContent = Math.round(data.net_up)+' KB/s';
-  cpuSpark.push(data.cpu);
-  ramSpark.push(data.ram);
+  try { data = await (await fetch('/api/stats')).json(); }
+  catch(e){ data = { cpu:15+Math.random()*25, ram:40+Math.random()*15, net_down:Math.random()*120, net_up:Math.random()*40 }; }
+  const set = (id,v)=>document.getElementById(id).textContent=v;
+  set('cpuNum',Math.round(data.cpu)+'%'); set('ramNum',Math.round(data.ram)+'%');
+  set('cpuVal',Math.round(data.cpu)+'%'); set('ramVal',Math.round(data.ram)+'%');
+  document.getElementById('cpuBar').style.width=data.cpu+'%';
+  document.getElementById('ramBar').style.width=data.ram+'%';
+  set('netDown',Math.round(data.net_down)+' KB/s'); set('netUp',Math.round(data.net_up)+' KB/s');
+  cpuSpark.push(data.cpu); ramSpark.push(data.ram);
 }
 setInterval(pollStats, 1500); pollStats();
 
-/* ============================================================
-   VOICE BUBBLE STATE MACHINE
-============================================================ */
-const core = document.getElementById('core');
-const statusLabel = document.getElementById('statusLabel');
-const idleIcon = document.getElementById('idleIcon');
-const waveBars = document.getElementById('waveBars');
+/* ---------------- chat helpers ---------------- */
+const transcript = document.getElementById('transcript');
+const transcriptScroll = transcript.parentElement;  // the .transcript scroll box
+function escapeHtml(s){ return s.replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function render(text){ return escapeHtml(text).replace(/`([^`]+)`/g,'<code>$1</code>'); }
+function scrollDown(){ transcriptScroll.scrollTop = transcriptScroll.scrollHeight; }
 
-function setState(state){
-  core.classList.remove('listening','speaking','breathe');
-  statusLabel.classList.remove('active');
-  waveBars.style.display = 'none';
-  idleIcon.style.display = 'block';
-
-  if(state === 'idle'){
-    core.classList.add('breathe');
-    statusLabel.innerHTML = '<span class="dot"></span> IDLE';
-  } else if(state === 'listening'){
-    core.classList.add('listening');
-    statusLabel.classList.add('active');
-    statusLabel.innerHTML = '<span class="dot"></span> LISTENING';
-  } else if(state === 'thinking'){
-    statusLabel.classList.add('active');
-    statusLabel.innerHTML = '<span class="dot"></span> PROCESSING';
-  } else if(state === 'speaking'){
-    core.classList.add('speaking');
-    statusLabel.classList.add('active');
-    statusLabel.innerHTML = '<span class="dot"></span> SPEAKING';
-    idleIcon.style.display = 'none';
-    waveBars.style.display = 'flex';
-    animateWave();
-  }
+function addMessage(role, text){
+  const row = document.createElement('div');
+  row.className = 'row ' + role;
+  row.innerHTML = `<div class="cap">${role==='user'?'You':'Mounir'}</div>
+                   <div class="bubble">${render(text)}</div>`;
+  transcript.appendChild(row); scrollDown();
+  return row.querySelector('.bubble');
 }
-
-let waveAnim;
-function animateWave(){
-  const bars = waveBars.querySelectorAll('span');
-  clearInterval(waveAnim);
-  waveAnim = setInterval(()=>{
-    bars.forEach(b=>{
-      const h = 5 + Math.random()*26;
-      b.style.height = h+'px';
-    });
-  }, 110);
-}
-function stopWave(){ clearInterval(waveAnim); }
-
-/* ============================================================
-   VOICE RECORDING — MediaRecorder -> /api/voice -> playback
-============================================================ */
-let mediaRecorder, audioChunks = [], isListening = false;
-
-async function startRecording(){
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  mediaRecorder = new MediaRecorder(stream);
-  audioChunks = [];
-  mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-  mediaRecorder.start();
-  isListening = true;
-  setState('listening');
-  addLog('mic', 'Listening…');
-}
-
-async function stopRecording(){
-  if(!mediaRecorder) return;
-  isListening = false;
-  setState('thinking');
-  addLog('system', 'Transcribing & thinking…');
-
-  mediaRecorder.stop();
-  await new Promise(res => mediaRecorder.onstop = res);
-  mediaRecorder.stream.getTracks().forEach(t => t.stop());
-
-  const blob = new Blob(audioChunks, { type: 'audio/webm' });
-  const form = new FormData();
-  form.append('file', blob, 'utterance.webm');
-
-  try {
-    const res = await fetch('/api/voice', { method: 'POST', body: form });
-    const data = await res.json();
-
-    if(!data.text){
-      addLog('system', 'Heard nothing.');
-      setState('idle');
-      return;
-    }
-
-    addMessage('user', data.text);
-    addLog('mic', `Heard: "${data.text}"`);
-    addMessage('assistant', data.reply);
-
-    setState('speaking');
-    if(data.audio_b64){
-      const audioEl = new Audio('data:audio/wav;base64,' + data.audio_b64);
-      audioEl.onended = () => { setState('idle'); stopWave(); };
-      audioEl.play();
-    } else {
-      setTimeout(()=>{ setState('idle'); stopWave(); }, 1500);
-    }
-  } catch(err){
-    addLog('system', 'Error: ' + err.message);
-    setState('idle');
-  }
-}
-
-function toggleTalk(){
-  if(!isListening) startRecording();
-  else stopRecording();
-}
-core.addEventListener('click', toggleTalk);
-window.addEventListener('keydown', (e)=>{
-  if(e.code === 'Space' && e.target === document.body){
-    e.preventDefault();
-    toggleTalk();
-  }
-});
-
-/* ============================================================
-   ACTIVITY LOG + TRANSCRIPT helpers (called by backend wiring)
-============================================================ */
 function addLog(type, text){
   const list = document.getElementById('logList');
   const el = document.createElement('div');
-  el.className = 'log-entry mono' + (type==='tool' ? ' tool' : '');
-  const label = type === 'tool' ? 'TOOL CALL' : type.toUpperCase();
+  el.className = 'log-entry mono' + (type==='tool'?' tool':'');
+  const label = type==='tool' ? 'TOOL' : type.toUpperCase();
   el.innerHTML = `<span class="t">${label} · ${new Date().toLocaleTimeString()}</span>${text}`;
   list.prepend(el);
 }
 
-function addMessage(role, text){
-  const wrap = document.getElementById('transcript');
-  const el = document.createElement('div');
-  el.className = 'msg ' + role;
-  el.innerHTML = `<div class="who">${role === 'user' ? 'YOU' : 'MOUNIR'}</div><div class="body">${text}</div>`;
-  wrap.appendChild(el);
+/* ---------------- WebSocket chat ---------------- */
+let ws, streamBubble = null, streamText = '';
+function setConn(ok){
+  document.getElementById('connText').textContent = ok ? 'online' : 'offline';
+  document.getElementById('connDot').style.background = ok ? 'var(--ok)' : 'var(--warn)';
 }
+function connect(){
+  ws = new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws/chat');
+  ws.onopen = () => setConn(true);
+  ws.onclose = () => { setConn(false); setTimeout(connect, 1500); };
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if(m.type === 'chunk'){
+      if(!streamBubble){ streamBubble = addMessage('assistant',''); streamText=''; }
+      streamText += m.text;
+      streamBubble.innerHTML = render(streamText);
+      scrollDown();
+    } else if(m.type === 'done'){
+      streamBubble = null; streamText='';
+      setState('idle');
+    } else if(m.type === 'error'){
+      addMessage('assistant', '⚠ ' + m.message);
+      streamBubble = null; setState('idle');
+    } else if(m.type === 'confirm'){
+      showConfirm(m.id, m.prompt);
+    }
+  };
+}
+connect();
+
+function sendText(){
+  const input = document.getElementById('msgInput');
+  const text = input.value.trim();
+  if(!text || !ws || ws.readyState !== 1) return;
+  addMessage('user', text);
+  ws.send(JSON.stringify({ type:'user', text }));
+  input.value=''; input.style.height='auto';
+  setState('thinking');
+}
+const input = document.getElementById('msgInput');
+input.addEventListener('input', ()=>{ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,88)+'px'; });
+input.addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendText(); } });
+document.getElementById('sendBtn').addEventListener('click', sendText);
+
+/* ---------------- confirm modal ---------------- */
+const overlay = document.getElementById('overlay');
+let pendingConfirmId = null;
+function showConfirm(id, prompt){
+  pendingConfirmId = id;
+  document.getElementById('modalBody').textContent = prompt;
+  overlay.classList.add('show');
+  addLog('tool', 'Awaiting confirmation…');
+}
+function answerConfirm(approved){
+  if(pendingConfirmId && ws && ws.readyState===1){
+    ws.send(JSON.stringify({ type:'confirm_response', id:pendingConfirmId, approved }));
+  }
+  addLog('tool', approved ? '<b>Confirmed</b>' : 'Cancelled');
+  pendingConfirmId = null;
+  overlay.classList.remove('show');
+}
+document.getElementById('confirmBtn').addEventListener('click', ()=>answerConfirm(true));
+document.getElementById('cancelBtn').addEventListener('click', ()=>answerConfirm(false));
+window.addEventListener('keydown', (e)=>{
+  if(!overlay.classList.contains('show')) return;
+  if(e.key==='Enter') answerConfirm(true);
+  if(e.key==='Escape') answerConfirm(false);
+});
+
+/* ---------------- the Siri-style fluid orb (primary) ---------------- */
+const statusEl = document.getElementById('status');
+function setStatus(label, active){
+  statusEl.className = 'status' + (active ? ' active' : '');
+  statusEl.innerHTML = `<span class="dot"></span> ${label}`;
+}
+
+// state: 'idle' | 'listening' | 'thinking' | 'speaking'
+let orbState = 'idle';
+function setState(s){
+  orbState = s;
+  if(s === 'idle')       setStatus('IDLE', false);
+  else if(s === 'listening') setStatus('LISTENING', true);
+  else if(s === 'thinking')  setStatus('PROCESSING', true);
+  else if(s === 'speaking')  setStatus('SPEAKING', true);
+}
+
+/* --- WebAudio: read live loudness so the blob reacts to the actual sound --- */
+let audioCtx = null, analyser = null, freqData = null, audioLevel = 0;
+function ensureAudio(){
+  if(audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.78;
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+}
+function connectSource(makeNode, toSpeakers){
+  ensureAudio();
+  if(audioCtx.state === 'suspended') audioCtx.resume();
+  const node = makeNode();          // built after the context exists
+  node.connect(analyser);
+  if(toSpeakers) analyser.connect(audioCtx.destination);
+}
+function readLevel(){
+  if(!analyser) return 0;
+  analyser.getByteTimeDomainData(freqData);
+  let sum = 0;
+  for(const v of freqData){ const x = (v - 128) / 128; sum += x * x; }
+  return Math.min(1, Math.sqrt(sum / freqData.length) * 4.0);  // RMS, scaled
+}
+
+/* --- canvas blob renderer --- */
+const orb = document.getElementById('orb');
+const ctx = orb.getContext('2d');
+const W = orb.width, H = orb.height, CX = W/2, CY = H/2;
+let level = 0, t = 0;
+
+function tracePath(time, baseR, amp, phase){
+  ctx.beginPath();
+  const pts = 120;
+  for(let i=0; i<=pts; i++){
+    const a = (i/pts) * Math.PI*2;
+    // low harmonics only → gentle, rounded wobble (not spiky)
+    const r = baseR + amp * (
+      Math.sin(a*2 + time*1.00 + phase) +
+      0.45*Math.sin(a*3 - time*0.80 + phase) +
+      0.22*Math.sin(a*4 + time*1.30));
+    const x = CX + Math.cos(a)*r, y = CY + Math.sin(a)*r;
+    i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+}
+function strokeBlob(time, baseR, amp, phase, color, lineW, glow){
+  tracePath(time, baseR, amp, phase);
+  ctx.lineWidth = lineW; ctx.strokeStyle = color;
+  ctx.shadowColor = color; ctx.shadowBlur = glow;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function frame(){
+  // target intensity per state; listening/speaking ride on real audio level.
+  let target;
+  if(orbState === 'listening')      target = 0.20 + audioLevel * 1.0;
+  else if(orbState === 'speaking')  target = 0.26 + audioLevel * 1.0;
+  else if(orbState === 'thinking')  target = 0.26 + 0.10*Math.sin(t*4);
+  else                              target = 0.10;                 // idle breathe
+  if(orbState === 'listening' || orbState === 'speaking') audioLevel = readLevel();
+
+  level += (target - level) * 0.10;
+  const speed = (orbState==='thinking') ? 2.4 : 1.0 + level*1.4;   // moves faster when active
+  t += 0.016 * speed;
+
+  ctx.clearRect(0,0,W,H);
+  const amp   = 4 + level*22;                 // gentler curves
+  const baseR = 168 + level*16;               // bigger, swells when active
+  const lineW = 2 + level*6;                  // thicker outline when moving
+  const glow  = 10 + level*46;                // more glow when moving
+
+  // --- glassy translucent body, lit from the top-left (3D sphere) ---
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.save();
+  tracePath(t, baseR, amp*0.95, 0.0);
+  ctx.clip();                                  // keep the glass inside the blob
+  const lx = CX - baseR*0.40, ly = CY - baseR*0.46;   // light direction
+  const body = ctx.createRadialGradient(lx, ly, baseR*0.06, CX, CY, baseR*1.25);
+  body.addColorStop(0.00, 'rgba(214,198,255,0.18)');  // soft where light hits
+  body.addColorStop(0.40, 'rgba(168,85,247,0.06)');
+  body.addColorStop(0.78, 'rgba(124,67,194,0.02)');   // very faint toward edges
+  body.addColorStop(1.00, 'rgba(8,6,14,0.00)');        // transparent at rim
+  ctx.fillStyle = body; ctx.fillRect(0,0,W,H);
+  // specular highlight — subtle shine, a touch brighter as it moves
+  const spec = ctx.createRadialGradient(lx, ly, 0, lx, ly, baseR*0.5);
+  spec.addColorStop(0, 'rgba(255,255,255,'+(0.09 + level*0.12).toFixed(3)+')');
+  spec.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = spec; ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  // --- glowing outlines on top ---
+  ctx.globalCompositeOperation = 'lighter';
+  strokeBlob(t,        baseR,    amp*0.95, 0.0, 'rgba(168,85,247,0.95)',  lineW,      glow);       // purple
+  strokeBlob(t*1.18+1, baseR-12, amp,      2.1, 'rgba(124,67,194,0.85)',  lineW*0.85, glow*0.85);  // deep purple
+  strokeBlob(t*0.86+2, baseR+10, amp*0.85, 4.2, 'rgba(196,181,253,0.80)', lineW*0.7,  glow*0.7);   // lavender
+  ctx.globalCompositeOperation = 'source-over';
+
+  requestAnimationFrame(frame);
+}
+frame();
+
+/* --- voice capture --- */
+let mediaRecorder, audioChunks=[], isListening=false;
+async function startRecording(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    connectSource(() => audioCtx.createMediaStreamSource(stream), false);  // mic → analyser, not speakers
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+    mediaRecorder.start();
+    isListening = true; setState('listening'); addLog('mic','Listening…');
+  } catch(err){ addLog('system','Mic blocked: '+err.message); }
+}
+async function stopRecording(){
+  if(!mediaRecorder) return;
+  isListening=false; audioLevel=0; setState('thinking'); addLog('system','Transcribing & thinking…');
+  mediaRecorder.stop();
+  await new Promise(r => mediaRecorder.onstop=r);
+  mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+  const blob = new Blob(audioChunks,{type:'audio/webm'});
+  const form = new FormData(); form.append('file', blob, 'utterance.webm');
+  try {
+    const data = await (await fetch('/api/voice',{method:'POST',body:form})).json();
+    if(!data.text){ addLog('system','Heard nothing.'); setState('idle'); return; }
+    addMessage('user', data.text); addLog('mic',`Heard: "${data.text}"`);
+    addMessage('assistant', data.reply);
+    if(data.audio_b64){
+      const a = new Audio('data:audio/wav;base64,'+data.audio_b64);
+      try { connectSource(() => audioCtx.createMediaElementSource(a), true); } catch(e){}
+      setState('speaking');
+      a.onended = ()=>{ audioLevel=0; setState('idle'); };
+      a.play();
+    } else setState('idle');
+  } catch(err){ addLog('system','Error: '+err.message); setState('idle'); }
+}
+function toggleTalk(){ isListening ? stopRecording() : startRecording(); }
+orb.addEventListener('click', toggleTalk);
+window.addEventListener('keydown', (e)=>{
+  // Space toggles the mic, unless you're typing in the fallback box or a modal is open.
+  if(e.code==='Space' && e.target===document.body && !overlay.classList.contains('show')){
+    e.preventDefault(); toggleTalk();
+  }
+});
 
 setState('idle');
 </script>
-
 </body>
 </html>
