@@ -17,6 +17,7 @@ the session; Ctrl+C at the empty prompt quits.
 from __future__ import annotations
 
 import contextlib
+import random
 import sys
 import threading
 import time
@@ -37,9 +38,15 @@ else:
     except Exception:
         pass
 
-from mounir import config, llm, trace
+from mounir import config, llm, tools, trace
 from mounir.agent import Agent
 from mounir.memory import Conversation
+
+
+# Shared so the Esc watcher, the thinking spinner, and the terminal confirm
+# prompt don't fight over stdin/stderr during a turn. The lock guards stdin;
+# fd/old let the confirm flip the terminal back to normal line mode to read.
+_io: dict = {"lock": threading.Lock(), "fd": None, "old": None, "spinner": None}
 
 
 @contextlib.contextmanager
@@ -63,15 +70,19 @@ def _esc_interrupts():
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     stop = threading.Event()
+    _io["fd"], _io["old"] = fd, old
 
     def _watch() -> None:
         try:
             tty.setcbreak(fd)
             while not stop.is_set():
-                if select.select([sys.stdin], [], [], 0.1)[0]:
-                    if sys.stdin.read(1) == "\x1b":  # Esc
-                        _thread.interrupt_main()
-                        return
+                # Read under the shared lock so a confirm prompt (which borrows
+                # stdin in cooked mode) isn't fighting us for the keystrokes.
+                with _io["lock"]:
+                    if select.select([sys.stdin], [], [], 0.05)[0]:
+                        if sys.stdin.read(1) == "\x1b":  # Esc
+                            _thread.interrupt_main()
+                            return
         except Exception:
             pass
 
@@ -84,6 +95,118 @@ def _esc_interrupts():
         watcher.join(timeout=0.2)
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         termios.tcflush(fd, termios.TCIFLUSH)  # drop any keys hit while working
+        _io["fd"], _io["old"] = None, None
+
+
+# Claude-Code-style filler words shown while Mounir is working. Pure flavour.
+_THINK_WORDS = [
+    "Thinking", "Pondering", "Cooking", "Brewing", "Scheming", "Noodling",
+    "Percolating", "Ruminating", "Conjuring", "Crunching", "Mulling", "Churning",
+    "Tinkering", "Hatching", "Plotting", "Computing", "Wrangling", "Vibing",
+    "Synthesizing", "Spelunking", "Finagling", "Marinating", "Concocting",
+]
+_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+class Spinner:
+    """A moving shape + rotating word printed to stderr while we wait.
+
+    Stops and wipes its line the moment the reply starts. No-op when stderr
+    isn't a terminal (piped output), so logs stay clean.
+    """
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        # One word picked per request; it persists until the reply is done.
+        self._word = random.choice(_THINK_WORDS)
+
+    @staticmethod
+    def _clear() -> None:
+        sys.stderr.write("\r\033[2K")  # carriage return + erase the whole line
+        sys.stderr.flush()
+
+    def start(self) -> None:
+        if not sys.stderr.isatty():
+            return
+        self._stop.clear()
+        # Let trace wipe our line before it prints, so its output never lands
+        # on top of the spinner (which would leave a frozen leftover frame).
+        trace.set_pre_output(self._clear)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        start = time.time()
+        i = 0
+        while not self._stop.is_set():
+            frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
+            i += 1
+            secs = int(time.time() - start)
+            # Write under trace's lock so frames never interleave with trace lines.
+            with trace.output_lock():
+                sys.stderr.write(
+                    f"\r\033[2K{trace.LAV}{frame} {self._word}…{trace.RESET}"
+                    f" {trace.DIM}({secs}s · esc to interrupt){trace.RESET}"
+                )
+                sys.stderr.flush()
+            self._stop.wait(0.09)
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=0.3)
+        self._thread = None
+        trace.set_pre_output(None)
+        if sys.stderr.isatty():
+            with trace.output_lock():
+                self._clear()
+
+
+def _terminal_confirm(action: str) -> bool:
+    """Ask the user to confirm an action in the terminal — y = yes.
+
+    A tool calls this from the agent's worker thread mid-turn, while the Esc
+    watcher and the thinking spinner are also live. So we stop the spinner and
+    borrow stdin in normal line mode under the shared lock; the watcher backs
+    off, the prompt echoes properly, then we hand the terminal back.
+    """
+    spinner = _io.get("spinner")
+    if spinner is not None:
+        spinner.stop()
+
+    fd, old = _io.get("fd"), _io.get("old")
+    prompt = (
+        f"\n  {trace.PURPLE}⚠{trace.RESET} {trace.BOLD}confirm{trace.RESET} {action}\n"
+        f"  {trace.DIM}y/N ›{trace.RESET} "
+    )
+
+    if not (sys.stdin.isatty() and fd is not None):
+        try:                       # piped / no Esc watcher: just prompt plainly
+            return input(prompt).strip().lower() in ("y", "yes")
+        except EOFError:
+            return False
+
+    import termios
+    import tty
+
+    with _io["lock"]:              # block the watcher's reads while we prompt
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)   # cooked: echo + line edit
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception:
+            pass
+        try:
+            answer = input(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        finally:
+            try:
+                tty.setcbreak(fd)   # restore raw mode for the Esc watcher
+            except Exception:
+                pass
+    return answer in ("y", "yes")
 
 
 def main() -> int:
@@ -96,6 +219,7 @@ def main() -> int:
         return 1
 
     agent = Agent()
+    tools.confirm_fn = _terminal_confirm  # terminal confirm that coexists with Esc + spinner
     trace.banner("knuckles cracked. no cloud, no fluff. let's cook.")
     trace.rule()
     trace.kv("model", llm.active_model(agent.model))
@@ -130,16 +254,24 @@ def main() -> int:
         print()  # breathing room between the prompt and the reply
         start = time.time()
         tokens = 0
+        spinner = Spinner()
+        _io["spinner"] = spinner  # so a confirm prompt can pause it
+        spinner.start()
         try:
             with _esc_interrupts():
                 for chunk in agent.respond(user_input):
+                    if tokens == 0:
+                        spinner.stop()  # first output — clear the thinking line
                     print(chunk, end="", flush=True)
                     tokens += 1
+            spinner.stop()  # no chunks produced
         except llm.OllamaError as exc:
+            spinner.stop()
             print(f"\n[error] {exc}")
             continue
         except KeyboardInterrupt:
             # Esc or Ctrl+C while working: drop this response, keep the session.
+            spinner.stop()
             print(f"\n{trace.DIM}  [interrupted]{trace.RESET}")
             continue
         elapsed = time.time() - start

@@ -15,8 +15,31 @@ from __future__ import annotations
 import shutil
 import sys
 import textwrap
+import threading
 
 _TTY = sys.stderr.isatty()
+
+# Serializes every stderr write and lets a live status line (e.g. the CLI's
+# thinking spinner) wipe itself right before any trace line prints, so trace
+# output never lands on top of the spinner and leaves frozen leftovers.
+_lock = threading.RLock()
+_pre_output = None
+
+
+def output_lock() -> threading.RLock:
+    """Shared lock so an external writer (the spinner) can serialize with trace."""
+    return _lock
+
+
+def set_pre_output(fn) -> None:
+    """Register a callback run (under the lock) just before each trace line."""
+    global _pre_output
+    _pre_output = fn
+
+
+def gap() -> None:
+    """Emit a blank line into the trace stream (spacing between sections)."""
+    _out("")
 
 
 def _c(code: str) -> str:
@@ -32,7 +55,10 @@ RESET = _c("\033[0m")
 
 
 def _out(text: str) -> None:
-    print(text, file=sys.stderr, flush=True)
+    with _lock:
+        if _pre_output is not None:
+            _pre_output()
+        print(text, file=sys.stderr, flush=True)
 
 
 def _width() -> int:
@@ -59,7 +85,7 @@ def _fmt_params(params: dict) -> str:
 
 def node(name: str, detail: str = "") -> None:
     tail = f"{DIM}  ·  {detail}{RESET}" if detail else ""
-    _out(f"\n{PURPLE}●{RESET} {BOLD}{PURPLE}{name}{RESET}{tail}")
+    _out(f"\n\n{PURPLE}●{RESET} {BOLD}{PURPLE}{name}{RESET}{tail}")
 
 
 def event(text: str) -> None:

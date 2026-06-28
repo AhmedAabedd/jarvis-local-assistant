@@ -144,6 +144,7 @@ def _supervisor(
                     ],
                 }
             )
+            trace.gap()  # separate the delegation from the thinking spinner
             trace.event(f"→ delegating to {target}")
             return Command(goto=target, update={"messages": new_messages})
 
@@ -195,6 +196,7 @@ def _coder(state: TurnState) -> Command:
     report = run_coder(task).strip() if task else "No task was provided to the coder."
 
     trace.block("returned  → supervisor", report)
+    trace.gap()  # breathing room before the supervisor's reply streams in
     # The report is the result of the delegate_to_coder tool call, handed back
     # to the supervisor. The coder's own file-tool chatter never leaves the node.
     return Command(
@@ -222,6 +224,7 @@ def _researcher(state: TurnState) -> Command:
     report = run_researcher(task).strip() if task else "No task was provided to the researcher."
 
     trace.block("returned  → supervisor", report)
+    trace.gap()  # breathing room before the supervisor's reply streams in
     # Only the synthesized report (with sources) crosses back; the search/fetch
     # chatter and raw page text stay inside this node.
     return Command(
