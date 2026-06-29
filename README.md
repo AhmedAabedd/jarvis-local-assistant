@@ -2,9 +2,10 @@
 
 Mounir is a Jarvis-style assistant that runs on **your own machine**. The brain
 that talks to you is a **local LLM** (via [Ollama](https://ollama.com)); it can
-read and edit files, run shell commands, open apps, send email, and — when a job
-needs more horsepower — hand off to specialist agents in the cloud. No data
-leaves your box unless a tool explicitly sends it.
+read and edit files, run shell commands, open apps, send email, read media
+(images, PDFs, audio, video), and — when a job needs more horsepower — hand off
+to specialist agents in the cloud. No data leaves your box unless a tool
+explicitly sends it.
 
 It speaks too: optional voice mode transcribes your speech (Whisper), thinks, and
 talks back (Piper). There's also a small web dashboard.
@@ -22,22 +23,28 @@ context-hungry jobs to isolated specialist agents, getting back only a compact
 report.
 
 ```
-                    ┌──────────────────┐
-   you ── text ───▶ │    SUPERVISOR    │ ── answer ──▶ you
-                    │   (local LLM)    │
-                    │  files · bash ·  │
-                    │  browser · email │
-                    └───┬───────────┬──┘
-       delegate_to_coder│           │delegate_to_researcher
-                        ▼           ▼
-              ┌──────────────┐  ┌──────────────┐
-              │    CODER     │  │  RESEARCHER  │
-              │  (NVIDIA)    │  │   (NVIDIA)   │
-              │  file tools, │  │  web search, │
-              │ surgical edit│  │  fetch pages │
-              └──────┬───────┘  └──────┬───────┘
-                     └── report back ──┘
+                       ┌──────────────────┐
+   you ── text ──────▶ │    SUPERVISOR    │ ── answer ──▶ you
+                       │   (local LLM)    │
+                       │  files · bash ·  │
+                       │  browser · email │
+                       └─┬───────┬──────┬─┘
+        delegate_to_     │       │      │     delegate_to_media
+        researcher       │       │      │
+                         ▼       ▼      ▼
+              ┌────────────┐ ┌────────┐ ┌────────────┐
+              │ RESEARCHER │ │ CODER  │ │   MEDIA    │
+              │  (NVIDIA)  │ │(NVIDIA)│ │  (NVIDIA)  │
+              │ web search │ │ file   │ │ img · pdf  │
+              │ fetch page │ │ edits  │ │ audio·vid  │
+              └─────┬──────┘ └───┬────┘ └─────┬──────┘
+                    └──────── report back ────┘
 ```
+
+> The supervisor reaches the **researcher** and **media** specialists by tool
+> call. The **coder** node is wired the same way but its `delegate_to_coder`
+> tool is currently turned off (schema commented out in `tools.py`); the node,
+> tool, and registry entry stay in place to re-enable it in one edit.
 
 **Why this shape:**
 
@@ -56,12 +63,15 @@ report.
 
 | Agent | Model (default) | Tools |
 |---|---|---|
-| **Supervisor** | local `mounir` (Ollama) — or Mistral / Groq | `read_file`, `write_file`, `edit_file`, `list_directory`, `open_browser`, `open_path`, `bash`, `send_email`, `delegate_to_coder`, `delegate_to_researcher` |
-| **Coder** | `minimaxai/minimax-m3` (NVIDIA) | `read_file`, `create_file`, `modify_file`, `delete_file`, `search_file` |
+| **Supervisor** | local `mounir` (Ollama) — or Mistral / Groq | `read_file`, `write_file`, `edit_file`, `list_directory`, `open_browser`, `open_path`, `bash`, `send_email`, `delegate_to_researcher`, `delegate_to_media` |
 | **Researcher** | `nvidia/llama-3.3-nemotron-super-49b-v1.5` (NVIDIA) | `web_search`, `search_news`, `fetch_url` |
+| **Coder** *(delegation off)* | `minimaxai/minimax-m3` (NVIDIA) | `read_file`, `create_file`, `modify_file`, `delete_file`, `search_file` |
+| **Media** | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` (NVIDIA) | `load_media`, `sample_frames`, `find_media` |
 
 The supervisor has **no web access of its own** — all lookups go through the
-researcher. All **code** work goes through the coder. Each specialist's tools are
+researcher; anything it needs to *see or hear* (an image, a PDF, a screenshot, an
+audio clip, a video) goes to the **media** agent, which loads the bytes, lets an
+omni model read them, and returns a text report. Each specialist's tools are
 isolated to its own module, so its work never leaks into the supervisor's context.
 
 ### Notable tool details (inspired by agentic file editors)
@@ -76,6 +86,16 @@ isolated to its own module, so its work never leaks into the supervisor's contex
   `timeout` and a `run_in_background` flag for long-running processes.
 - **`open_path`** opens any file/folder/URL with the system default app (xdg-open).
 - **`send_email`** sends via SMTP with optional file attachments (also confirmed).
+  You can email a saved contact **by name**: the model reads the address book
+  (`knowledge/contacts.md`) and sends to the listed address — handy for voice,
+  where spelling out an email is painful. After a send to an unknown address it's
+  prompted to save the new contact; if a name isn't on file it asks rather than
+  guessing.
+- **`load_media` / `sample_frames`** (media agent) attach a file's bytes to the
+  agent's own conversation so the omni model can analyse it directly — images and
+  audio inline, PDFs as extracted text (or page images when scanned), and video as
+  sampled keyframes. Optional deps are loaded only when used (`Pillow`, `pypdf`,
+  `PyMuPDF`, `opencv-python`).
 
 ### Memory
 
@@ -209,6 +229,7 @@ Everything tunable lives in `mounir/config.py` and is overridable by env var.
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | OpenAI-compatible endpoint |
 | `CODER_MODEL` | `minimaxai/minimax-m3` | Coder model |
 | `RESEARCHER_MODEL` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` | Researcher model |
+| `MEDIA_MODEL` | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | Media (omni) model |
 
 **Alternative supervisor providers (optional)**
 
@@ -223,6 +244,8 @@ Everything tunable lives in `mounir/config.py` and is overridable by env var.
 |---|---|---|
 | `MOUNIR_SMTP_HOST` / `MOUNIR_SMTP_PORT` | `smtp.gmail.com` / `587` | SMTP server |
 | `MOUNIR_SMTP_USER` / `MOUNIR_SMTP_PASS` | – | Email + **Gmail App Password** (not your login password) |
+| `MOUNIR_IMAP_HOST` | `imap.gmail.com` | IMAP server for reading the inbox |
+| `MOUNIR_KNOWLEDGE_DIR` | `knowledge/` | Folder for the `contacts.md` address book |
 
 **Voice / wake word**
 
@@ -255,9 +278,11 @@ index.html              the dashboard UI
 modelfiles/             the 'mounir' Ollama Modelfile (personality + params)
 requirements.txt        core deps
 requirements-voice.txt  voice deps (on top of the core)
+knowledge/
+  contacts.md           address book (name → email) for send_email by name
 
 mounir/
-  langgraph_agent.py    the supervisor + coder + researcher graph, Agent.respond()
+  langgraph_agent.py    the supervisor + coder + researcher + media graph
   agent.py              thin compatibility wrapper around the graph
   config.py             all tunables (env-overridable) + the supervisor prompt
   llm.py                provider clients (Ollama stream, Mistral, Groq, NVIDIA)
@@ -267,6 +292,7 @@ mounir/
   specialists/
     coder.py            coder agent + its isolated file tools
     researcher.py       researcher agent + its isolated web tools
+    media.py            media agent + its isolated load/sample/find tools
   audio.py stt.py tts.py voice.py wakeword.py sentences.py   voice pipeline
 ```
 
@@ -274,7 +300,8 @@ mounir/
 
 ## Status
 
-Working: local text chat with the supervisor, the coder and researcher
-specialists, full-turn memory, voice (push-to-talk + hands-free), and the web
-dashboard. Ongoing: a custom "Hey Mounir" wake word, more tools, and long-term
-memory of facts about the user.
+Working: local text chat with the supervisor, the researcher and media
+specialists (the coder is wired but its delegation is currently off), email
+including send-by-name from the contacts file, full-turn memory, voice
+(push-to-talk + hands-free), and the web dashboard. Ongoing: a custom "Hey
+Mounir" wake word, more tools, and long-term memory of facts about the user.
