@@ -29,6 +29,12 @@ def delegate_to_researcher(task: str) -> str:
     return run(task)
 
 
+def delegate_to_media(task: str) -> str:
+    """Ask the media agent to read an image, PDF, audio clip, or video."""
+    from .specialists.media import run
+    return run(task)
+
+
 # The supervisor runs on a small, local model with a modest context window, and
 # reads files only incidentally (a note, a config, a path the user mentions) —
 # heavy code reading is the coder's job. So keep a read to a quick glance the
@@ -352,9 +358,30 @@ def send_email(to: str, subject: str, body: str, attachments: list[str] | None =
             server.send_message(msg)
     except Exception as exc:
         return f"Failed to send email: {exc}"
-    if files:
-        return f"Email sent to {to} with {len(files)} attachment(s)."
-    return f"Email sent to {to}."
+
+    result = (
+        f"Email sent to {to} with {len(files)} attachment(s)."
+        if files else f"Email sent to {to}."
+    )
+    # Tell the model to remember a new address: if this email isn't already in
+    # the contacts file, instruct it to append the contact so next time the user
+    # can send by name alone.
+    if not _email_in_contacts(to):
+        result += (
+            f"\n\n[contacts] {to} is not in {config.CONTACTS_FILE}. If it belongs "
+            f"to a person, append a new line 'Name: {to}' to the END of that file "
+            f"(use the recipient's name) so it's saved for next time."
+        )
+    return result
+
+
+def _email_in_contacts(email: str) -> bool:
+    """True if the address already appears anywhere in the contacts file."""
+    path = config.CONTACTS_FILE
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8", errors="replace").lower()
+    return email.strip().lower() in text
 
 
 def _plain_text(msg) -> str:
@@ -715,29 +742,33 @@ SCHEMAS = [
 ]
 
 SCHEMAS += [
-    {
-        "type": "function",
-        "function": {
-            "name": "delegate_to_coder",
-            "description": (
-                "Delegate ANY coding task to the coder agent: writing new code, "
-                "editing existing files, debugging, refactoring. "
-                "The coder reads and writes files itself — you never see the code. "
-                "You only get back a short summary of what was done. "
-                "Include the full file path(s) in the task description."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "What code to write, fix, or explain. Be specific about language, requirements, and any constraints.",
-                    },
-                },
-                "required": ["task"],
-            },
-        },
-    },
+    # delegate_to_coder is intentionally hidden from the supervisor LLM for now:
+    # the coder node + tool function + registry entry all stay wired up, but
+    # without a schema here the model is never offered the tool, so it can't
+    # delegate code. Uncomment this block to re-enable coder delegation.
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "delegate_to_coder",
+    #         "description": (
+    #             "Delegate ANY coding task to the coder agent: writing new code, "
+    #             "editing existing files, debugging, refactoring. "
+    #             "The coder reads and writes files itself — you never see the code. "
+    #             "You only get back a short summary of what was done. "
+    #             "Include the full file path(s) in the task description."
+    #         ),
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "task": {
+    #                     "type": "string",
+    #                     "description": "What code to write, fix, or explain. Be specific about language, requirements, and any constraints.",
+    #                 },
+    #             },
+    #             "required": ["task"],
+    #         },
+    #     },
+    # },
     {
         "type": "function",
         "function": {
@@ -762,6 +793,30 @@ SCHEMAS += [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_to_media",
+            "description": (
+                "Delegate ANYTHING that needs reading media to the media agent: "
+                "images, PDFs, audio clips, or video. It sees/hears the file "
+                "itself and returns a text report of what's in it (text in an "
+                "image or PDF, what's said in audio, what happens in a video). "
+                "Use it whenever the user points at a file you'd need to look at "
+                "or listen to. Include the full file path in the task."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "What to read/analyse, with the file path(s) and exactly what you need to know.",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
 ]
 
 _REGISTRY = {
@@ -776,6 +831,7 @@ _REGISTRY = {
     "read_emails": read_emails,
     "delegate_to_coder": delegate_to_coder,
     "delegate_to_researcher": delegate_to_researcher,
+    "delegate_to_media": delegate_to_media,
 }
 
 

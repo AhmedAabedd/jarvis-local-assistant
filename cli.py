@@ -118,7 +118,8 @@ class Spinner:
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        # One word picked per request; it persists until the reply is done.
+        self._started_at = 0.0
+        # One word picked per request; it persists for the whole turn.
         self._word = random.choice(_THINK_WORDS)
 
     @staticmethod
@@ -127,23 +128,33 @@ class Spinner:
         sys.stderr.flush()
 
     def start(self) -> None:
-        if not sys.stderr.isatty():
+        """Show the indicator. Stays up until finish()."""
+        if not sys.stderr.isatty() or self._thread is not None:
             return
+        self._started_at = time.time()
+        trace.set_pre_output(self._clear)   # trace wipes our line before printing
         self._stop.clear()
-        # Let trace wipe our line before it prints, so its output never lands
-        # on top of the spinner (which would leave a frozen leftover frame).
-        trace.set_pre_output(self._clear)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def finish(self) -> None:
+        """Stop the indicator and unhook trace (idempotent)."""
+        trace.set_pre_output(None)
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=0.3)
+        self._thread = None
+        if sys.stderr.isatty():
+            with trace.output_lock():
+                self._clear()
+
     def _run(self) -> None:
-        start = time.time()
         i = 0
         while not self._stop.is_set():
             frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
             i += 1
-            secs = int(time.time() - start)
-            # Write under trace's lock so frames never interleave with trace lines.
+            secs = int(time.time() - self._started_at)
             with trace.output_lock():
                 sys.stderr.write(
                     f"\r\033[2K{trace.LAV}{frame} {self._word}…{trace.RESET}"
@@ -152,35 +163,34 @@ class Spinner:
                 sys.stderr.flush()
             self._stop.wait(0.09)
 
-    def stop(self) -> None:
-        if self._thread is None:
-            return
-        self._stop.set()
-        self._thread.join(timeout=0.3)
-        self._thread = None
-        trace.set_pre_output(None)
-        if sys.stderr.isatty():
-            with trace.output_lock():
-                self._clear()
+
+def _confirm_prompt(action: str) -> str:
+    """Build the styled confirmation prompt (handles multi-line actions)."""
+    body = "\n".join(
+        f"  {trace.PURPLE}│{trace.RESET} {ln}" for ln in (action.splitlines() or [""])
+    )
+    return (
+        f"\n  {trace.PURPLE}⚠  {trace.BOLD}Confirm{trace.RESET}{trace.DIM} — needs your OK{trace.RESET}\n"
+        f"{body}\n"
+        f"  {trace.DIM}approve?{trace.RESET} {trace.BOLD}{trace.LAV}y{trace.RESET}{trace.DIM}/{trace.RESET}N "
+        f"{trace.PURPLE}›{trace.RESET} "
+    )
 
 
 def _terminal_confirm(action: str) -> bool:
     """Ask the user to confirm an action in the terminal — y = yes.
 
     A tool calls this from the agent's worker thread mid-turn, while the Esc
-    watcher and the thinking spinner are also live. So we stop the spinner and
-    borrow stdin in normal line mode under the shared lock; the watcher backs
-    off, the prompt echoes properly, then we hand the terminal back.
+    watcher is live. We stop the spinner for good and borrow stdin in normal
+    line mode under the shared lock so the watcher backs off and the prompt
+    echoes properly.
     """
     spinner = _io.get("spinner")
     if spinner is not None:
-        spinner.stop()
+        spinner.finish()           # stop the indicator — the prompt takes over
 
     fd, old = _io.get("fd"), _io.get("old")
-    prompt = (
-        f"\n  {trace.PURPLE}⚠{trace.RESET} {trace.BOLD}confirm{trace.RESET} {action}\n"
-        f"  {trace.DIM}y/N ›{trace.RESET} "
-    )
+    prompt = _confirm_prompt(action)
 
     if not (sys.stdin.isatty() and fd is not None):
         try:                       # piped / no Esc watcher: just prompt plainly
@@ -255,23 +265,23 @@ def main() -> int:
         start = time.time()
         tokens = 0
         spinner = Spinner()
-        _io["spinner"] = spinner  # so a confirm prompt can pause it
+        _io["spinner"] = spinner  # so a confirm prompt can stop it
         spinner.start()
         try:
             with _esc_interrupts():
                 for chunk in agent.respond(user_input):
-                    if tokens == 0:
-                        spinner.stop()  # first output — clear the thinking line
+                    if chunk.strip():
+                        spinner.finish()  # real text streaming — stop thinking (idempotent)
                     print(chunk, end="", flush=True)
                     tokens += 1
-            spinner.stop()  # no chunks produced
+            spinner.finish()
         except llm.OllamaError as exc:
-            spinner.stop()
+            spinner.finish()
             print(f"\n[error] {exc}")
             continue
         except KeyboardInterrupt:
             # Esc or Ctrl+C while working: drop this response, keep the session.
-            spinner.stop()
+            spinner.finish()
             print(f"\n{trace.DIM}  [interrupted]{trace.RESET}")
             continue
         elapsed = time.time() - start

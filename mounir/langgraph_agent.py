@@ -34,6 +34,7 @@ from typing import Annotated, Iterator, TypedDict
 from . import config as cfg, llm, tools
 from .memory import Conversation
 from .specialists.coder import run as run_coder
+from .specialists.media import run as run_media
 from .specialists.researcher import run as run_researcher
 from . import trace
 
@@ -53,6 +54,7 @@ MAX_DELEGATIONS = 3
 _DELEGATES = {
     "delegate_to_coder": "coder",
     "delegate_to_researcher": "researcher",
+    "delegate_to_media": "media",
 }
 
 
@@ -242,6 +244,34 @@ def _researcher(state: TurnState) -> Command:
     )
 
 
+# --- media node -------------------------------------------------------------
+
+def _media(state: TurnState) -> Command:
+    task, call_id = _extract_delegate(state["messages"], "delegate_to_media")
+    trace.node("media")
+    trace.block("received  ← supervisor", task)
+
+    report = run_media(task).strip() if task else "No task was provided to the media agent."
+
+    trace.block("returned  → supervisor", report)
+    trace.gap()  # breathing room before the supervisor's reply streams in
+    # Only the text report crosses back; the raw image/audio bytes loaded inside
+    # the node never enter `messages`, keeping the orchestrator's context small.
+    return Command(
+        goto="supervisor",
+        update={
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_name": "delegate_to_media",
+                    "tool_call_id": call_id,
+                    "content": report,
+                }
+            ]
+        },
+    )
+
+
 # --- graph ------------------------------------------------------------------
 
 def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
@@ -259,6 +289,7 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
     )
     graph.add_node("coder", _coder)
     graph.add_node("researcher", _researcher)
+    graph.add_node("media", _media)
     graph.add_edge(START, "supervisor")
     return graph.compile()
 
