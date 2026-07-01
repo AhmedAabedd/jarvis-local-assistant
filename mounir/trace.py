@@ -126,13 +126,18 @@ _BANNER = [
 ]
 
 
+# Left gutter for the wordmark so it doesn't hug the terminal edge; matches
+# the 2-space margin the rest of the UI (kv rows, blocks) already uses.
+_BANNER_PAD = "   "
+
+
 def banner(subtitle: str = "") -> None:
     """Print the big purple MOUNIR wordmark to stdout (startup branding)."""
     print()
     for line in _BANNER:
-        print(f"{PURPLE}{BOLD}{line}{RESET}")
+        print(f"{_BANNER_PAD}{PURPLE}{BOLD}{line}{RESET}")
     if subtitle:
-        print(f"{DIM}{subtitle}{RESET}")
+        print(f"{_BANNER_PAD}{DIM}{subtitle}{RESET}")
     print()
 
 
@@ -144,4 +149,18 @@ def rule(width: int | None = None) -> None:
 
 def kv(label: str, value: str) -> None:
     """An aligned key/value row for the startup header (stdout)."""
-    print(f"  {DIM}{label:<9}{RESET}{LAV}{value}{RESET}")
+    print(f"  {DIM}{label:<14}{RESET}{LAV}{value}{RESET}")
+
+
+def agent_row(label: str, value: str) -> None:
+    """The highlighted head of the startup tree — the supervisor agent itself.
+    Bright + bold so the eye lands here first; the specialist rows below read
+    as its children."""
+    print(f"  {BOLD}{LAV}{label:<14}{RESET}{BOLD}{value}{RESET}")
+
+
+def sub_row(label: str, value: str, last: bool = False) -> None:
+    """A specialist nested under the agent, drawn dim as a tree child so it
+    visually recedes beneath the highlighted agent row."""
+    branch = "└─" if last else "├─"
+    print(f"  {PURPLE}{branch}{RESET} {DIM}{label:<11}{value}{RESET}")

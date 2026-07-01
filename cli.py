@@ -231,12 +231,13 @@ def main() -> int:
     agent = Agent()
     tools.confirm_fn = _terminal_confirm  # terminal confirm that coexists with Esc + spinner
     trace.banner("knuckles cracked. no cloud, no fluff. let's cook.")
-    trace.rule()
-    trace.kv("model", llm.active_model(agent.model))
-    trace.kv("coder", f"{config.CODER_MODEL}  ·  nvidia")
+    trace.rule(64)
+    trace.agent_row("Agent", llm.active_model(agent.model))
+    trace.sub_row("coder", config.CODER_MODEL)
+    trace.sub_row("researcher", config.RESEARCHER_MODEL)
+    trace.sub_row("media", config.MEDIA_MODEL, last=True)
     trace.kv("thinking", "on" if config.THINK else "off")
-    trace.kv("status", "online")
-    trace.rule()
+    trace.rule(64)
     print("  Type a message, Esc to interrupt a reply, or /exit to quit.\n")
 
     # A purple arrow marks the input area. With readline active, color codes
