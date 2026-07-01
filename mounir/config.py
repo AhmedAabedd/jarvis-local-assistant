@@ -192,3 +192,25 @@ RESEARCHER_MODEL: str = os.environ.get("RESEARCHER_MODEL", "nvidia/llama-3.3-nem
 # audio, and video frames. Must be a model that accepts image/audio content
 # parts on the NVIDIA OpenAI-compatible endpoint.
 MEDIA_MODEL: str = os.environ.get("MEDIA_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
+
+
+# --- Cloud text-to-speech (Google Cloud TTS) --------------------------------
+# Which backend tts.speak() uses: "google" (cloud) or "piper" (local).
+# Defaults to piper so nothing changes until you opt in with MOUNIR_TTS_BACKEND.
+TTS_BACKEND: str = os.environ.get("MOUNIR_TTS_BACKEND", "piper").lower()
+# Google Cloud TTS over REST + a plain API key (no service-account JSON). Make a
+# key in the Google Cloud console with the "Cloud Text-to-Speech API" enabled.
+# Free tier: ~1M chars/month on Neural2/WaveNet voices, refilled monthly.
+GOOGLE_TTS_API_KEY: str = os.environ.get("GOOGLE_TTS_API_KEY", "")
+GOOGLE_TTS_LANGUAGE: str = os.environ.get("GOOGLE_TTS_LANGUAGE", "en-US")
+GOOGLE_TTS_VOICE: str = os.environ.get("GOOGLE_TTS_VOICE", "en-US-Neural2-D")
+
+
+# --- Cloud speech-to-text (Groq Whisper) ------------------------------------
+# Which backend stt.transcribe() uses: "groq" (cloud) or "local" (faster-whisper).
+# Defaults to local so nothing changes until you opt in with MOUNIR_STT_BACKEND.
+STT_BACKEND: str = os.environ.get("MOUNIR_STT_BACKEND", "local").lower()
+# Groq's OpenAI-compatible audio endpoint; reuses GROQ_API_KEY above.
+# whisper-large-v3-turbo is multilingual and ~216x real-time.
+GROQ_BASE_URL: str = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+GROQ_STT_MODEL: str = os.environ.get("GROQ_STT_MODEL", "whisper-large-v3-turbo")
