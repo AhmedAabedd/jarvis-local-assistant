@@ -5,7 +5,5 @@
 me: ahmed.labedd@gmail.com
 Djappa/Ayham: ayham@gmail.com
 Mom/Maman: mom@example.com
+Mohsen/Moshen/Moshenxx: moshenxx@gmail.com
 
-# NOTE TO MOUNIR: if the name you need is NOT listed above, do not send to
-# anyone else — ask the user for the correct email address.
-# Using a wrong email address is worse than asking Ahmed.

@@ -63,18 +63,11 @@ SYSTEM_PROMPT: str = (
     "image, a PDF, a screenshot, an audio clip, a video — you MUST call "
     "delegate_to_media with the file path."
     "The media agent reads the file and returns a text report.\n"
-    "4. EMAILING A PERSON BY NAME — do this exactly, in order:\n"
-    "FIRST read the contacts file "
-    "(~/mounir_assistant/jarvis-local-assistant/knowledge/contacts.md).\n"
-    "If that EXACT name is listed, call send_email with the address next "
-    "to it. Otherwise stop and ask Ahmed for it.\n"
-    "Never guess, invent, or pick the closest name. A missing "
-    "contact means ASK — sending to the wrong person is a serious failure.\n"
     #"4. write_file and edit_file are only for simple, non-code text (a note, a "
     #"plain-text or config file): write_file creates or overwrites a whole file, "
     #"edit_file makes a surgical change to an existing one. Never use either to "
     #"create or edit code — that always goes to delegate_to_coder.\n"
-    "5. When you don't know something, say so straight instead of making it up."
+    "4. When you don't know something, say so straight instead of making it up."
 )
 
 # --- Voice (Stage 2) --------------------------------------------------------
@@ -136,13 +129,17 @@ KNOWLEDGE_DIR: Path = Path(
     os.environ.get("MOUNIR_KNOWLEDGE_DIR", Path(__file__).resolve().parent.parent / "knowledge")
 )
 CONTACTS_FILE: Path = KNOWLEDGE_DIR / "contacts.md"
+# index.md is the always-loaded "menu" of the knowledge folder: it lists every
+# knowledge file and when to open it. Only this small index rides in context;
+# the model reads a specific file (read_file) on demand when a task needs it.
+INDEX_FILE: Path = KNOWLEDGE_DIR / "index.md"
 
 LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Tunis, Tunisia")
 
 
 def _build_context_message() -> str:
     h = Path.home()
-    return "\n".join([
+    lines = [
         f"OS: {platform.system()} {platform.release()}",
         f"Home: {h}",
         f"Current directory: {Path.cwd()}",
@@ -150,7 +147,17 @@ def _build_context_message() -> str:
         f"Documents: {h / 'Documents'}",
         f"Desktop: {h / 'Desktop'}",
         f"Location: {LOCATION}",
-    ])
+    ]
+    # Append the knowledge index (the "menu") so Mounir always knows what
+    # knowledge files exist and when to read one. Kept small on purpose.
+    try:
+        index = INDEX_FILE.read_text(encoding="utf-8", errors="replace").strip()
+        if index:
+            lines.append("\nKnowledge available (read a file with read_file when needed):")
+            lines.append(index)
+    except OSError:
+        pass
+    return "\n".join(lines)
 
 
 CONTEXT_MESSAGE: str = _build_context_message()
