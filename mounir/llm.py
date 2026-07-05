@@ -48,6 +48,38 @@ def nvidia_chat(messages, tools=None, model=None, *, disable_thinking=False,
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]
 
+def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
+                max_tokens=8192) -> dict:
+    """One non-streaming Gemini chat-completion via Google's OpenAI-compatible
+    endpoint — same message/tool format as nvidia_chat, no extra SDK needed.
+
+    Returns the assistant message dict ({content, tool_calls}). Used by the
+    librarian specialist.
+    """
+    import requests
+
+    payload = {
+        "model": model or config.GEMINI_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if tools:
+        payload["tools"] = tools
+    headers = {
+        "Authorization": f"Bearer {config.GEMINI_API_KEY}",
+        "Accept": "application/json",
+    }
+    resp = requests.post(
+        f"{config.GEMINI_BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]
+
 def is_up() -> bool:
     if config.USE_MISTRAL:
         return bool(config.MISTRAL_API_KEY)

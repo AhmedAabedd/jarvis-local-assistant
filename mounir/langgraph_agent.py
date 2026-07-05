@@ -34,6 +34,7 @@ from typing import Annotated, Iterator, TypedDict
 from . import config as cfg, llm, tools
 from .memory import Conversation
 from .specialists.coder import run as run_coder
+from .specialists.librarian import run as run_librarian
 from .specialists.media import run as run_media
 from .specialists.researcher import run as run_researcher
 from . import trace
@@ -55,6 +56,7 @@ _DELEGATES = {
     "delegate_to_coder": "coder",
     "delegate_to_researcher": "researcher",
     "delegate_to_media": "media",
+    "delegate_to_librarian": "librarian",
 }
 
 
@@ -272,6 +274,34 @@ def _media(state: TurnState) -> Command:
     )
 
 
+# --- librarian node ---------------------------------------------------------
+
+def _librarian(state: TurnState) -> Command:
+    task, call_id = _extract_delegate(state["messages"], "delegate_to_librarian")
+    trace.node("librarian")
+    trace.block("received  ← supervisor", task)
+
+    report = run_librarian(task).strip() if task else "No task was provided to the librarian."
+
+    trace.block("returned  → supervisor", report)
+    trace.gap()  # breathing room before the supervisor's reply streams in
+    # Only the short curation report crosses back; the librarian's file reads
+    # and index bookkeeping stay inside this node.
+    return Command(
+        goto="supervisor",
+        update={
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_name": "delegate_to_librarian",
+                    "tool_call_id": call_id,
+                    "content": report,
+                }
+            ]
+        },
+    )
+
+
 # --- graph ------------------------------------------------------------------
 
 def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
@@ -290,6 +320,7 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
     graph.add_node("coder", _coder)
     graph.add_node("researcher", _researcher)
     graph.add_node("media", _media)
+    graph.add_node("librarian", _librarian)
     graph.add_edge(START, "supervisor")
     return graph.compile()
 

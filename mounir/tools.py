@@ -29,6 +29,11 @@ def delegate_to_researcher(task: str) -> str:
     return run(task)
 
 
+def delegate_to_librarian(task: str) -> str:
+    """Hand a knowledge-folder change to the librarian agent; returns its report."""
+    from .specialists.librarian import run
+    return run(task)
+
 def delegate_to_media(task: str) -> str:
     """Ask the media agent to read an image, PDF, audio clip, or video."""
     from .specialists.media import run
@@ -368,9 +373,9 @@ def send_email(to: str, subject: str, body: str, attachments: list[str] | None =
     # can send by name alone.
     if not _email_in_contacts(to):
         result += (
-            f"\n\n[contacts] {to} is not in {config.CONTACTS_FILE}. If it belongs "
-            f"to a person, append a new line 'Name: {to}' to the END of that file "
-            f"(use the recipient's name) so it's saved for next time."
+            f"\n\n[contacts] {to} is not in the contacts file. If it belongs to "
+            f"a person, call delegate_to_librarian to save '<Name>: {to}' (use "
+            f"the recipient's name) so it's remembered for next time."
         )
     return result
 
@@ -796,6 +801,32 @@ SCHEMAS += [
     {
         "type": "function",
         "function": {
+            "name": "delegate_to_librarian",
+            "description": (
+                "Delegate ANY change to long-term knowledge to the librarian "
+                "agent: the user says 'remember this', a new contact or "
+                "preference appears, a stored fact changed, or stored knowledge "
+                "should be merged/cleaned/forgotten. The librarian curates the "
+                "knowledge folder (files + index) and returns a short report of "
+                "what it saved or removed. Never edit knowledge files yourself — "
+                "reading them with read_file is still fine. State the exact "
+                "fact(s) to store or remove, with all details you have."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "What to remember, update, or forget — the exact fact(s), names, values, and any context on where they came from.",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_to_media",
             "description": (
                 "Delegate ANYTHING that needs reading media to the media agent: "
@@ -832,6 +863,7 @@ _REGISTRY = {
     "delegate_to_coder": delegate_to_coder,
     "delegate_to_researcher": delegate_to_researcher,
     "delegate_to_media": delegate_to_media,
+    "delegate_to_librarian": delegate_to_librarian,
 }
 
 

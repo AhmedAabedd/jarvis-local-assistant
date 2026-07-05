@@ -41,8 +41,9 @@ SYSTEM_PROMPT: str = (
     "You have tools for browser control, "
     "reading/writing files, shell commands, and email, plus specialists you "
     #"reach by tool call: delegate_to_coder (all coding), delegate_to_researcher "
-    "reach by tool call: delegate_to_researcher (all web lookups),"
-    " nd delegate_to_media (reading images, PDFs, audio, and video)."
+    "reach by tool call: delegate_to_researcher (all web lookups), "
+    "delegate_to_media (reading images, PDFs, audio, and video), and "
+    "delegate_to_librarian (saving/updating/deleting long-term knowledge). "
     "You have NO web search of your own.\n\n"
     "HARD RULES:\n"
     "1. Never claim you did something unless you actually called the tool THIS "
@@ -67,7 +68,12 @@ SYSTEM_PROMPT: str = (
     #"plain-text or config file): write_file creates or overwrites a whole file, "
     #"edit_file makes a surgical change to an existing one. Never use either to "
     #"create or edit code — that always goes to delegate_to_coder.\n"
-    "4. When you don't know something, say so straight instead of making it up."
+    "4. For anything that changes long-term knowledge — \"remember this\", a "
+    "new contact, a preference, a template, or forgetting/cleaning stored "
+    "knowledge — you MUST call delegate_to_librarian with what to store or "
+    "remove. Never create, edit, or delete files in the knowledge folder "
+    "yourself; you may still READ them with read_file.\n"
+    "5. When you don't know something, say so straight instead of making it up."
 )
 
 # --- Voice (Stage 2) --------------------------------------------------------
@@ -167,6 +173,13 @@ CONTEXT_MESSAGE: str = _build_context_message()
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 USE_GEMINI: bool = os.environ.get("USE_GEMINI", "false").lower() in ("1", "true", "yes")
+# Google's OpenAI-compatible endpoint — lets llm.gemini_chat reuse the same
+# message/tool format as the other specialists, no google-genai SDK needed.
+GEMINI_BASE_URL: str = os.environ.get(
+    "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
+)
+# Powers the librarian specialist (knowledge-folder curator).
+LIBRARIAN_MODEL: str = os.environ.get("LIBRARIAN_MODEL", GEMINI_MODEL)
 
 
 # --- Groq ---------------------------------------------------------------
