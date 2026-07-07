@@ -41,6 +41,12 @@ def delegate_to_media(task: str) -> str:
     return run(task)
 
 
+def delegate_to_system(task: str) -> str:
+    """Hand a hardware/system control task to the system agent; returns its report."""
+    from .specialists.system import run
+    return run(task)
+
+
 # The supervisor runs on a small, local model with a modest context window, and
 # reads files only incidentally (a note, a config, a path the user mentions) —
 # heavy code reading is the coder's job. So keep a read to a quick glance the
@@ -1026,6 +1032,34 @@ SCHEMAS += [
     {
         "type": "function",
         "function": {
+            "name": "delegate_to_system",
+            "description": (
+                "Delegate control of THIS laptop's hardware to the system agent. "
+                "It can: change speaker volume (up/down/set/mute), screen "
+                "brightness, and keyboard backlight; pause/resume/skip whatever "
+                "media is playing (including YouTube in the browser); report "
+                "battery, disk, memory, Wi-Fi and CPU status; turn Wi-Fi or "
+                "Bluetooth on/off; lock the screen; suspend the laptop (it asks "
+                "the user to confirm by itself). Use it for anything like 'turn "
+                "it up', 'lower the brightness', 'pause the music', 'how's the "
+                "battery', 'movie mode'. Describe the desired END STATE (with "
+                "numbers if given); it returns a short report of what changed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The desired outcome, e.g. 'set volume to 40%', 'pause the media', 'dim the screen a bit and mute'.",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_to_media",
             "description": (
                 "Delegate ANYTHING that needs reading media to the media agent: "
@@ -1065,6 +1099,7 @@ _REGISTRY = {
     "delegate_to_researcher": delegate_to_researcher,
     "delegate_to_media": delegate_to_media,
     "delegate_to_librarian": delegate_to_librarian,
+    "delegate_to_system": delegate_to_system,
 }
 
 

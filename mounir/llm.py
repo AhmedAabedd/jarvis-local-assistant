@@ -83,7 +83,9 @@ def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
         )
         if resp.status_code == 429 or resp.status_code >= 500:
             if attempt < 2:
-                time.sleep(2 * (attempt + 1))
+                # 429 is the free tier's per-MINUTE quota — a couple of seconds
+                # never clears it, so wait meaningfully longer than for a 5xx.
+                time.sleep(15 * (attempt + 1) if resp.status_code == 429 else 2 * (attempt + 1))
                 continue
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]

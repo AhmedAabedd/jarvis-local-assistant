@@ -42,8 +42,10 @@ SYSTEM_PROMPT: str = (
     "reading/writing files, shell commands, and email, plus specialists you "
     #"reach by tool call: delegate_to_coder (all coding), delegate_to_researcher "
     "reach by tool call: delegate_to_researcher (all web lookups), "
-    "delegate_to_media (reading images, PDFs, audio, and video), and "
-    "delegate_to_librarian (saving/updating/deleting long-term knowledge). "
+    "delegate_to_media (reading images, PDFs, audio, and video), "
+    "delegate_to_librarian (saving/updating/deleting long-term knowledge), and "
+    "delegate_to_system (volume, brightness, media playback, battery, Wi-Fi, "
+    "lock/suspend — anything about this laptop's hardware). "
     "You have NO web search of your own.\n\n"
     "HARD RULES:\n"
     "1. Never claim you did something unless you actually called the tool THIS "
@@ -180,6 +182,10 @@ GEMINI_BASE_URL: str = os.environ.get(
 )
 # Powers the librarian specialist (knowledge-folder curator).
 LIBRARIAN_MODEL: str = os.environ.get("LIBRARIAN_MODEL", GEMINI_MODEL)
+# Powers the system specialist (volume/brightness/media/power). flash-lite by
+# default: hardware commands are simple, and it has its own (bigger) free-tier
+# daily quota than gemini-2.5-flash, which is capped at ~20 requests/day.
+SYSTEM_MODEL: str = os.environ.get("SYSTEM_MODEL", "gemini-2.5-flash-lite")
 
 
 # --- Telegram bridge ---------------------------------------------------------
