@@ -140,7 +140,7 @@ CONTACTS_FILE: Path = KNOWLEDGE_DIR / "contacts.md"
 # the model reads a specific file (read_file) on demand when a task needs it.
 INDEX_FILE: Path = KNOWLEDGE_DIR / "index.md"
 
-LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Tunis, Tunisia")
+LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Ezzahra, Ben Arous, Tunis, Tunisia")
 
 
 def _build_context_message() -> str:

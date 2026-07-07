@@ -8,6 +8,7 @@ just add a function + schema + registry entry here; the agent loop is generic.
 from __future__ import annotations
 
 import datetime
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -462,12 +463,63 @@ def _plain_text(msg) -> str:
     return "\n".join(ln for ln in lines if ln)
 
 
-def read_emails(count: int = 5, unread_only: bool = False, sender: str = "") -> str:
+# "Name <addr@x.com>" pasted whole into a FROM filter never matches on Gmail —
+# pull out the bare address instead.
+_ADDR_RE = re.compile(r"<([^<>\s]+@[^<>\s]+)>")
+
+
+def _email_filters(sender: str, subject: str) -> tuple[str, str]:
+    """Normalize search filters: bare address, exotic whitespace → plain space.
+
+    str.split() splits on ALL unicode whitespace (incl. the non-breaking space
+    French notification emails love), so joining collapses them to ' '.
+    """
+    sender = " ".join(sender.split())
+    match = _ADDR_RE.search(sender)
+    if match:
+        sender = match.group(1)
+    return sender, " ".join(subject.split())
+
+
+def _imap_search(imap, unread_only: bool, sender: str, subject: str):
+    """SEARCH with the filters; accented terms go as a UTF-8 literal.
+
+    IMAP commands are ASCII, so a term like 'Vérifiez' must be sent as a
+    CHARSET UTF-8 literal — imaplib carries ONE literal per command, always as
+    the last argument. Filters are normalized first, which makes sender ~always
+    ASCII (a bare address), so the literal slot is kept for the subject.
+    """
+    criteria: list[str] = []
+    literal: str | None = None
+    if unread_only:
+        criteria.append("UNSEEN")
+    for key, term in (("FROM", sender), ("SUBJECT", subject)):
+        if not term:
+            continue
+        if term.isascii():
+            criteria += [key, f'"{term}"']
+        elif literal is None:
+            criteria.append(key)  # term follows as the literal
+            literal = term
+        else:
+            return "NO", [b""]  # two non-ASCII terms — can't send two literals
+    if not criteria:
+        criteria = ["ALL"]
+    if literal is not None:
+        imap.literal = literal.encode("utf-8")
+        return imap.search("UTF-8", *criteria)
+    return imap.search(None, *criteria)
+
+
+def read_emails(
+    count: int = 5, unread_only: bool = False, sender: str = "", subject: str = ""
+) -> str:
     """Read recent emails from the user's inbox, as plain text.
 
     count: how many of the most recent matching emails to fetch.
     unread_only: only return unread emails.
     sender: only emails from this address/name (substring match).
+    subject: only emails whose subject contains this text.
     """
     if not (config.SMTP_USER and config.SMTP_PASS):
         return (
@@ -485,19 +537,13 @@ def read_emails(count: int = 5, unread_only: bool = False, sender: str = "") -> 
     # the small local model either way.
     per_email_cap = max(1500, 12000 // count)
 
-    criteria = []
-    if unread_only:
-        criteria.append("UNSEEN")
-    if sender.strip():
-        criteria += ["FROM", f'"{sender.strip()}"']
-    if not criteria:
-        criteria = ["ALL"]
+    sender, subject = _email_filters(sender, subject)
 
     try:
         with imaplib.IMAP4_SSL(config.IMAP_HOST) as imap:
             imap.login(config.SMTP_USER, config.SMTP_PASS)
             imap.select("INBOX", readonly=True)  # readonly: don't mark as read
-            status, data = imap.search(None, *criteria)
+            status, data = _imap_search(imap, unread_only, sender, subject)
             if status != "OK":
                 return "Could not search the inbox."
             ids = data[0].split()
@@ -521,6 +567,47 @@ def read_emails(count: int = 5, unread_only: bool = False, sender: str = "") -> 
         return f"Failed to read email: {exc}"
 
     return ("\n\n" + "—" * 40 + "\n\n").join(out)
+
+
+def read_full_email(sender: str = "", subject: str = "", unread_only: bool = False) -> str:
+    """Read ONE email's entire text content, with no size cap.
+
+    Returns the newest email matching the filters (or the newest in the inbox
+    when no filter is given).
+    """
+    if not (config.SMTP_USER and config.SMTP_PASS):
+        return (
+            "Email isn't set up: the MOUNIR_SMTP_USER and MOUNIR_SMTP_PASS "
+            "environment variables (a Gmail App Password) aren't configured."
+        )
+
+    import imaplib
+    import email as emaillib
+    from email.header import decode_header, make_header
+
+    sender, subject = _email_filters(sender, subject)
+
+    try:
+        with imaplib.IMAP4_SSL(config.IMAP_HOST) as imap:
+            imap.login(config.SMTP_USER, config.SMTP_PASS)
+            imap.select("INBOX", readonly=True)  # readonly: don't mark as read
+            status, data = _imap_search(imap, unread_only, sender, subject)
+            if status != "OK":
+                return "Could not search the inbox."
+            ids = data[0].split()
+            if not ids:
+                return "No matching emails found."
+            status, raw = imap.fetch(ids[-1], "(RFC822)")  # newest match
+            if status != "OK" or not raw or not raw[0]:
+                return "Could not fetch the email."
+            msg = emaillib.message_from_bytes(raw[0][1])
+    except Exception as exc:
+        return f"Failed to read email: {exc}"
+
+    frm = str(make_header(decode_header(msg.get("From", "?"))))
+    subj = str(make_header(decode_header(msg.get("Subject", "(no subject)"))))
+    date = msg.get("Date", "?")
+    return f"From: {frm}\nSubject: {subj}\nDate: {date}\n\n{_plain_text(msg)}"
 
 
 # What the model sees. Descriptions matter — they're how it decides to call.
@@ -746,9 +833,8 @@ SCHEMAS = [
                 "Read recent emails from the user's own inbox, returned as plain "
                 "text (From, Subject, Date, and the message). Use it to check the "
                 "inbox, summarize new mail, or find a message. Filter with "
-                "unread_only or sender when the user is specific. To read ONE "
-                "email's full body, call again with count=1 and a sender filter — "
-                "fewer emails means each is returned in full instead of clipped."
+                "unread_only, sender, or subject when the user is specific. Long "
+                "emails are clipped — to read ONE email whole, use read_full_email."
             ),
             "parameters": {
                 "type": "object",
@@ -764,6 +850,41 @@ SCHEMAS = [
                     "sender": {
                         "type": "string",
                         "description": "Only emails from this address or name (substring match). Omit for all senders.",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Only emails whose subject contains this text. Omit for all subjects.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_full_email",
+            "description": (
+                "Read ONE email's entire text content, no matter how long — no "
+                "clipping. Returns the newest email matching the filters. Use it "
+                "when the user wants to SEE or READ a specific email rather than "
+                "a summary — then quote its body as-is in your reply. Pinpoint "
+                "the email with sender and/or subject (from a read_emails list)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sender": {
+                        "type": "string",
+                        "description": "Address or name the email is from (substring match).",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Text the subject contains (substring match).",
+                    },
+                    "unread_only": {
+                        "type": "boolean",
+                        "description": "Only consider unread emails. Default false.",
                     },
                 },
                 "required": [],
@@ -886,6 +1007,7 @@ _REGISTRY = {
     "bash": bash,
     "send_email": send_email,
     "read_emails": read_emails,
+    "read_full_email": read_full_email,
     "delegate_to_coder": delegate_to_coder,
     "delegate_to_researcher": delegate_to_researcher,
     "delegate_to_media": delegate_to_media,
