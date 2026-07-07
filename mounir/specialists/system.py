@@ -27,8 +27,8 @@ MAX_TOOL_ROUNDS = 6
 
 SYSTEM_PROMPT = """\
 You are Mounir's system agent — you control the laptop itself: audio, screen,
-media playback, radios, power. The machine is a MacBook running Ubuntu with
-GNOME on Wayland; your tools already speak to the right interfaces.
+media playback, radios, power. The machine you are on is described in your
+context; your tools already speak to the right interfaces.
 
 RULES
 - Do exactly what the task asks, then STOP. "Turn it up" means one volume
@@ -444,14 +444,39 @@ def _dispatch(name: str, arguments: dict) -> str:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _device_info() -> str:
+    """Detect the machine at runtime so this works unchanged on another device."""
+    import os
+    import platform
+
+    parts: list[str] = []
+    try:  # hardware model, e.g. "MacBookAir9,1"
+        model = open("/sys/devices/virtual/dmi/id/product_name").read().strip()
+        if model:
+            parts.append(model)
+    except OSError:
+        pass
+    try:  # distro pretty name, e.g. "Ubuntu 24.04.2 LTS"
+        os_release = dict(
+            line.split("=", 1) for line in open("/etc/os-release").read().splitlines() if "=" in line
+        )
+        parts.append(os_release.get("PRETTY_NAME", "").strip('"') or platform.system())
+    except OSError:
+        parts.append(f"{platform.system()} {platform.release()}")
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").split(":")[-1]
+    session = os.environ.get("XDG_SESSION_TYPE", "")
+    if desktop or session:
+        parts.append(" on ".join(p for p in (desktop, session) if p))
+    return ", ".join(parts)
+
+
 def _context() -> str:
-    """Current hardware state so simple tasks need zero discovery calls."""
+    """Device + current hardware state so simple tasks need zero discovery calls."""
     brightness = _brightness_get()
-    return (
-        f"CURRENT STATE: {_volume_state()}; "
-        f"screen brightness {brightness}%." if brightness is not None
-        else f"CURRENT STATE: {_volume_state()}."
-    )
+    state = f"CURRENT STATE: {_volume_state()}"
+    if brightness is not None:
+        state += f"; screen brightness {brightness}%"
+    return f"DEVICE: {_device_info()}\n{state}."
 
 
 def run(task: str) -> str:
