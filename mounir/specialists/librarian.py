@@ -31,22 +31,17 @@ SEARCH_MAX_HITS = 30          # cap grep output so a broad query can't flood con
 READ_MAX_CHARS = 8000         # cap a single file read
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # one path segment
 
+# Files read this task (via read_knowledge). save_knowledge refuses to REWRITE
+# an existing file and append_knowledge refuses to touch one that hasn't been
+# read yet — same code safeguard as the coder and the supervisor, so the model
+# can't skip the read-before-write rule.
+_files_read: set[str] = set()
+
 SYSTEM_PROMPT = """\
 You are Mounir's librarian — the sole curator of the knowledge folder, the
 assistant's long-term memory. Every file in that folder is loaded into the
 assistant's head on demand, so the folder's quality IS the assistant's memory
 quality. You keep it small, current, and true.
-
-Your tools (all locked inside the knowledge folder):
-- list_knowledge(): fresh tree of the folder + the current index.
-- read_knowledge(name): read one file. ALWAYS read a file before changing it.
-- search_knowledge(query): grep — find every line containing the query across
-  all files. Returns file:line: text hits.
-- save_knowledge(name, description, content): create a NEW file or REWRITE an
-  existing one in full. The index line is added/updated automatically.
-- append_knowledge(name, content): add lines to the END of an existing file
-  without touching the rest. For small additions (a new contact, one new fact).
-- delete_knowledge(name): remove a file. Its index line is removed automatically.
 
 WHAT DESERVES SAVING
 - Durable facts Ahmed will reuse: contacts, preferences, templates, routines,
@@ -204,6 +199,7 @@ def read_knowledge(name: str) -> str:
     text = path.read_text(encoding="utf-8", errors="replace")
     if len(text) > READ_MAX_CHARS:
         text = text[:READ_MAX_CHARS] + " … [truncated]"
+    _files_read.add(path.name)
     return f"{path.name} ({len(text.splitlines())} lines):\n\n{text}"
 
 
@@ -247,9 +243,12 @@ def save_knowledge(name: str, description: str, content: str) -> str:
     if not content:
         return "Refusing to save an empty file."
     existed = path.exists()
+    if existed and path.name not in _files_read:
+        return f"Read {path.name} first with read_knowledge before rewriting it."
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content + "\n", encoding="utf-8")
     _index_upsert(path.name, description)
+    _files_read.add(path.name)  # just wrote it — counts as "seen" for later edits
     verb = "Rewrote" if existed else "Created"
     return f"{verb} {path.name} ({len(content.splitlines())} lines) and synced its index line."
 
@@ -261,6 +260,8 @@ def append_knowledge(name: str, content: str) -> str:
         return path
     if not path.exists():
         return f"No such file: {path.name}. Use save_knowledge to create a new file."
+    if path.name not in _files_read:
+        return f"Read {path.name} first with read_knowledge before appending to it."
     content = (content or "").strip()
     if not content:
         return "Nothing to append."
@@ -407,6 +408,8 @@ def run(task: str) -> str:
     """Run the librarian on a task. Returns a short plain-text report."""
     if not config.GEMINI_API_KEY:
         return "Librarian failed: GEMINI_API_KEY is not set."
+
+    _files_read.clear()  # fresh task — must read a file before modifying it
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
