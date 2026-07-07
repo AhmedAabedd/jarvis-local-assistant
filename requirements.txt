@@ -9,3 +9,6 @@ requests>=2.28
 beautifulsoup4>=4.11
 
 mistralai>=1.0
+
+# CLI — live markdown rendering of the streamed reply
+rich>=13.0

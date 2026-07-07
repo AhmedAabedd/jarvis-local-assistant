@@ -38,6 +38,10 @@ else:
     except Exception:
         pass
 
+from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
+
 from mounir import config, llm, tools, trace
 from mounir.agent import Agent
 from mounir.memory import Conversation
@@ -164,6 +168,57 @@ class Spinner:
             self._stop.wait(0.09)
 
 
+class MarkdownStream:
+    """Live-renders the streamed reply as Markdown (headers, bold, code blocks).
+
+    Chunks accumulate in a buffer that is re-rendered in place ~10×/second via
+    rich's Live, so the reply keeps its streaming feel but lands fully styled.
+    When trace needs the terminal mid-turn (tool lines, delegation events),
+    break_segment() freezes what's rendered so far and the next chunk opens a
+    fresh live region below — it's registered as trace's pre_output hook so the
+    two never write on top of each other. Falls back to plain print when stdout
+    isn't a terminal, so piped output stays clean text.
+    """
+
+    def __init__(self) -> None:
+        self._console = Console()
+        self._live: Live | None = None
+        self._buffer = ""
+        self._tty = sys.stdout.isatty()
+
+    def feed(self, chunk: str) -> None:
+        if not self._tty:
+            print(chunk, end="", flush=True)
+            return
+        # Serialize with trace so a live repaint can't interleave with a trace
+        # line being printed from the agent's worker thread.
+        with trace.output_lock():
+            self._buffer += chunk
+            if self._live is None:
+                if not self._buffer.strip():
+                    return  # don't open a live region for leading whitespace
+                self._live = Live(
+                    console=self._console,
+                    refresh_per_second=10,
+                    vertical_overflow="visible",
+                )
+                self._live.start()
+            self._live.update(Markdown(self._buffer))
+
+    def break_segment(self) -> None:
+        """Freeze the current render in place; the next chunk starts below."""
+        with trace.output_lock():
+            if self._live is not None:
+                self._live.update(Markdown(self._buffer))
+                self._live.stop()  # leaves the final frame on screen
+                self._live = None
+            self._buffer = ""
+
+    def finish(self) -> None:
+        """Flush and close the live region (idempotent, safe on interrupt)."""
+        self.break_segment()
+
+
 def _confirm_prompt(action: str) -> str:
     """Build the styled confirmation prompt (handles multi-line actions)."""
     body = "\n".join(
@@ -188,6 +243,12 @@ def _terminal_confirm(action: str) -> bool:
     spinner = _io.get("spinner")
     if spinner is not None:
         spinner.finish()           # stop the indicator — the prompt takes over
+    md = _io.get("md")
+    if md is not None:
+        md.break_segment()         # freeze the live render above the prompt
+        # spinner.finish() cleared trace's hook — restore it so trace lines
+        # after this confirm still freeze the render instead of colliding.
+        trace.set_pre_output(md.break_segment)
 
     fd, old = _io.get("fd"), _io.get("old")
     prompt = _confirm_prompt(action)
@@ -268,24 +329,37 @@ def main() -> int:
         tokens = 0
         spinner = Spinner()
         _io["spinner"] = spinner  # so a confirm prompt can stop it
+        md = MarkdownStream()
+        _io["md"] = md            # so a confirm prompt can freeze the render
         spinner.start()
+        streaming = False
         try:
             with _esc_interrupts():
                 for chunk in agent.respond(user_input):
-                    if chunk.strip():
-                        spinner.finish()  # real text streaming — stop thinking (idempotent)
-                    print(chunk, end="", flush=True)
+                    if not streaming and chunk.strip():
+                        spinner.finish()  # real text streaming — stop thinking
+                        # From here trace lines freeze the render instead of
+                        # colliding with it (spinner.finish cleared the hook).
+                        trace.set_pre_output(md.break_segment)
+                        streaming = True
+                    md.feed(chunk)
                     tokens += 1
             spinner.finish()
+            md.finish()
         except llm.OllamaError as exc:
             spinner.finish()
+            md.finish()
             print(f"\n[error] {exc}")
             continue
         except KeyboardInterrupt:
             # Esc or Ctrl+C while working: drop this response, keep the session.
             spinner.finish()
+            md.finish()
             print(f"\n{trace.DIM}  [interrupted]{trace.RESET}")
             continue
+        finally:
+            trace.set_pre_output(None)
+            _io["md"] = None
         elapsed = time.time() - start
         rate = tokens / elapsed if elapsed else 0
         print(f"\n  ({tokens} chunks, {elapsed:.1f}s, ~{rate:.1f} chunk/s)\n")
