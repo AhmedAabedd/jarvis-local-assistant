@@ -237,6 +237,36 @@ def open_browser(url: str = "") -> str:
     return f"Opening {url} in the browser." if url else "Opening the browser."
 
 
+def play_on_youtube(query: str) -> str:
+    """Find the top YouTube result for a search and open it in the browser.
+
+    yt-dlp's ytsearch resolves the query to a video without an API key; flat
+    extraction returns just id/title/url (no formats), so it's quick.
+    """
+    query = " ".join((query or "").split())
+    if not query:
+        return "Nothing to play — give a song/video name."
+
+    from yt_dlp import YoutubeDL
+
+    try:
+        with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True}) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+        entries = (info or {}).get("entries") or []
+    except Exception as exc:
+        return f"YouTube search failed: {exc}"
+    if not entries:
+        return f"No YouTube results for '{query}'."
+
+    top = entries[0]
+    url = top.get("url") or f"https://www.youtube.com/watch?v={top.get('id', '')}"
+    title = top.get("title") or query
+    opened = open_browser(url)
+    if not opened.startswith("Opening"):
+        return f"Found \"{title}\" ({url}) but couldn't open the browser: {opened}"
+    return f"Playing \"{title}\" — {url}"
+
+
 def open_path(target: str) -> str:
     """Open a file, folder, or URL with the system default app (via xdg-open).
 
@@ -742,6 +772,28 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "play_on_youtube",
+            "description": (
+                "Play a song or video on YouTube: searches YouTube for the query "
+                "and opens the TOP result in the browser. Use when the user asks "
+                "to play/put on/open a specific song, video, or artist — no URL "
+                "needed. For just browsing YouTube, use open_browser instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search, e.g. 'lose yourself eminem' or 'lofi hip hop radio'.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "open_path",
             "description": (
                 "Open a file, folder, or URL with the system's DEFAULT app, the "
@@ -1003,6 +1055,7 @@ _REGISTRY = {
     "edit_file": edit_file,
     "list_directory": list_directory,
     "open_browser": open_browser,
+    "play_on_youtube": play_on_youtube,
     "open_path": open_path,
     "bash": bash,
     "send_email": send_email,
