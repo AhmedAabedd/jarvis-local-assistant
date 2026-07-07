@@ -410,6 +410,7 @@ def run(task: str) -> str:
         return "Librarian failed: GEMINI_API_KEY is not set."
 
     _files_read.clear()  # fresh task — must read a file before modifying it
+    retried_empty = False
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -425,9 +426,21 @@ def run(task: str) -> str:
         content = message.get("content") or ""
         tool_calls = message.get("tool_calls") or []
 
+        if not tool_calls and not content.strip():
+            # Gemini flake: HTTP 200 but a completely empty message (happens
+            # under load). Retry the same round once, then fail honestly —
+            # never report an empty answer as success.
+            if not retried_empty:
+                retried_empty = True
+                continue
+            return (
+                "Librarian failed: the model returned an empty response "
+                "twice — NOTHING was saved or changed. Try again."
+            )
+
         if not tool_calls:
             trace.event(f"{round_num + 1} round(s)")
-            return content.strip() or "Nothing to report."
+            return content.strip()
 
         messages.append(
             {"role": "assistant", "content": content, "tool_calls": tool_calls}

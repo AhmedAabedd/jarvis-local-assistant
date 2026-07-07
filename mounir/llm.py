@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 from typing import Iterator
 import ollama
 from . import config
@@ -71,14 +72,21 @@ def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
         "Authorization": f"Bearer {config.GEMINI_API_KEY}",
         "Accept": "application/json",
     }
-    resp = requests.post(
-        f"{config.GEMINI_BASE_URL}/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]
+    # Gemini flash returns transient 429/5xx (overload) fairly often — retry a
+    # couple of times with a short backoff before giving up.
+    for attempt in range(3):
+        resp = requests.post(
+            f"{config.GEMINI_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+        if resp.status_code == 429 or resp.status_code >= 500:
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]
 
 def is_up() -> bool:
     if config.USE_MISTRAL:

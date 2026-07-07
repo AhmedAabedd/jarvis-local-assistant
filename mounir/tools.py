@@ -62,6 +62,26 @@ def _resolve(path: str) -> Path:
     return Path(path).expanduser()
 
 
+def _knowledge_guard(p: Path) -> str | None:
+    """Refuse writes inside the knowledge folder — that's the librarian's job.
+
+    The prompt already forbids it, but a rule the model can ignore isn't a
+    rule: writing there directly would desync index.md, which only the
+    librarian's tools keep in sync. Reading stays allowed.
+    """
+    try:
+        inside = p.resolve().is_relative_to(config.KNOWLEDGE_DIR.resolve())
+    except OSError:
+        return None
+    if inside:
+        return (
+            f"{p} is inside the knowledge folder, which only the librarian may "
+            "change (it keeps index.md in sync). Call delegate_to_librarian "
+            "with what to store or change instead."
+        )
+    return None
+
+
 def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
     """Read a text file with line numbers (like `cat -n`), optionally a line range.
 
@@ -98,6 +118,9 @@ def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> st
 def write_file(path: str, content: str) -> str:
     """Write text to a file, creating parent folders. Overwrites if it exists."""
     p = _resolve(path)
+    blocked = _knowledge_guard(p)
+    if blocked:
+        return blocked
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -114,6 +137,9 @@ def edit_file(path: str, old_str: str, new_str: str, replace_all: bool = False) 
     replace_all is set. Read the file first to copy the exact text.
     """
     p = _resolve(path)
+    blocked = _knowledge_guard(p)
+    if blocked:
+        return blocked
     if not p.is_file():
         return f"No such file: {p}"
     if str(p) not in _files_read:
