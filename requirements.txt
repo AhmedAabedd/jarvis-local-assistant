@@ -12,3 +12,6 @@ mistralai>=1.0
 
 # CLI — live markdown rendering of the streamed reply
 rich>=13.0
+
+# Telegram bridge (telegram_cli.py) — long-polling bot
+pyTelegramBotAPI>=4.14

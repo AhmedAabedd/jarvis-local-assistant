@@ -182,6 +182,16 @@ GEMINI_BASE_URL: str = os.environ.get(
 LIBRARIAN_MODEL: str = os.environ.get("LIBRARIAN_MODEL", GEMINI_MODEL)
 
 
+# --- Telegram bridge ---------------------------------------------------------
+# Token from @BotFather. The bridge (telegram_cli.py) long-polls Telegram, so
+# everything is an OUTBOUND connection — nothing on this machine is exposed.
+TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# The ONE chat allowed to talk to the assistant (the bot is publicly findable,
+# so anyone could message it otherwise). Leave unset for first-run discovery:
+# the bridge replies to any message with that chat's id so you can export it.
+TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+
 # --- Groq ---------------------------------------------------------------
 GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "qwen/qwen3-32b")
