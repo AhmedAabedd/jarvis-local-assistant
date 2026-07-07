@@ -5,3 +5,6 @@ venv/
 .mounir/
 *.json.bak
 .DS_Store
+
+# personal data - Mounir long-term knowledge stays local
+knowledge/
