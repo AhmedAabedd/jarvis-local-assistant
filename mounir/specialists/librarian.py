@@ -411,6 +411,7 @@ def run(task: str) -> str:
 
     _files_read.clear()  # fresh task — must read a file before modifying it
     retried_empty = False
+    executed: list[str] = []  # tool results so far — writes that REALLY happened
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -421,6 +422,15 @@ def run(task: str) -> str:
         try:
             message = llm.gemini_chat(messages, tools=TOOLS, model=config.LIBRARIAN_MODEL)
         except Exception as exc:
+            if executed:
+                # The LLM died AFTER tools ran (e.g. rate limit on the report
+                # call). Saying "failed" would make the supervisor redo writes
+                # that already happened — report them instead.
+                return (
+                    "Librarian was cut off by an LLM error while reporting, "
+                    "but these tool calls DID run: " + "; ".join(executed)
+                    + ". Do NOT redo them."
+                )
             return f"Librarian failed: {exc}"
 
         content = message.get("content") or ""
@@ -454,6 +464,7 @@ def run(task: str) -> str:
                 args = {}
             result = _dispatch(name, args)
             trace.tool(name, args, result)
+            executed.append(f"{name} -> {result}")
             messages.append(
                 {
                     "role": "tool",

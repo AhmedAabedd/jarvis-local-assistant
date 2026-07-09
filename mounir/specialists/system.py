@@ -34,6 +34,9 @@ RULES
 - Do exactly what the task asks, then STOP. "Turn it up" means one volume
   step, not maxing it out; when the task gives a number, use it.
 - Tools return the REAL resulting state — report that, never assume.
+- The CURRENT STATE line in your context is a snapshot from BEFORE the task.
+  When the task asks for a change, ALWAYS call the tool — never answer that
+  it is "already done" from the snapshot or from memory.
 - Only touch Wi-Fi, Bluetooth, the lock screen, or suspend when the task
   explicitly asks for them. suspend asks the user to confirm by itself; if it
   reports "cancelled", relay that, don't retry.
@@ -44,7 +47,7 @@ FINAL REPORT (MANDATORY)
 Your last message is read by the SUPERVISOR, not the user. One short sentence
 or two with the concrete outcome and the resulting state, e.g. "Volume raised
 to 55%." or "Paused the media playing in Chromium. Battery is at 82%,
-charging." No fluff.
+charging." No fluff, no headers — never write the words "FINAL REPORT".
 """
 
 
@@ -481,19 +484,29 @@ def _context() -> str:
 
 def run(task: str) -> str:
     """Run the system agent on a task. Returns a short plain-text report."""
-    if not config.GEMINI_API_KEY:
-        return "System agent failed: GEMINI_API_KEY is not set."
+    if not config.NVIDIA_API_KEY:
+        return "System agent failed: NVIDIA_API_KEY is not set."
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"{_context()}\n\nTASK FROM SUPERVISOR:\n{task}"},
     ]
     retried_empty = False
+    executed: list[str] = []  # tool results so far — actions that REALLY happened
 
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
-            message = llm.gemini_chat(messages, tools=TOOLS, model=config.SYSTEM_MODEL)
+            message = llm.nvidia_chat(messages, tools=TOOLS, model=config.SYSTEM_MODEL)
         except Exception as exc:
+            if executed:
+                # The LLM died AFTER tools ran (e.g. rate limit on the report
+                # call). Saying "failed" would make the supervisor redo actions
+                # that already happened — report them instead.
+                return (
+                    "System agent was cut off by an LLM error while reporting, "
+                    "but these actions DID run: " + "; ".join(executed)
+                    + ". Do NOT redo them."
+                )
             return f"System agent failed: {exc}"
 
         content = message.get("content") or ""
@@ -510,7 +523,9 @@ def run(task: str) -> str:
 
         if not tool_calls:
             trace.event(f"{round_num + 1} round(s)")
-            return content.strip()
+            # The 8b likes to prefix its report with "FINAL REPORT:" no matter
+            # what the prompt says — strip it in code.
+            return re.sub(r"(?i)^\s*final report:?\s*", "", content.strip())
 
         messages.append(
             {"role": "assistant", "content": content, "tool_calls": tool_calls}
@@ -524,6 +539,7 @@ def run(task: str) -> str:
                 args = {}
             result = _dispatch(name, args)
             trace.tool(name, args, result)
+            executed.append(f"{name} -> {result}")
             messages.append(
                 {
                     "role": "tool",

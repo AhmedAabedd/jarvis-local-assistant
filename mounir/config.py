@@ -182,10 +182,14 @@ GEMINI_BASE_URL: str = os.environ.get(
 )
 # Powers the librarian specialist (knowledge-folder curator).
 LIBRARIAN_MODEL: str = os.environ.get("LIBRARIAN_MODEL", GEMINI_MODEL)
-# Powers the system specialist (volume/brightness/media/power). flash-lite by
-# default: hardware commands are simple, and it has its own (bigger) free-tier
-# daily quota than gemini-2.5-flash, which is capped at ~20 requests/day.
-SYSTEM_MODEL: str = os.environ.get("SYSTEM_MODEL", "gemini-2.5-flash-lite")
+# Powers the system specialist (volume/brightness/media/power) — on NVIDIA,
+# like the researcher/media. The free tiers elsewhere couldn't sustain it:
+# Groq allows only 6-12k tokens/MINUTE (one task costs ~2.4k, so the SDK
+# silently slept on 429s — the "stuck 20s before reporting" bug) and this
+# Gemini key allows only 20 requests/DAY per model.
+# (llama-3.3-70b answered correctly too but queues ~22s/call on the free
+# tier; the 8b answers in ~1s and hardware commands don't need more brain.)
+SYSTEM_MODEL: str = os.environ.get("SYSTEM_MODEL", "meta/llama-3.1-8b-instruct")
 
 
 # --- Telegram bridge ---------------------------------------------------------

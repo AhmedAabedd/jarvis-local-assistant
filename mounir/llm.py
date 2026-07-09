@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import time
 from typing import Iterator
 import ollama
@@ -83,12 +84,51 @@ def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
         )
         if resp.status_code == 429 or resp.status_code >= 500:
             if attempt < 2:
-                # 429 is the free tier's per-MINUTE quota — a couple of seconds
-                # never clears it, so wait meaningfully longer than for a 5xx.
-                time.sleep(15 * (attempt + 1) if resp.status_code == 429 else 2 * (attempt + 1))
+                # Gemini's 429 body says exactly how long the per-minute quota
+                # needs ("Please retry in 7.08s") — honor it when present,
+                # otherwise fall back to a generous wait.
+                hinted = re.search(r"retry in ([\d.]+)\s*s", resp.text or "")
+                if resp.status_code == 429:
+                    wait = min(float(hinted.group(1)) + 1, 45) if hinted else 15 * (attempt + 1)
+                else:
+                    wait = 2 * (attempt + 1)
+                time.sleep(wait)
                 continue
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]
+
+def groq_chat(messages, tools=None, model=None, *, temperature=0.2,
+              max_tokens=4096, reasoning_effort=None) -> dict:
+    """One non-streaming Groq chat-completion, OpenAI message/tool format.
+
+    Returns the assistant message dict ({content, tool_calls}) shaped exactly
+    like gemini_chat's, so specialists can swap providers with one line. Qwen3
+    models think out loud in <think> tags — stripped here so callers only see
+    the answer.
+    """
+    from groq import Groq
+
+    client = Groq(api_key=config.GROQ_API_KEY)
+    kwargs = dict(
+        model=model or config.GROQ_MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    if tools:
+        kwargs["tools"] = tools
+    if reasoning_effort:  # e.g. "none" — qwen3 answers ~10x faster without thinking
+        kwargs["reasoning_effort"] = reasoning_effort
+    msg = client.chat.completions.create(**kwargs).choices[0].message
+    content = re.sub(r"(?s)<think>.*?</think>", "", msg.content or "").strip()
+    tool_calls = [
+        # "type" is required when this message is sent back in the history.
+        {"id": tc.id, "type": "function",
+         "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+        for tc in (msg.tool_calls or [])
+    ]
+    return {"content": content, "tool_calls": tool_calls}
+
 
 def is_up() -> bool:
     if config.USE_MISTRAL:
@@ -120,7 +160,9 @@ def _mistral_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
     try:
         from mistralai.client import Mistral
 
-        client = Mistral(api_key=config.MISTRAL_API_KEY)
+        # Hard timeout: without it a throttled/stalled Mistral request hangs
+        # the whole turn forever with no error surfacing anywhere.
+        client = Mistral(api_key=config.MISTRAL_API_KEY, timeout_ms=120_000)
 
         # Clean up messages: Mistral expects tool messages with specific shape
         clean_messages = []
