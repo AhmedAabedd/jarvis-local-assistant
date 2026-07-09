@@ -220,11 +220,21 @@ NVIDIA_BASE_URL: str = os.environ.get(
     "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
 )
 CODER_MODEL: str = os.environ.get("CODER_MODEL", "minimaxai/minimax-m3")
-RESEARCHER_MODEL: str = os.environ.get("RESEARCHER_MODEL", "nvidia/llama-3.3-nemotron-super-49b-v1.5")
 # Omni (multimodal) model powering the media specialist: reads images, PDFs,
 # audio, and video frames. Must be a model that accepts image/audio content
 # parts on the NVIDIA OpenAI-compatible endpoint.
 MEDIA_MODEL: str = os.environ.get("MEDIA_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
+
+
+# --- Ollama Cloud (ollama.com) — powers the researcher specialist ------------
+# Key from https://ollama.com/settings/keys. The cloud endpoint is
+# OpenAI-compatible, so llm.ollama_cloud_chat reuses the same message/tool
+# format as the other providers — no local ollama daemon involved.
+OLLAMA_API_KEY: str = os.environ.get("OLLAMA_API_KEY", "")
+OLLAMA_CLOUD_BASE_URL: str = os.environ.get(
+    "OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"
+)
+RESEARCHER_MODEL: str = os.environ.get("RESEARCHER_MODEL", "nemotron-3-super:cloud")
 
 
 # --- Cloud text-to-speech (Google Cloud TTS) --------------------------------

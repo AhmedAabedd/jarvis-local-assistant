@@ -274,8 +274,8 @@ def _dispatch(name: str, arguments: dict) -> str:
 
 def run(task: str) -> str:
     """Run the researcher on a task. Returns its structured report with sources."""
-    if not config.NVIDIA_API_KEY:
-        return "Researcher failed: NVIDIA_API_KEY is not set."
+    if not config.OLLAMA_API_KEY:
+        return "Researcher failed: OLLAMA_API_KEY is not set."
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -284,7 +284,7 @@ def run(task: str) -> str:
 
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
-            message = llm.nvidia_chat(messages, tools=TOOLS, model=config.RESEARCHER_MODEL)
+            message = llm.ollama_cloud_chat(messages, tools=TOOLS, model=config.RESEARCHER_MODEL)
         except Exception as exc:
             return f"Researcher failed: {exc}"
 

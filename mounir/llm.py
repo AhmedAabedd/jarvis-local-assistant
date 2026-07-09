@@ -97,6 +97,43 @@ def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]
 
+def ollama_cloud_chat(messages, tools=None, model=None, *, temperature=0.2,
+                      max_tokens=8192) -> dict:
+    """One non-streaming Ollama Cloud chat-completion (ollama.com, hosted —
+    not the local daemon). OpenAI-compatible, same message/tool format as
+    nvidia_chat.
+
+    Returns the assistant message dict ({content, tool_calls}). Used by the
+    researcher specialist.
+    """
+    import requests
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if tools:
+        payload["tools"] = tools
+    headers = {
+        "Authorization": f"Bearer {config.OLLAMA_API_KEY}",
+        "Accept": "application/json",
+    }
+    resp = requests.post(
+        f"{config.OLLAMA_CLOUD_BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=180,
+    )
+    resp.raise_for_status()
+    msg = resp.json()["choices"][0]["message"]
+    # Reasoning models may think inline — keep only the answer.
+    msg["content"] = re.sub(r"(?s)<think>.*?</think>", "", msg.get("content") or "").strip()
+    return msg
+
+
 def groq_chat(messages, tools=None, model=None, *, temperature=0.2,
               max_tokens=4096, reasoning_effort=None) -> dict:
     """One non-streaming Groq chat-completion, OpenAI message/tool format.
