@@ -39,13 +39,14 @@ SYSTEM_PROMPT: str = (
     "straight instead of making it up. You are Mounir and only Mounir — never "
     "call yourself Qwen or any other name.\n\n"
     "You have tools for browser control, "
-    "reading/writing files, shell commands, and email, plus specialists you "
+    "reading/writing files, and shell commands, plus specialists you "
     #"reach by tool call: delegate_to_coder (all coding), delegate_to_researcher "
     "reach by tool call: delegate_to_researcher (all web lookups), "
     "delegate_to_media (reading images, PDFs, audio, and video), "
-    "delegate_to_knowledge (saving/updating/deleting long-term knowledge), and "
+    "delegate_to_knowledge (saving/updating/deleting long-term knowledge), "
     "delegate_to_system (volume, brightness, media playback, battery, Wi-Fi, "
-    "lock/suspend — anything about this laptop's hardware). "
+    "lock/suspend — anything about this laptop's hardware), and "
+    "delegate_to_email (ALL email: search, read, send, reply, labels, drafts). "
     "You have NO web search of your own.\n\n"
     "HARD RULES:\n"
     "1. Never claim you did something unless you actually called the tool THIS "
@@ -114,25 +115,10 @@ VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
 # Hard cap on a single utterance.
 VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
 
-# --- Email (send) -----------------------------------------------------------
-
-# SMTP for the send_email tool. Defaults target Gmail. Credentials come from
-# the environment ONLY — never hard-code them here or they'd land in git.
-# SMTP_PASS must be a Gmail "App Password" (16 chars, needs 2-Step Verification),
-# not your normal account password.
-SMTP_HOST: str = os.environ.get("MOUNIR_SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT: int = int(os.environ.get("MOUNIR_SMTP_PORT", "587"))
-SMTP_USER: str = os.environ.get("MOUNIR_SMTP_USER", "")  # full email address
-SMTP_PASS: str = os.environ.get("MOUNIR_SMTP_PASS", "")  # Gmail App Password
-
-# IMAP for reading the inbox (read_emails tool). Reuses SMTP_USER / SMTP_PASS.
-IMAP_HOST: str = os.environ.get("MOUNIR_IMAP_HOST", "imap.gmail.com")
-
 # Mounir's "knowledge" folder: plain files the assistant reads for context.
 # contacts.md is the address book — the model reads it to turn a spoken name
-# into the real address before calling send_email (so a misheard name can't be
-# passed to the tool). After a send, send_email checks this file and asks the
-# model to append the address if it's new.
+# into the real address before delegating a send to the email agent (so a
+# misheard name can't reach the mailbox).
 KNOWLEDGE_DIR: Path = Path(
     os.environ.get("MOUNIR_KNOWLEDGE_DIR", Path(__file__).resolve().parent.parent / "knowledge")
 )
@@ -235,6 +221,18 @@ OLLAMA_CLOUD_BASE_URL: str = os.environ.get(
     "OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"
 )
 RESEARCHER_MODEL: str = os.environ.get("RESEARCHER_MODEL", "nemotron-3-super:cloud")
+
+
+# --- Email specialist (Gmail via MCP) -----------------------------------------
+# The email agent spawns this MCP server over stdio for each task and uses
+# whatever tools the server advertises — no hand-written Gmail schemas.
+# One-time OAuth setup: see specialists/email.py run() for the exact steps.
+GMAIL_MCP_COMMAND: str = os.environ.get(
+    "GMAIL_MCP_COMMAND", "npx -y @gongrzhe/server-gmail-autoauth-mcp"
+)
+# ~15 tool schemas per call needs a solid tool-caller. On Ollama Cloud like
+# the researcher: gpt-oss answers in ~1-2s (NVIDIA's 49b queued 7-22s/call).
+EMAIL_MODEL: str = os.environ.get("EMAIL_MODEL", "gpt-oss:120b-cloud")
 
 
 # --- Cloud text-to-speech (Google Cloud TTS) --------------------------------

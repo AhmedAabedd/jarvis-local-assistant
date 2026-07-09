@@ -37,7 +37,7 @@ app = FastAPI(title="Mounir")
 agent = Agent()
 
 # --- in-browser tool confirmation -------------------------------------------
-# Tools like bash / send_email gate on tools.confirm_fn before acting. By
+# Tools like bash and the email agent's send gate on tools.confirm_fn. By
 # default that prompts on the SERVER's terminal, which is useless from the web
 # UI. We redirect it here: send the action to the open browser over the chat
 # WebSocket and block the worker thread until the user clicks Confirm/Cancel.

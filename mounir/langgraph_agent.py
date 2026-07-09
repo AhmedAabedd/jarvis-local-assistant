@@ -38,6 +38,7 @@ from .specialists.knowledge import run as run_knowledge
 from .specialists.media import run as run_media
 from .specialists.researcher import run as run_researcher
 from .specialists.system import run as run_system
+from .specialists.email import run as run_email
 from . import trace
 
 _langgraph_graph = import_module("langgraph.graph")
@@ -59,6 +60,7 @@ _DELEGATES = {
     "delegate_to_media": "media",
     "delegate_to_knowledge": "knowledge",
     "delegate_to_system": "system",
+    "delegate_to_email": "email",
 }
 
 
@@ -331,6 +333,33 @@ def _system(state: TurnState) -> Command:
     )
 
 
+# --- email node ---------------------------------------------------------------
+
+def _email(state: TurnState) -> Command:
+    task, call_id = _extract_delegate(state["messages"], "delegate_to_email")
+    trace.node("email")
+    trace.block("received  ← supervisor", task)
+
+    report = run_email(task).strip() if task else "No task was provided to the email agent."
+
+    trace.block("returned  → supervisor", report)
+    trace.gap()  # breathing room before the supervisor's reply streams in
+    # Only the short report crosses back; the Gmail payloads stay here.
+    return Command(
+        goto="supervisor",
+        update={
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_name": "delegate_to_email",
+                    "tool_call_id": call_id,
+                    "content": report,
+                }
+            ]
+        },
+    )
+
+
 # --- graph ------------------------------------------------------------------
 
 def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
@@ -351,6 +380,7 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
     graph.add_node("media", _media)
     graph.add_node("knowledge", _knowledge)
     graph.add_node("system", _system)
+    graph.add_node("email", _email)
     graph.add_edge(START, "supervisor")
     return graph.compile()
 

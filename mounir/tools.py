@@ -8,7 +8,6 @@ just add a function + schema + registry entry here; the agent loop is generic.
 from __future__ import annotations
 
 import datetime
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -44,6 +43,12 @@ def delegate_to_media(task: str) -> str:
 def delegate_to_system(task: str) -> str:
     """Hand a hardware/system control task to the system agent; returns its report."""
     from .specialists.system import run
+    return run(task)
+
+
+def delegate_to_email(task: str) -> str:
+    """Hand a Gmail task to the email agent (MCP-backed); returns its report."""
+    from .specialists.email import run
     return run(task)
 
 
@@ -375,277 +380,6 @@ def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: b
     return result
 
 
-def send_email(to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
-    """Send an email from the user's account, but only after the user confirms.
-
-    attachments: optional list of file paths to attach (PDF, image, …).
-    """
-    to = (to or "").strip()
-    if not to:
-        return "No recipient given."
-    if not (config.SMTP_USER and config.SMTP_PASS):
-        return (
-            "Email isn't set up: the MOUNIR_SMTP_USER and MOUNIR_SMTP_PASS "
-            "environment variables (a Gmail App Password) aren't configured."
-        )
-
-    # Resolve attachments up front so we fail before sending, not after.
-    files = []
-    for raw in attachments or []:
-        p = _resolve(raw)
-        if not p.is_file():
-            return f"Attachment not found: {p}"
-        files.append(p)
-
-    preview = f"To: {to}\nSubject: {subject}\n\n{body}"
-    if files:
-        preview += "\n\n[Attachments: " + ", ".join(p.name for p in files) + "]"
-    if not confirm_fn(f"send this email?\n{preview}"):
-        return "Email cancelled by the user — not sent."
-
-    import smtplib
-    import mimetypes
-    from email.message import EmailMessage
-
-    msg = EmailMessage()
-    msg["From"] = config.SMTP_USER
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.set_content(body)
-    for p in files:
-        ctype, _ = mimetypes.guess_type(p.name)
-        maintype, subtype = ctype.split("/", 1) if ctype else ("application", "octet-stream")
-        try:
-            msg.add_attachment(p.read_bytes(), maintype=maintype, subtype=subtype, filename=p.name)
-        except Exception as exc:
-            return f"Could not attach {p}: {exc}"
-    try:
-        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
-            server.starttls()
-            server.login(config.SMTP_USER, config.SMTP_PASS)
-            server.send_message(msg)
-    except Exception as exc:
-        return f"Failed to send email: {exc}"
-
-    result = (
-        f"Email sent to {to} with {len(files)} attachment(s)."
-        if files else f"Email sent to {to}."
-    )
-    # Tell the model to remember a new address: if this email isn't already in
-    # the contacts file, instruct it to append the contact so next time the user
-    # can send by name alone.
-    if not _email_in_contacts(to):
-        result += (
-            f"\n\n[contacts] {to} is not in the contacts file. If it belongs to "
-            f"a person, call delegate_to_knowledge to save '<Name>: {to}' (use "
-            f"the recipient's name) so it's remembered for next time."
-        )
-    return result
-
-
-def _email_in_contacts(email: str) -> bool:
-    """True if the address already appears anywhere in the contacts file."""
-    path = config.CONTACTS_FILE
-    if not path.exists():
-        return False
-    text = path.read_text(encoding="utf-8", errors="replace").lower()
-    return email.strip().lower() in text
-
-
-def _plain_text(msg) -> str:
-    """Pull readable plain text out of an email message.
-
-    Prefer a text/plain part; fall back to stripping tags off the HTML.
-    """
-    import re
-    from html import unescape
-
-    body = ""
-    if msg.is_multipart():
-        # Grab the first text/plain part; remember HTML as a fallback.
-        html = ""
-        for part in msg.walk():
-            ctype = part.get_content_type()
-            if part.get("Content-Disposition", "").startswith("attachment"):
-                continue
-            try:
-                text = part.get_payload(decode=True).decode(
-                    part.get_content_charset() or "utf-8", "replace"
-                )
-            except Exception:
-                continue
-            if ctype == "text/plain" and not body:
-                body = text
-            elif ctype == "text/html" and not html:
-                html = text
-        if not body:
-            body = html
-    else:
-        try:
-            body = msg.get_payload(decode=True).decode(
-                msg.get_content_charset() or "utf-8", "replace"
-            )
-        except Exception:
-            body = msg.get_payload() or ""
-
-    # If we ended up with HTML, strip it down to text.
-    if "<" in body and ">" in body:
-        body = re.sub(r"(?is)<(script|style).*?</\1>", " ", body)
-        body = re.sub(r"(?s)<[^>]+>", " ", body)
-        body = unescape(body)
-
-    # Collapse the blank-line/whitespace storm HTML leaves behind.
-    lines = [ln.strip() for ln in body.splitlines()]
-    return "\n".join(ln for ln in lines if ln)
-
-
-# "Name <addr@x.com>" pasted whole into a FROM filter never matches on Gmail —
-# pull out the bare address instead.
-_ADDR_RE = re.compile(r"<([^<>\s]+@[^<>\s]+)>")
-
-
-def _email_filters(sender: str, subject: str) -> tuple[str, str]:
-    """Normalize search filters: bare address, exotic whitespace → plain space.
-
-    str.split() splits on ALL unicode whitespace (incl. the non-breaking space
-    French notification emails love), so joining collapses them to ' '.
-    """
-    sender = " ".join(sender.split())
-    match = _ADDR_RE.search(sender)
-    if match:
-        sender = match.group(1)
-    return sender, " ".join(subject.split())
-
-
-def _imap_search(imap, unread_only: bool, sender: str, subject: str):
-    """SEARCH with the filters; accented terms go as a UTF-8 literal.
-
-    IMAP commands are ASCII, so a term like 'Vérifiez' must be sent as a
-    CHARSET UTF-8 literal — imaplib carries ONE literal per command, always as
-    the last argument. Filters are normalized first, which makes sender ~always
-    ASCII (a bare address), so the literal slot is kept for the subject.
-    """
-    criteria: list[str] = []
-    literal: str | None = None
-    if unread_only:
-        criteria.append("UNSEEN")
-    for key, term in (("FROM", sender), ("SUBJECT", subject)):
-        if not term:
-            continue
-        if term.isascii():
-            criteria += [key, f'"{term}"']
-        elif literal is None:
-            criteria.append(key)  # term follows as the literal
-            literal = term
-        else:
-            return "NO", [b""]  # two non-ASCII terms — can't send two literals
-    if not criteria:
-        criteria = ["ALL"]
-    if literal is not None:
-        imap.literal = literal.encode("utf-8")
-        return imap.search("UTF-8", *criteria)
-    return imap.search(None, *criteria)
-
-
-def read_emails(
-    count: int = 5, unread_only: bool = False, sender: str = "", subject: str = ""
-) -> str:
-    """Read recent emails from the user's inbox, as plain text.
-
-    count: how many of the most recent matching emails to fetch.
-    unread_only: only return unread emails.
-    sender: only emails from this address/name (substring match).
-    subject: only emails whose subject contains this text.
-    """
-    if not (config.SMTP_USER and config.SMTP_PASS):
-        return (
-            "Email isn't set up: the MOUNIR_SMTP_USER and MOUNIR_SMTP_PASS "
-            "environment variables (a Gmail App Password) aren't configured."
-        )
-
-    import imaplib
-    import email as emaillib
-    from email.header import decode_header, make_header
-
-    count = max(1, min(int(count), 20))
-    # Split a fixed total budget across the emails: ask for 1 and get the full
-    # body, ask for 10 and get short snippets. Keeps total output bounded for
-    # the small local model either way.
-    per_email_cap = max(1500, 12000 // count)
-
-    sender, subject = _email_filters(sender, subject)
-
-    try:
-        with imaplib.IMAP4_SSL(config.IMAP_HOST) as imap:
-            imap.login(config.SMTP_USER, config.SMTP_PASS)
-            imap.select("INBOX", readonly=True)  # readonly: don't mark as read
-            status, data = _imap_search(imap, unread_only, sender, subject)
-            if status != "OK":
-                return "Could not search the inbox."
-            ids = data[0].split()
-            if not ids:
-                return "No matching emails found."
-
-            out = []
-            for num in reversed(ids[-count:]):  # newest first
-                status, raw = imap.fetch(num, "(RFC822)")
-                if status != "OK" or not raw or not raw[0]:
-                    continue
-                msg = emaillib.message_from_bytes(raw[0][1])
-                frm = str(make_header(decode_header(msg.get("From", "?"))))
-                subj = str(make_header(decode_header(msg.get("Subject", "(no subject)"))))
-                date = msg.get("Date", "?")
-                text = _plain_text(msg)
-                if len(text) > per_email_cap:
-                    text = text[:per_email_cap] + "\n… (read this email alone for the rest)"
-                out.append(f"From: {frm}\nSubject: {subj}\nDate: {date}\n\n{text}")
-    except Exception as exc:
-        return f"Failed to read email: {exc}"
-
-    return ("\n\n" + "—" * 40 + "\n\n").join(out)
-
-
-def read_full_email(sender: str = "", subject: str = "", unread_only: bool = False) -> str:
-    """Read ONE email's entire text content, with no size cap.
-
-    Returns the newest email matching the filters (or the newest in the inbox
-    when no filter is given).
-    """
-    if not (config.SMTP_USER and config.SMTP_PASS):
-        return (
-            "Email isn't set up: the MOUNIR_SMTP_USER and MOUNIR_SMTP_PASS "
-            "environment variables (a Gmail App Password) aren't configured."
-        )
-
-    import imaplib
-    import email as emaillib
-    from email.header import decode_header, make_header
-
-    sender, subject = _email_filters(sender, subject)
-
-    try:
-        with imaplib.IMAP4_SSL(config.IMAP_HOST) as imap:
-            imap.login(config.SMTP_USER, config.SMTP_PASS)
-            imap.select("INBOX", readonly=True)  # readonly: don't mark as read
-            status, data = _imap_search(imap, unread_only, sender, subject)
-            if status != "OK":
-                return "Could not search the inbox."
-            ids = data[0].split()
-            if not ids:
-                return "No matching emails found."
-            status, raw = imap.fetch(ids[-1], "(RFC822)")  # newest match
-            if status != "OK" or not raw or not raw[0]:
-                return "Could not fetch the email."
-            msg = emaillib.message_from_bytes(raw[0][1])
-    except Exception as exc:
-        return f"Failed to read email: {exc}"
-
-    frm = str(make_header(decode_header(msg.get("From", "?"))))
-    subj = str(make_header(decode_header(msg.get("Subject", "(no subject)"))))
-    date = msg.get("Date", "?")
-    return f"From: {frm}\nSubject: {subj}\nDate: {date}\n\n{_plain_text(msg)}"
-
-
 # What the model sees. Descriptions matter — they're how it decides to call.
 SCHEMAS = [
     {
@@ -849,106 +583,6 @@ SCHEMAS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "send_email",
-            "description": (
-                "Send an email from the user's own account. The user confirms "
-                "before it's sent, so fill in the exact recipient, subject, and "
-                "body. Write the body yourself unless the user dictates it."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "to": {
-                        "type": "string",
-                        "description": "Recipient email address.",
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "The subject line.",
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "The full message body.",
-                    },
-                    "attachments": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional list of file paths to attach (PDF, image, etc.). Omit if none.",
-                    },
-                },
-                "required": ["to", "subject", "body"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_emails",
-            "description": (
-                "Read recent emails from the user's own inbox, returned as plain "
-                "text (From, Subject, Date, and the message). Use it to check the "
-                "inbox, summarize new mail, or find a message. Filter with "
-                "unread_only, sender, or subject when the user is specific. Long "
-                "emails are clipped — to read ONE email whole, use read_full_email."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "count": {
-                        "type": "integer",
-                        "description": "How many of the most recent matching emails to read (default 5, max 20).",
-                    },
-                    "unread_only": {
-                        "type": "boolean",
-                        "description": "Only return unread emails. Default false.",
-                    },
-                    "sender": {
-                        "type": "string",
-                        "description": "Only emails from this address or name (substring match). Omit for all senders.",
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Only emails whose subject contains this text. Omit for all subjects.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_full_email",
-            "description": (
-                "Read ONE email's entire text content, no matter how long — no "
-                "clipping. Returns the newest email matching the filters. Use it "
-                "when the user wants to SEE or READ a specific email rather than "
-                "a summary — then quote its body as-is in your reply. Pinpoint "
-                "the email with sender and/or subject (from a read_emails list)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sender": {
-                        "type": "string",
-                        "description": "Address or name the email is from (substring match).",
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Text the subject contains (substring match).",
-                    },
-                    "unread_only": {
-                        "type": "boolean",
-                        "description": "Only consider unread emails. Default false.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
 ]
 
 SCHEMAS += [
@@ -1008,14 +642,16 @@ SCHEMAS += [
         "function": {
             "name": "delegate_to_knowledge",
             "description": (
-                "Delegate ANY change to long-term knowledge to the knowledge agent "
+                "Delegate ANY change to long-term knowledge to the knowledge "
                 "agent: the user says 'remember this', a new contact or "
                 "preference appears, a stored fact changed, or stored knowledge "
-                "should be merged/cleaned/forgotten. The knowledge agent curates the "
-                "knowledge folder (files + index) and returns a short report of "
-                "what it saved or removed. Never edit knowledge files yourself — "
-                "reading them with read_file is still fine. State the exact "
-                "fact(s) to store or remove, with all details you have."
+                "should be merged/cleaned/forgotten. It curates the knowledge "
+                "folder (files + index) and returns a short report of what it "
+                "saved or removed. It ONLY stores/updates/deletes knowledge "
+                "files — it cannot look things up, browse the web, or answer "
+                "questions; to READ stored knowledge yourself use read_file. "
+                "State the exact fact(s) to store or remove, with all details "
+                "you have."
             ),
             "parameters": {
                 "type": "object",
@@ -1060,6 +696,33 @@ SCHEMAS += [
     {
         "type": "function",
         "function": {
+            "name": "delegate_to_email",
+            "description": (
+                "Delegate ANYTHING about Ahmed's Gmail to the email agent: "
+                "search or read emails (full Gmail query power — sender, "
+                "subject, unread, dates, attachments), send or reply, drafts, "
+                "labels, mark read/unread, delete. It acts on the real mailbox "
+                "via the Gmail API and asks the user to confirm by itself "
+                "before sending or deleting. When sending to a person named by "
+                "name, resolve the real address from the contacts file first "
+                "and put it in the task. Describe the outcome you want; it "
+                "returns a short report."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The email task, e.g. 'find unread from LinkedIn this week and summarize', 'send <text> to sami@x.com with subject Y'.",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_to_media",
             "description": (
                 "Delegate ANYTHING that needs reading media to the media agent: "
@@ -1092,14 +755,12 @@ _REGISTRY = {
     "play_on_youtube": play_on_youtube,
     "open_path": open_path,
     "bash": bash,
-    "send_email": send_email,
-    "read_emails": read_emails,
-    "read_full_email": read_full_email,
     "delegate_to_coder": delegate_to_coder,
     "delegate_to_researcher": delegate_to_researcher,
     "delegate_to_media": delegate_to_media,
     "delegate_to_knowledge": delegate_to_knowledge,
     "delegate_to_system": delegate_to_system,
+    "delegate_to_email": delegate_to_email,
 }
 
 

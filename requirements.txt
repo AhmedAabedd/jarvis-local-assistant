@@ -20,3 +20,6 @@ pyTelegramBotAPI>=4.14
 
 # play_on_youtube: resolve a search to the top video, no API key
 yt-dlp>=2024.1.1
+
+# Email specialist — MCP client SDK; the Gmail MCP server itself runs via npx
+mcp>=1.0
