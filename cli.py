@@ -297,7 +297,7 @@ def main() -> int:
     trace.sub_row("coder", config.CODER_MODEL)
     trace.sub_row("researcher", config.RESEARCHER_MODEL)
     trace.sub_row("media", config.MEDIA_MODEL)
-    trace.sub_row("librarian", config.LIBRARIAN_MODEL)
+    trace.sub_row("knowledge", config.KNOWLEDGE_MODEL)
     trace.sub_row("system", config.SYSTEM_MODEL, last=True)
     trace.kv("thinking", "on" if config.THINK else "off")
     trace.rule(64)

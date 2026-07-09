@@ -56,7 +56,7 @@ def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
     endpoint — same message/tool format as nvidia_chat, no extra SDK needed.
 
     Returns the assistant message dict ({content, tool_calls}). Used by the
-    librarian specialist.
+    knowledge agent specialist.
     """
     import requests
 

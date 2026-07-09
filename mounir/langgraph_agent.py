@@ -34,7 +34,7 @@ from typing import Annotated, Iterator, TypedDict
 from . import config as cfg, llm, tools
 from .memory import Conversation
 from .specialists.coder import run as run_coder
-from .specialists.librarian import run as run_librarian
+from .specialists.knowledge import run as run_knowledge
 from .specialists.media import run as run_media
 from .specialists.researcher import run as run_researcher
 from .specialists.system import run as run_system
@@ -57,7 +57,7 @@ _DELEGATES = {
     "delegate_to_coder": "coder",
     "delegate_to_researcher": "researcher",
     "delegate_to_media": "media",
-    "delegate_to_librarian": "librarian",
+    "delegate_to_knowledge": "knowledge",
     "delegate_to_system": "system",
 }
 
@@ -276,18 +276,18 @@ def _media(state: TurnState) -> Command:
     )
 
 
-# --- librarian node ---------------------------------------------------------
+# --- knowledge agent node ---------------------------------------------------------
 
-def _librarian(state: TurnState) -> Command:
-    task, call_id = _extract_delegate(state["messages"], "delegate_to_librarian")
-    trace.node("librarian")
+def _knowledge(state: TurnState) -> Command:
+    task, call_id = _extract_delegate(state["messages"], "delegate_to_knowledge")
+    trace.node("knowledge")
     trace.block("received  ← supervisor", task)
 
-    report = run_librarian(task).strip() if task else "No task was provided to the librarian."
+    report = run_knowledge(task).strip() if task else "No task was provided to the knowledge agent."
 
     trace.block("returned  → supervisor", report)
     trace.gap()  # breathing room before the supervisor's reply streams in
-    # Only the short curation report crosses back; the librarian's file reads
+    # Only the short curation report crosses back; the knowledge agent's file reads
     # and index bookkeeping stay inside this node.
     return Command(
         goto="supervisor",
@@ -295,7 +295,7 @@ def _librarian(state: TurnState) -> Command:
             "messages": [
                 {
                     "role": "tool",
-                    "tool_name": "delegate_to_librarian",
+                    "tool_name": "delegate_to_knowledge",
                     "tool_call_id": call_id,
                     "content": report,
                 }
@@ -349,7 +349,7 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
     graph.add_node("coder", _coder)
     graph.add_node("researcher", _researcher)
     graph.add_node("media", _media)
-    graph.add_node("librarian", _librarian)
+    graph.add_node("knowledge", _knowledge)
     graph.add_node("system", _system)
     graph.add_edge(START, "supervisor")
     return graph.compile()

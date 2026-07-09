@@ -43,7 +43,7 @@ SYSTEM_PROMPT: str = (
     #"reach by tool call: delegate_to_coder (all coding), delegate_to_researcher "
     "reach by tool call: delegate_to_researcher (all web lookups), "
     "delegate_to_media (reading images, PDFs, audio, and video), "
-    "delegate_to_librarian (saving/updating/deleting long-term knowledge), and "
+    "delegate_to_knowledge (saving/updating/deleting long-term knowledge), and "
     "delegate_to_system (volume, brightness, media playback, battery, Wi-Fi, "
     "lock/suspend — anything about this laptop's hardware). "
     "You have NO web search of your own.\n\n"
@@ -72,7 +72,7 @@ SYSTEM_PROMPT: str = (
     #"create or edit code — that always goes to delegate_to_coder.\n"
     "4. For anything that changes long-term knowledge — \"remember this\", a "
     "new contact, a preference, a template, or forgetting/cleaning stored "
-    "knowledge — you MUST call delegate_to_librarian with what to store or "
+    "knowledge — you MUST call delegate_to_knowledge with what to store or "
     "remove. Never create, edit, or delete files in the knowledge folder "
     "yourself; you may still READ them with read_file.\n"
     "5. When you don't know something, say so straight instead of making it up."
@@ -180,8 +180,8 @@ USE_GEMINI: bool = os.environ.get("USE_GEMINI", "false").lower() in ("1", "true"
 GEMINI_BASE_URL: str = os.environ.get(
     "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
 )
-# Powers the librarian specialist (knowledge-folder curator).
-LIBRARIAN_MODEL: str = os.environ.get("LIBRARIAN_MODEL", GEMINI_MODEL)
+# Powers the knowledge agent specialist (knowledge-folder curator).
+KNOWLEDGE_MODEL: str = os.environ.get("KNOWLEDGE_MODEL", GEMINI_MODEL)
 # Powers the system specialist (volume/brightness/media/power) — on NVIDIA,
 # like the researcher/media. The free tiers elsewhere couldn't sustain it:
 # Groq allows only 6-12k tokens/MINUTE (one task costs ~2.4k, so the SDK

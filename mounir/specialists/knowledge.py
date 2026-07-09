@@ -1,13 +1,13 @@
-"""Librarian agent — curator of the knowledge folder (long-term memory).
+"""Knowledge agent — curator of the knowledge folder (long-term memory).
 
 The orchestrator calls run(task) and gets back a short plain-text report of
-what was saved, updated, or deleted. The librarian does the whole judge →
+what was saved, updated, or deleted. The knowledge agent does the whole judge →
 check-for-duplicates → write → report loop in its OWN context; the supervisor
 never edits knowledge files itself.
 
 The index (index.md) is maintained BY CODE, not by the model: save_knowledge
 and delete_knowledge update it automatically, so a file can never exist
-without its index line or vice versa. The librarian cannot touch index.md
+without its index line or vice versa. The knowledge agent cannot touch index.md
 directly.
 
 Writes are ISOLATED to this agent. The supervisor still READS knowledge
@@ -38,7 +38,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # one path segment
 _files_read: set[str] = set()
 
 SYSTEM_PROMPT = """\
-You are Mounir's librarian — the sole curator of the knowledge folder, the
+You are Mounir's knowledge agent — the sole curator of the knowledge folder, the
 assistant's long-term memory. Every file in that folder is loaded into the
 assistant's head on demand, so the folder's quality IS the assistant's memory
 quality. You keep it small, current, and true.
@@ -167,7 +167,7 @@ def _tree() -> str:
 
 
 def _context() -> str:
-    """Everything the librarian should know before its first tool call."""
+    """Everything the knowledge agent should know before its first tool call."""
     try:
         index = config.INDEX_FILE.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
@@ -405,9 +405,9 @@ def _dispatch(name: str, arguments: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def run(task: str) -> str:
-    """Run the librarian on a task. Returns a short plain-text report."""
+    """Run the knowledge agent on a task. Returns a short plain-text report."""
     if not config.GEMINI_API_KEY:
-        return "Librarian failed: GEMINI_API_KEY is not set."
+        return "Knowledge agent failed: GEMINI_API_KEY is not set."
 
     _files_read.clear()  # fresh task — must read a file before modifying it
     retried_empty = False
@@ -420,18 +420,18 @@ def run(task: str) -> str:
 
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
-            message = llm.gemini_chat(messages, tools=TOOLS, model=config.LIBRARIAN_MODEL)
+            message = llm.gemini_chat(messages, tools=TOOLS, model=config.KNOWLEDGE_MODEL)
         except Exception as exc:
             if executed:
                 # The LLM died AFTER tools ran (e.g. rate limit on the report
                 # call). Saying "failed" would make the supervisor redo writes
                 # that already happened — report them instead.
                 return (
-                    "Librarian was cut off by an LLM error while reporting, "
+                    "Knowledge agent was cut off by an LLM error while reporting, "
                     "but these tool calls DID run: " + "; ".join(executed)
                     + ". Do NOT redo them."
                 )
-            return f"Librarian failed: {exc}"
+            return f"Knowledge agent failed: {exc}"
 
         content = message.get("content") or ""
         tool_calls = message.get("tool_calls") or []
@@ -444,7 +444,7 @@ def run(task: str) -> str:
                 retried_empty = True
                 continue
             return (
-                "Librarian failed: the model returned an empty response "
+                "Knowledge agent failed: the model returned an empty response "
                 "twice — NOTHING was saved or changed. Try again."
             )
 
@@ -473,4 +473,4 @@ def run(task: str) -> str:
                 }
             )
 
-    return "Librarian reached max tool rounds — the task may be only partly done."
+    return "Knowledge agent reached max tool rounds — the task may be only partly done."

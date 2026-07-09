@@ -30,9 +30,9 @@ def delegate_to_researcher(task: str) -> str:
     return run(task)
 
 
-def delegate_to_librarian(task: str) -> str:
-    """Hand a knowledge-folder change to the librarian agent; returns its report."""
-    from .specialists.librarian import run
+def delegate_to_knowledge(task: str) -> str:
+    """Hand a knowledge-folder change to the knowledge agent; returns its report."""
+    from .specialists.knowledge import run
     return run(task)
 
 def delegate_to_media(task: str) -> str:
@@ -70,11 +70,11 @@ def _resolve(path: str) -> Path:
 
 
 def _knowledge_guard(p: Path) -> str | None:
-    """Refuse writes inside the knowledge folder — that's the librarian's job.
+    """Refuse writes inside the knowledge folder — that's the knowledge agent's job.
 
     The prompt already forbids it, but a rule the model can ignore isn't a
     rule: writing there directly would desync index.md, which only the
-    librarian's tools keep in sync. Reading stays allowed.
+    knowledge agent's tools keep in sync. Reading stays allowed.
     """
     try:
         inside = p.resolve().is_relative_to(config.KNOWLEDGE_DIR.resolve())
@@ -82,8 +82,8 @@ def _knowledge_guard(p: Path) -> str | None:
         return None
     if inside:
         return (
-            f"{p} is inside the knowledge folder, which only the librarian may "
-            "change (it keeps index.md in sync). Call delegate_to_librarian "
+            f"{p} is inside the knowledge folder, which only the knowledge agent may "
+            "change (it keeps index.md in sync). Call delegate_to_knowledge "
             "with what to store or change instead."
         )
     return None
@@ -437,7 +437,7 @@ def send_email(to: str, subject: str, body: str, attachments: list[str] | None =
     if not _email_in_contacts(to):
         result += (
             f"\n\n[contacts] {to} is not in the contacts file. If it belongs to "
-            f"a person, call delegate_to_librarian to save '<Name>: {to}' (use "
+            f"a person, call delegate_to_knowledge to save '<Name>: {to}' (use "
             f"the recipient's name) so it's remembered for next time."
         )
     return result
@@ -1006,12 +1006,12 @@ SCHEMAS += [
     {
         "type": "function",
         "function": {
-            "name": "delegate_to_librarian",
+            "name": "delegate_to_knowledge",
             "description": (
-                "Delegate ANY change to long-term knowledge to the librarian "
+                "Delegate ANY change to long-term knowledge to the knowledge agent "
                 "agent: the user says 'remember this', a new contact or "
                 "preference appears, a stored fact changed, or stored knowledge "
-                "should be merged/cleaned/forgotten. The librarian curates the "
+                "should be merged/cleaned/forgotten. The knowledge agent curates the "
                 "knowledge folder (files + index) and returns a short report of "
                 "what it saved or removed. Never edit knowledge files yourself — "
                 "reading them with read_file is still fine. State the exact "
@@ -1098,7 +1098,7 @@ _REGISTRY = {
     "delegate_to_coder": delegate_to_coder,
     "delegate_to_researcher": delegate_to_researcher,
     "delegate_to_media": delegate_to_media,
-    "delegate_to_librarian": delegate_to_librarian,
+    "delegate_to_knowledge": delegate_to_knowledge,
     "delegate_to_system": delegate_to_system,
 }
 
