@@ -170,9 +170,16 @@ def _supervisor(
         }
         convo.append(assistant_msg)
         new_messages.append(assistant_msg)
+        declined = False
         for i, call in enumerate(tool_calls):
             args = dict(call.function.arguments)
-            result = tools.dispatch(call.function.name, args)
+            # After a decline, don't run the rest of the batch — but every
+            # tool_call still needs a result message for the history to be valid.
+            result = (
+                "Skipped — the user declined a command in this batch."
+                if declined
+                else tools.dispatch(call.function.name, args)
+            )
             trace.tool(call.function.name, args, result)
             tool_msg = {
                 "role": "tool",
@@ -182,6 +189,16 @@ def _supervisor(
             }
             convo.append(tool_msg)
             new_messages.append(tool_msg)
+            if result == tools.USER_DECLINED:
+                declined = True
+        if declined:
+            # End the turn with a FIXED reply instead of letting the model
+            # react to the decline (it tends to retry the command or argue).
+            notice = "Okay, I didn't run it — you declined the command. Tell me how you'd like to proceed."
+            if stream_q is not None:
+                stream_q.put(notice)
+            new_messages.append({"role": "assistant", "content": notice})
+            return Command(goto=END, update={"messages": new_messages})
 
     # Tool-round cap hit — force a final, tool-free answer.
     parts = []

@@ -209,6 +209,14 @@ def _default_confirm(action: str) -> bool:
 # is, those tools never act unless this returns True.
 confirm_fn = _default_confirm
 
+# Returned VERBATIM when the user declines a command. The supervisor loop
+# checks for this exact string and ends the turn with a fixed reply, instead
+# of handing the decline back to the model (which tends to retry or argue).
+USER_DECLINED = (
+    "USER DECLINED the command — it was NOT run. The turn was stopped; "
+    "do not retry it unless the user asks again."
+)
+
 
 # Browser binaries to try, in order; first one on PATH wins.
 _BROWSERS = [
@@ -332,7 +340,7 @@ def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: b
     if not command:
         return "No command given."
     if not confirm_fn(command):
-        return "Command cancelled by the user — not run."
+        return USER_DECLINED
 
     if run_in_background:
         try:
