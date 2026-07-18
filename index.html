@@ -280,6 +280,7 @@
       <div class="brand-sub mono">local assistant</div>
     </div>
     <div class="header-right">
+      <a href="/admin" style="color:var(--text-mid);text-decoration:none;font-size:12px;margin-right:8px;">Admin</a>
       <div class="pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
       <div class="clock mono" id="clock">—</div>
     </div>
@@ -411,7 +412,7 @@ setInterval(pollStats, 1500); pollStats();
 /* ---------------- chat helpers ---------------- */
 const transcript = document.getElementById('transcript');
 const transcriptScroll = transcript.parentElement;  // the .transcript scroll box
-function escapeHtml(s){ return s.replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function escapeHtml(s){ return s.replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function render(text){ return escapeHtml(text).replace(/`([^`]+)`/g,'<code>$1</code>'); }
 function scrollDown(){ transcriptScroll.scrollTop = transcriptScroll.scrollHeight; }
 

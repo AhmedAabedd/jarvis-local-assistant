@@ -97,6 +97,41 @@ def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]
 
+def openai_chat(messages, tools=None, model=None, *, base_url, api_key,
+                temperature=0.2, max_tokens=8192) -> dict:
+    """One non-streaming chat-completion against ANY OpenAI-compatible endpoint
+    — the caller picks the model, base URL, and key. Same message/tool shape as
+    nvidia_chat. Used by dynamic MCP subagents, whose provider is per-agent
+    config rather than one of the fixed providers above.
+    """
+    import requests
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if tools:
+        payload["tools"] = tools
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    resp = requests.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=180,
+    )
+    resp.raise_for_status()
+    msg = resp.json()["choices"][0]["message"]
+    # Reasoning models may think inline — keep only the answer.
+    msg["content"] = re.sub(r"(?s)<think>.*?</think>", "", msg.get("content") or "").strip()
+    return msg
+
+
 def ollama_cloud_chat(messages, tools=None, model=None, *, temperature=0.2,
                       max_tokens=8192) -> dict:
     """One non-streaming Ollama Cloud chat-completion (ollama.com, hosted —

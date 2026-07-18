@@ -29,9 +29,14 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from mounir.agent import Agent
+from mounir import db
+from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
 
 app = FastAPI(title="Mounir")
+
+# Ensure the SQLite DB exists and the legacy JSON file is migrated.
+db.init()
 
 # One shared agent instance = one shared conversation memory across the UI.
 agent = Agent()
@@ -74,10 +79,19 @@ _last_net = psutil.net_io_counters()
 _last_net_time = time.time()
 
 
+def _read_html(filename: str) -> str:
+    with open(filename, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    with open("index.html", "r", encoding="utf-8") as f:
-        return f.read()
+    return _read_html("index.html")
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin():
+    return _read_html("admin.html")
 
 
 @app.get("/api/stats")
@@ -232,6 +246,108 @@ async def voice_turn(file: UploadFile = File(...)):
         pass  # UI will just show text if TTS isn't set up
 
     return JSONResponse({"text": text, "lang": lang, "reply": reply, "audio_b64": audio_b64})
+
+
+# --- Admin: models, MCP servers, subagents ------------------------------------
+
+@app.get("/api/models")
+async def list_models():
+    return db.list_models()
+
+
+@app.post("/api/models")
+async def create_model(req: dict):
+    try:
+        return db.add_model(
+            req.get("name", ""),
+            req.get("model", ""),
+            req.get("provider", ""),
+            req.get("base_url", ""),
+            req.get("api_key", ""),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/models/{model_id}")
+async def update_model(model_id: int, req: dict):
+    m = db.update_model(model_id, **req)
+    if not m:
+        return JSONResponse({"error": "Model not found or in use."}, status_code=404)
+    return m
+
+
+@app.delete("/api/models/{model_id}")
+async def delete_model(model_id: int):
+    if db.delete_model(model_id):
+        return JSONResponse({"ok": True})
+    return JSONResponse({"error": "Model not found or in use."}, status_code=404)
+
+
+@app.get("/api/mcp-servers")
+async def list_servers():
+    return db.list_servers()
+
+
+@app.post("/api/mcp-servers")
+async def create_server(req: dict):
+    try:
+        return db.add_server(req.get("name", ""), req.get("connection", ""))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/mcp-servers/{server_id}")
+async def update_server(server_id: int, req: dict):
+    s = db.update_server(server_id, **req)
+    if not s:
+        return JSONResponse({"error": "Server not found or in use."}, status_code=404)
+    return s
+
+
+@app.delete("/api/mcp-servers/{server_id}")
+async def delete_server(server_id: int):
+    if db.delete_server(server_id):
+        return JSONResponse({"ok": True})
+    return JSONResponse({"error": "Server not found or in use."}, status_code=404)
+
+
+@app.get("/api/subagents")
+async def list_subagents():
+    return db.list_subagents()
+
+
+@app.post("/api/subagents")
+async def create_subagent(req: dict):
+    try:
+        mcp_agents._validate_agent_name(req.get("name", ""))
+        return db.add_subagent(
+            req.get("name", ""),
+            req.get("description", ""),
+            req.get("system_prompt", ""),
+            int(req.get("model_id", 0)),
+            int(req.get("mcp_server_id", 0)),
+            parent="supervisor",
+        )
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/subagents/{subagent_id}")
+async def update_subagent(subagent_id: int, req: dict):
+    if "name" in req:
+        mcp_agents._validate_agent_name(req["name"])
+    s = db.update_subagent(subagent_id, **req)
+    if not s:
+        return JSONResponse({"error": "Subagent not found."}, status_code=404)
+    return s
+
+
+@app.delete("/api/subagents/{subagent_id}")
+async def delete_subagent(subagent_id: int):
+    if db.delete_subagent(subagent_id):
+        return JSONResponse({"ok": True})
+    return JSONResponse({"error": "Subagent not found."}, status_code=404)
 
 
 if __name__ == "__main__":

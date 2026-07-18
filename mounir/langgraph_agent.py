@@ -31,11 +31,12 @@ import threading
 from importlib import import_module
 from typing import Annotated, Iterator, TypedDict
 
-from . import config as cfg, llm, tools
+from . import config as cfg, llm, mcp_agents, tools
 from .memory import Conversation
 from .specialists.coder import run as run_coder
 from .specialists.knowledge import run as run_knowledge
 from .specialists.media import run as run_media
+from .specialists.mcp_agent import run as run_mcp_agent
 from .specialists.researcher import run as run_researcher
 from .specialists.system import run as run_system
 from .specialists.email import run as run_email
@@ -74,10 +75,12 @@ class TurnState(TypedDict):
 # --- helpers ----------------------------------------------------------------
 
 def _count_delegations(messages: list[dict]) -> int:
+    # Prefix match covers both the built-in delegates and the dynamic
+    # delegate_to_<slug> tools of registered MCP agents.
     return sum(
         1
         for m in messages
-        if m.get("role") == "tool" and m.get("tool_name") in _DELEGATES
+        if m.get("role") == "tool" and str(m.get("tool_name", "")).startswith("delegate_to_")
     )
 
 
@@ -107,11 +110,17 @@ def _supervisor(
     stream_q: queue.Queue | None,
     model: str,
     use_tools: bool,
+    delegates: dict[str, str],
+    dynamic: list[dict],
 ) -> Command:
     schemas = list(tools.SCHEMAS) if use_tools else []
+    # Registered MCP agents each contribute one delegate schema — the only
+    # thing the supervisor ever sees of them.
+    if use_tools:
+        schemas += [mcp_agents.delegate_schema(spec) for spec in dynamic]
     # Stop offering specialists once we've delegated enough this turn.
     if _count_delegations(state["messages"]) >= MAX_DELEGATIONS:
-        schemas = [s for s in schemas if s["function"]["name"] not in _DELEGATES]
+        schemas = [s for s in schemas if s["function"]["name"] not in delegates]
 
     convo = [dict(m) for m in state["messages"]]
     new_messages: list[dict] = []
@@ -133,10 +142,10 @@ def _supervisor(
 
         # Hand off to a specialist node instead of running the delegate inline.
         delegate = next(
-            (tc for tc in tool_calls if tc.function.name in _DELEGATES), None
+            (tc for tc in tool_calls if tc.function.name in delegates), None
         )
         if delegate is not None:
-            target = _DELEGATES[delegate.function.name]
+            target = delegates[delegate.function.name]
             new_messages.append(
                 {
                     "role": "assistant",
@@ -377,6 +386,52 @@ def _email(state: TurnState) -> Command:
     )
 
 
+# --- dynamic MCP agent nodes ---------------------------------------------------
+
+def _make_mcp_node(spec: dict, valid_parents: set[str]):
+    """Build a graph node for one registered MCP agent.
+
+    Same contract as the built-in specialist nodes: receive the task from the
+    delegate tool call, run the generic MCP specialist, hand its report back
+    to the PARENT node as the tool result. The server's tool chatter never
+    enters `messages`. The parent comes from the registry entry, falling back
+    to the supervisor when it names a node that doesn't exist.
+    """
+    tool_name = mcp_agents.delegate_tool_name(spec["name"])
+    parent = spec.get("parent") or "supervisor"
+    if parent not in valid_parents:
+        parent = "supervisor"
+
+    def _node(state: TurnState) -> Command:
+        task, call_id = _extract_delegate(state["messages"], tool_name)
+        trace.node(spec["name"])
+        trace.block("received  ← supervisor", task)
+
+        report = (
+            run_mcp_agent(task, spec).strip()
+            if task
+            else f"No task was provided to the {spec['name']} agent."
+        )
+
+        trace.block(f"returned  → {parent}", report)
+        trace.gap()  # breathing room before the parent's reply streams in
+        return Command(
+            goto=parent,
+            update={
+                "messages": [
+                    {
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "tool_call_id": call_id,
+                        "content": report,
+                    }
+                ]
+            },
+        )
+
+    return _node
+
+
 # --- graph ------------------------------------------------------------------
 
 def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
@@ -386,11 +441,20 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
     node closures rather than threaded through state or config — simplest and
     most robust with LangGraph's node-signature handling. The supervisor and the
     specialist nodes route dynamically via Command(goto=...).
+
+    Registered MCP agents (mounir/mcp_agents.py) are loaded here — i.e. once
+    per turn — so a freshly added agent is routable from the next message:
+    one node per agent, one delegate tool per agent in the merged map.
     """
+    dynamic = mcp_agents.load()
+    delegates = dict(_DELEGATES)
+    for spec in dynamic:
+        delegates[mcp_agents.delegate_tool_name(spec["name"])] = mcp_agents.node_name(spec["name"])
+
     graph = StateGraph(TurnState)
     graph.add_node(
         "supervisor",
-        lambda state: _supervisor(state, stream_q, model, use_tools),
+        lambda state: _supervisor(state, stream_q, model, use_tools, delegates, dynamic),
     )
     graph.add_node("coder", _coder)
     graph.add_node("researcher", _researcher)
@@ -398,6 +462,13 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
     graph.add_node("knowledge", _knowledge)
     graph.add_node("system", _system)
     graph.add_node("email", _email)
+    # Today only the supervisor is a valid parent: a specialist node re-extracts
+    # its OWN delegate call on entry, so routing a child's report into another
+    # specialist would arrive with no matching call. Nested parents (subagent
+    # reporting to subagent) need that hand-off protocol first — future work.
+    valid_parents = {"supervisor"}
+    for spec in dynamic:
+        graph.add_node(mcp_agents.node_name(spec["name"]), _make_mcp_node(spec, valid_parents))
     graph.add_edge(START, "supervisor")
     return graph.compile()
 

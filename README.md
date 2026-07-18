@@ -1,23 +1,45 @@
 # Mounir — a local, private AI assistant
 
 Mounir is a Jarvis-style assistant that runs on **your own machine**. The brain
-that talks to you is a **local LLM** (via [Ollama](https://ollama.com)); it can
-read and edit files, run shell commands, open apps, send email, read media
+you chat with is a small **local LLM** (via [Ollama](https://ollama.com)); it
+can read and edit files, run shell commands, open apps, send email, read media
 (images, PDFs, audio, video), and — when a job needs more horsepower — hand off
 to specialist agents in the cloud. No data leaves your box unless a tool
 explicitly sends it.
 
-It speaks too: optional voice mode transcribes your speech (Whisper), thinks, and
-talks back (Piper). There's also a small web dashboard.
+It also speaks: optional voice mode transcribes your speech (Whisper), thinks,
+and talks back (Piper). A FastAPI web dashboard and a separate admin UI handle
+chat and runtime configuration.
 
 > Personal project. Sharp, no-fluff personality by design.
 
+This README is written to be useful to **any future contributor or AI agent**
+working on the codebase. If you are about to change something, read the
+architecture and project-layout sections first.
+
 ---
 
-## How it works — a LangGraph multi-agent
+## Table of contents
 
-Mounir is built as a **supervisor + specialists** graph
-([LangGraph](https://github.com/langchain-ai/langgraph)). The supervisor is the
+1. [Architecture](#architecture)
+2. [Built-in specialists](#built-in-specialists)
+3. [Dynamic MCP subagents](#dynamic-mcp-subagents)
+4. [Memory](#memory)
+5. [Quick start](#quick-start)
+6. [Configuration](#configuration)
+7. [Voice](#voice)
+8. [Web dashboard & admin](#web-dashboard--admin)
+9. [Target hardware](#target-hardware)
+10. [Project layout](#project-layout)
+11. [Status & roadmap](#status--roadmap)
+12. [Notes for AI contributors](#notes-for-ai-contributors)
+
+---
+
+## Architecture
+
+Mounir is a **supervisor + specialists** graph built with
+[LangGraph](https://github.com/langchain-ai/langgraph)). The supervisor is the
 assistant you talk to; it does general work itself and **delegates** the heavy,
 context-hungry jobs to isolated specialist agents, getting back only a compact
 report.
@@ -27,54 +49,89 @@ report.
    you ── text ──────▶ │    SUPERVISOR    │ ── answer ──▶ you
                        │   (local LLM)    │
                        │  files · bash ·  │
-                       │  browser · email │
-                       └─┬───────┬──────┬─┘
-        delegate_to_     │       │      │     delegate_to_media
-        researcher       │       │      │
-                         ▼       ▼      ▼
-              ┌────────────┐ ┌────────┐ ┌────────────┐
-              │ RESEARCHER │ │ CODER  │ │   MEDIA    │
-              │  (NVIDIA)  │ │(NVIDIA)│ │  (NVIDIA)  │
-              │ web search │ │ file   │ │ img · pdf  │
-              │ fetch page │ │ edits  │ │ audio·vid  │
-              └─────┬──────┘ └───┬────┘ └─────┬──────┘
-                    └──────── report back ────┘
+                       │ browser ·youtube │
+                       └────────┬─────────┘
+            delegate_to_<name> tool call — Command(goto=…) hand-off
+      └───────────┬───────────┬────┴──────┬───────────┬───────────┘
+      ▼           ▼           ▼           ▼           ▼           ▼
+┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐
+│RESEARCHER││  MEDIA   ││KNOWLEDGE ││  SYSTEM  ││  EMAIL   ││MCP AGENTS│
+│ollama.com││ NVIDIA  ││ Gemini  ││ NVIDIA  ││ollama.com││(dynamic) │
+│web search││img · pdf ││facts ·   ││vol·bri·wl││Gmail via ││any MCP   │
+│fetch page││audio·vid ││contacts  ││media·pwr ││MCP server││server    │
+└─────┴───────────┴─────────── report back ───────────┴───────────┴────┘
 ```
 
-> The supervisor reaches the **researcher** and **media** specialists by tool
-> call. The **coder** node is wired the same way but its `delegate_to_coder`
-> tool is currently turned off (schema commented out in `tools.py`); the node,
-> tool, and registry entry stay in place to re-enable it in one edit.
+> The **coder** node (NVIDIA) is wired the same way, but its
+> `delegate_to_coder` schema is commented out in `tools.py` so the supervisor
+> cannot delegate to it right now. Re-enable it by uncommenting the schema.
 
-**Why this shape:**
+### How the graph works
+
+The graph compiles **once per user turn** in `mounir/langgraph_agent.py`.
+This matters because it means:
+
+- Newly registered dynamic MCP subagents are live from the **next message**,
+  with no restart.
+- The supervisor's tool list is rebuilt every turn from `tools.SCHEMAS` plus
+  one `delegate_to_<slug>` schema per registered subagent.
+
+Key pieces in `langgraph_agent.py`:
+
+- `_DELEGATES` maps `delegate_to_*` tool names to graph node names.
+- `_supervisor()` is the main node. It streams the local model's reply. If the
+  model calls a delegate tool, the node returns `Command(goto=<node>)` instead
+  of running the tool inline.
+- Specialist nodes (`_coder`, `_researcher`, `_media`, `_knowledge`,
+  `_system`, `_email`, and the dynamic `_make_mcp_node` nodes) extract the
+  task from the delegate call, run their own loop, and return
+  `Command(goto="supervisor")` with a short report.
+- `_count_delegations()` caps how many hand-offs can happen per turn (currently
+  `MAX_DELEGATIONS = 3`).
+- `Agent.respond()` is the public API used by `cli.py`, `voice_cli.py`,
+  `telegram_cli.py`, and `server.py`; it yields reply chunks and persists the
+  full turn to memory.
+
+### Why this shape
 
 - **The supervisor stays light.** A specialist runs its own multi-step tool loop
   in its *own* context — the coder's file reads, the researcher's raw web pages —
   and only its short final report crosses back. The supervisor's context never
   fills with that chatter, so the small local model stays fast.
 - **Right model for the job.** The supervisor runs on a small **local** model
-  (good enough for chat + tool calls). Code and web research go to capable
-  **cloud** models that the local box couldn't run.
+  (good enough for chat + tool calls). Code, web research, media, hardware,
+  knowledge, and email go to capable **cloud** models the local box couldn't run.
 - **Real hand-offs.** Delegation is a tool call the graph intercepts and routes
   with `Command(goto=...)`; the specialist node runs, then hands control back to
   the supervisor with its report as the tool result.
 
-### The agents and their tools
+---
 
-| Agent | Model (default) | Tools |
-|---|---|---|
-| **Supervisor** | local `mounir` (Ollama) — or Mistral / Groq | `read_file`, `write_file`, `edit_file`, `list_directory`, `open_browser`, `open_path`, `bash`, `send_email`, `delegate_to_researcher`, `delegate_to_media` |
-| **Researcher** | `nvidia/llama-3.3-nemotron-super-49b-v1.5` (NVIDIA) | `web_search`, `search_news`, `fetch_url` |
-| **Coder** *(delegation off)* | `minimaxai/minimax-m3` (NVIDIA) | `read_file`, `create_file`, `modify_file`, `delete_file`, `search_file` |
-| **Media** | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` (NVIDIA) | `load_media`, `sample_frames`, `find_media` |
+## Built-in specialists
 
-The supervisor has **no web access of its own** — all lookups go through the
-researcher; anything it needs to *see or hear* (an image, a PDF, a screenshot, an
-audio clip, a video) goes to the **media** agent, which loads the bytes, lets an
-omni model read them, and returns a text report. Each specialist's tools are
-isolated to its own module, so its work never leaks into the supervisor's context.
+| Agent | Model (default) | Provider | Tools |
+|---|---|---|---|
+| **Supervisor** | local `mounir` (Ollama) — or Mistral / Groq | local / hosted | `read_file`, `write_file`, `edit_file`, `list_directory`, `open_browser`, `play_on_youtube`, `open_path`, `bash` + one `delegate_to_*` tool per specialist |
+| **Researcher** | `nemotron-3-super:cloud` | Ollama Cloud | `web_search`, `search_news`, `fetch_url` |
+| **Media** | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | NVIDIA | `load_media`, `sample_frames`, `find_media` |
+| **Knowledge** | `gemini-2.5-flash` | Google Gemini | `list_knowledge`, `read_knowledge`, `search_knowledge`, `save_knowledge`, `append_knowledge`, `delete_knowledge` |
+| **System** | `meta/llama-3.1-8b-instruct` | NVIDIA | `set_volume`, `set_brightness`, `set_keyboard_backlight`, `media_control`, `system_status`, `set_wifi`, `set_bluetooth`, `lock_screen`, `suspend` |
+| **Email** | `gpt-oss:120b-cloud` | Ollama Cloud | whatever the Gmail MCP server advertises (search, read, send, drafts, labels, …) |
+| **Coder** *(delegation off)* | `minimaxai/minimax-m3` | NVIDIA | `read_file`, `create_file`, `modify_file`, `delete_file`, `search_file` |
 
-### Notable tool details (inspired by agentic file editors)
+Rules of thumb the supervisor prompt encodes:
+
+- The supervisor has **no web access of its own** — all lookups go through the
+  researcher.
+- Anything it needs to *see or hear* (image, PDF, screenshot, audio, video)
+  goes to the **media** agent.
+- Long-term knowledge changes go to the **knowledge** agent.
+- Hardware/system control goes to the **system** agent.
+- Anything Gmail goes to the **email** agent.
+- Each specialist's tools are isolated to its own module; its raw work never
+  leaks into the supervisor's context.
+
+### Notable tool details
 
 - **`read_file`** returns content with line numbers (`cat -n` style) and pages in
   chunks (default 300 lines for the supervisor, 1200 for the coder) — continue
@@ -85,25 +142,92 @@ isolated to its own module, so its work never leaks into the supervisor's contex
 - **`bash`** runs shell commands behind a confirmation prompt, with a per-call
   `timeout` and a `run_in_background` flag for long-running processes.
 - **`open_path`** opens any file/folder/URL with the system default app (xdg-open).
-- **`send_email`** sends via SMTP with optional file attachments (also confirmed).
-  You can email a saved contact **by name**: the model reads the address book
-  (`knowledge/contacts.md`) and sends to the listed address — handy for voice,
-  where spelling out an email is painful. After a send to an unknown address it's
-  prompted to save the new contact; if a name isn't on file it asks rather than
-  guessing.
+- **`play_on_youtube`** resolves a search to the top YouTube result via yt-dlp
+  and opens it in the browser.
+- **the email agent** runs Gmail over an MCP server (OAuth — no IMAP/SMTP):
+  it spawns the server per task, adopts whatever tools the server advertises,
+  and confirms before sending or deleting. You can email a saved contact **by
+  name**: the supervisor reads the address book (`knowledge/contacts.md`) and
+  puts the real address in the delegated task. New contacts are stored via the
+  knowledge agent.
 - **`load_media` / `sample_frames`** (media agent) attach a file's bytes to the
   agent's own conversation so the omni model can analyse it directly — images and
   audio inline, PDFs as extracted text (or page images when scanned), and video as
   sampled keyframes. Optional deps are loaded only when used (`Pillow`, `pypdf`,
   `PyMuPDF`, `opencv-python`).
 
-### Memory
+---
+
+## Dynamic MCP subagents
+
+On top of the built-ins, you can register **your own specialists backed by any
+MCP server** — no code changes. The setup is three-tier and persisted in a
+SQLite DB at `~/.mounir/mounir.db`:
+
+1. **Models** — reusable LLM presets: name, provider, base URL, API key. Use
+   `$VAR` or `${VAR}` in the key field to read from the environment instead of
+   storing a raw secret.
+2. **MCP servers** — reusable connections: either a stdio command
+   (e.g. `npx -y @modelcontextprotocol/server-brave-search`) or an `http(s)`
+   SSE URL.
+3. **Subagents** — the actual delegation targets: name, description (the
+   routing signal for the small supervisor model), system prompt, plus a chosen
+   model and MCP server.
+
+Each subagent becomes one `delegate_to_<slug>` tool and one graph node. Only
+its short report crosses back; the server's own tools never enter the
+supervisor's context. Subagents are loaded when each turn compiles, so a new
+one is live from your next message.
+
+### How it is wired
+
+- `mounir/db.py` owns the SQLite schema and CRUD.
+- `mounir/mcp_agents.py` is the registry layer: slug helpers, schema building,
+  and a management CLI. It calls `db.init()` on import, which creates tables and
+  migrates any legacy `~/.mounir/mcp_agents.json`.
+- `mounir/specialists/mcp_agent.py` is the generic specialist. It accepts a
+  resolved spec, connects to the MCP server (stdio or SSE), adopts the tools it
+  advertises, loops with `llm.openai_chat`, and returns a short report.
+- `mounir/langgraph_agent.py` adds one node per registered subagent at graph
+  compile time and extends the delegate map so the supervisor can route to it.
+
+### Management
+
+Manage them at **`http://localhost:8000/admin`** or via CLI:
+
+```bash
+python -m mounir.mcp_agents models list
+python -m mounir.mcp_agents servers list
+python -m mounir.mcp_agents agents list
+
+python -m mounir.mcp_agents models add --name "Ollama Cloud" --model qwen3:4b \
+  --provider Ollama --base-url https://ollama.com/v1 --api-key '$OLLAMA_API_KEY'
+
+python -m mounir.mcp_agents servers add --name "Brave Search" \
+  --connection "npx -y @modelcontextprotocol/server-brave-search"
+
+python -m mounir.mcp_agents agents add --name "Web Search" \
+  --description "Search the web with Brave. Use for any lookup." \
+  --prompt "You are a web search specialist..." \
+  --model-id 1 --server-id 1
+```
+
+The first time the new code runs, any existing `~/.mounir/mcp_agents.json` is
+migrated into the DB. Today every dynamic agent reports to the supervisor;
+nested parents (a subagent reporting to another subagent) are future work.
+
+---
+
+## Memory
 
 Conversation memory persists the **full turn** — every assistant tool call and
 its result — so on a follow-up the supervisor still remembers the path it found
 or the source the researcher returned, instead of redoing the work. A rolling
 window keeps it bounded, and the window is kept valid (every tool result stays
 paired with the call that produced it).
+
+Memory lives in `mounir/memory.py`. The `Agent` object keeps a `Conversation`
+instance; `respond()` appends the turn produced by the graph to it.
 
 ---
 
@@ -113,8 +237,12 @@ paired with the call that produced it).
 
 - **Python 3.10+**
 - **[Ollama](https://ollama.com)** running locally (for the supervisor model)
-- An **[NVIDIA build.nvidia.com](https://build.nvidia.com) API key** — powers the
-  coder and researcher specialists (free tier available)
+- Specialist keys (free tiers available; each powers different agents):
+  - **[Ollama Cloud](https://ollama.com/settings/keys)** — researcher, email,
+    and the default for dynamic MCP agents (`OLLAMA_API_KEY`)
+  - **[NVIDIA build.nvidia.com](https://build.nvidia.com)** — media, system,
+    coder (`NVIDIA_API_KEY`)
+  - **Google Gemini** — knowledge agent (`GEMINI_API_KEY`)
 
 ### Install
 
@@ -127,9 +255,10 @@ ollama create mounir -f modelfiles/mounir.Modelfile
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Specialist API key (coder + researcher). Persist it in ~/.bashrc:
-#    export NVIDIA_API_KEY="nvapi-..."
-export NVIDIA_API_KEY="nvapi-..."
+# 3. Specialist API keys. Persist them in ~/.bashrc:
+export OLLAMA_API_KEY="..."        # researcher + email + MCP agents
+export NVIDIA_API_KEY="nvapi-..."  # media + system + coder
+export GEMINI_API_KEY="..."        # knowledge
 
 # 4. Talk to Mounir
 python cli.py
@@ -148,26 +277,66 @@ MOUNIR_MODEL=qwen3:4b python cli.py
 
 ---
 
-## Choosing the supervisor's model
+## Configuration
 
-By default the supervisor runs **locally** through Ollama (`MOUNIR_MODEL`, default
-`mounir`). To run it on a hosted model instead, flip a provider flag and supply
-its key:
+Everything tunable lives in `mounir/config.py` and is overridable by env var.
+Dynamic MCP subagents are different: their models are stored in the SQLite DB,
+not in env vars. Only built-in specialists use the env vars below.
 
-```bash
-# Mistral
-USE_MISTRAL=true  MISTRAL_API_KEY=...  python cli.py     # mistral-small-latest
+### Core / supervisor model
 
-# Groq
-USE_GROQ=true     GROQ_API_KEY=...     python cli.py     # qwen/qwen3-32b
-```
+| Variable | Default | Purpose |
+|---|---|---|
+| `MOUNIR_MODEL` | `mounir` | Ollama model for the supervisor |
+| `MOUNIR_THINK` | `false` | Qwen3 thinking mode (slower, smarter) |
+| `MOUNIR_MAX_HISTORY` | `20` | Recent messages kept in the prompt window |
+| `MOUNIR_DATA_DIR` | `~/.mounir` | Where conversations, voices, and the SQLite DB are stored |
+| `MOUNIR_LOCATION` | `Tunis, Tunisia` | Location given to the model as context |
 
-The **coder and researcher always use NVIDIA** (`NVIDIA_API_KEY`), independent of
-the supervisor's provider.
+### Built-in specialists
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OLLAMA_API_KEY` | – | Ollama Cloud key — researcher, email, dynamic MCP agents default |
+| `OLLAMA_CLOUD_BASE_URL` | `https://ollama.com/v1` | OpenAI-compatible endpoint |
+| `RESEARCHER_MODEL` | `nemotron-3-super:cloud` | Researcher model |
+| `EMAIL_MODEL` | `gpt-oss:120b-cloud` | Email agent model |
+| `GMAIL_MCP_COMMAND` | `npx -y @gongrzhe/server-gmail-autoauth-mcp` | MCP server the email agent spawns (one-time OAuth setup — see `specialists/email.py`) |
+| `NVIDIA_API_KEY` | – | NVIDIA key — media, system, coder |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | OpenAI-compatible endpoint |
+| `MEDIA_MODEL` | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | Media (omni) model |
+| `SYSTEM_MODEL` | `meta/llama-3.1-8b-instruct` | System (hardware control) model |
+| `CODER_MODEL` | `minimaxai/minimax-m3` | Coder model |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | – / `gemini-2.5-flash` | Knowledge agent (Google's OpenAI-compatible endpoint) |
+| `MOUNIR_KNOWLEDGE_DIR` | `knowledge/` | Folder the knowledge agent curates (`contacts.md` address book, facts, …) |
+
+### Alternative supervisor providers (optional)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `USE_MISTRAL` / `MISTRAL_API_KEY` / `MISTRAL_MODEL` | `false` / – / `mistral-small-latest` | Run the supervisor on Mistral |
+| `USE_GROQ` / `GROQ_API_KEY` / `GROQ_MODEL` | `false` / – / `qwen/qwen3-32b` | Run the supervisor on Groq |
+
+### Telegram bridge (`telegram_cli.py`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | – | Bot token from @BotFather (long-polling — nothing exposed) |
+| `TELEGRAM_CHAT_ID` | – | The one chat allowed to talk to the assistant |
+
+### Voice / wake word
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MOUNIR_WHISPER_MODEL` | `small` | Whisper size (`base` for more speed) |
+| `MOUNIR_WHISPER_LANG` | auto | Force STT language (`en`, `ar`) |
+| `MOUNIR_PIPER_MODEL` | `~/.mounir/voices/en_US-amy-medium.onnx` | TTS voice file |
+| `MOUNIR_WAKE_WORD` | `hey_jarvis` | openwakeword trigger |
+| `MOUNIR_WAKE_THRESHOLD` | `0.5` | Wake sensitivity |
 
 ---
 
-## Voice mode
+## Voice
 
 ```bash
 sudo apt install portaudio19-dev            # system audio lib
@@ -195,67 +364,22 @@ For Arabic TTS, grab an `ar_*` Piper voice and set `MOUNIR_PIPER_MODEL` to it.
 
 ---
 
-## Web dashboard
+## Web dashboard & admin
 
-A FastAPI app serves a chat + live CPU/RAM/network dashboard.
+Two separate pages, both served by `server.py`:
+
+- **`/`** — the chat dashboard: voice orb, transcript, live CPU/RAM/network
+  stats, tool-confirmation modal. It talks to the same shared `Agent`
+  instance over a WebSocket (`/ws/chat`).
+- **`/admin`** — the management UI for models, MCP servers, and dynamic
+  subagents. It uses the REST endpoints under `/api/models`, `/api/mcp-servers`,
+  and `/api/subagents`.
 
 ```bash
 sudo apt install ffmpeg
 pip install fastapi uvicorn psutil python-multipart
-python server.py            # http://localhost:8000
+python server.py            # http://localhost:8000  +  http://localhost:8000/admin
 ```
-
----
-
-## Configuration (environment variables)
-
-Everything tunable lives in `mounir/config.py` and is overridable by env var.
-
-**Core / supervisor model**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `MOUNIR_MODEL` | `mounir` | Ollama model for the supervisor |
-| `MOUNIR_THINK` | `false` | Qwen3 thinking mode (slower, smarter) |
-| `MOUNIR_MAX_HISTORY` | `20` | Recent messages kept in the prompt window |
-| `MOUNIR_DATA_DIR` | `~/.mounir` | Where conversations/voices are stored |
-| `MOUNIR_LOCATION` | `Tunis, Tunisia` | Location given to the model as context |
-
-**Specialists (NVIDIA — required for coding / research)**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `NVIDIA_API_KEY` | – | Key for the coder + researcher (required) |
-| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | OpenAI-compatible endpoint |
-| `CODER_MODEL` | `minimaxai/minimax-m3` | Coder model |
-| `RESEARCHER_MODEL` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` | Researcher model |
-| `MEDIA_MODEL` | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | Media (omni) model |
-
-**Alternative supervisor providers (optional)**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `USE_MISTRAL` / `MISTRAL_API_KEY` / `MISTRAL_MODEL` | `false` / – / `mistral-small-latest` | Run the supervisor on Mistral |
-| `USE_GROQ` / `GROQ_API_KEY` / `GROQ_MODEL` | `false` / – / `qwen/qwen3-32b` | Run the supervisor on Groq |
-
-**Email (`send_email`)**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `MOUNIR_SMTP_HOST` / `MOUNIR_SMTP_PORT` | `smtp.gmail.com` / `587` | SMTP server |
-| `MOUNIR_SMTP_USER` / `MOUNIR_SMTP_PASS` | – | Email + **Gmail App Password** (not your login password) |
-| `MOUNIR_IMAP_HOST` | `imap.gmail.com` | IMAP server for reading the inbox |
-| `MOUNIR_KNOWLEDGE_DIR` | `knowledge/` | Folder for the `contacts.md` address book |
-
-**Voice / wake word**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `MOUNIR_WHISPER_MODEL` | `small` | Whisper size (`base` for more speed) |
-| `MOUNIR_WHISPER_LANG` | auto | Force STT language (`en`, `ar`) |
-| `MOUNIR_PIPER_MODEL` | `~/.mounir/voices/en_US-amy-medium.onnx` | TTS voice file |
-| `MOUNIR_WAKE_WORD` | `hey_jarvis` | openwakeword trigger |
-| `MOUNIR_WAKE_THRESHOLD` | `0.5` | Wake sensitivity |
 
 ---
 
@@ -273,35 +397,106 @@ of the split.
 ```
 cli.py                  text REPL (main entry point)
 voice_cli.py            voice entry point (push-to-talk / --wake)
-server.py               FastAPI web dashboard
-index.html              the dashboard UI
+telegram_cli.py         Telegram bridge (long-polling bot)
+server.py               FastAPI app: dashboard, admin, WebSocket, voice upload
+index.html              the chat dashboard UI
+admin.html              separate management UI for models / MCP servers / subagents
 modelfiles/             the 'mounir' Ollama Modelfile (personality + params)
 requirements.txt        core deps
 requirements-voice.txt  voice deps (on top of the core)
-knowledge/
-  contacts.md           address book (name → email) for send_email by name
+knowledge/              long-term knowledge folder
+  contacts.md           address book (name → email) for email-by-name
+  email_style.md        style hints for the email agent
+  index.md              auto-generated menu of knowledge files
+  music-list.md         example personal list
+  profile_report.md     example personal notes
 
 mounir/
-  langgraph_agent.py    the supervisor + coder + researcher + media graph
-  agent.py              thin compatibility wrapper around the graph
+  __init__.py
+  agent.py              thin compatibility wrapper around the LangGraph agent
+  langgraph_agent.py    the supervisor + specialists graph (built-ins + dynamic MCP agents)
   config.py             all tunables (env-overridable) + the supervisor prompt
-  llm.py                provider clients (Ollama stream, Mistral, Groq, NVIDIA)
+  llm.py                provider clients (Ollama stream, Mistral, Groq, NVIDIA, generic OpenAI)
   tools.py              supervisor tools (files, bash, browser, email, delegation)
+  db.py                 SQLite persistence: models, MCP servers, subagents
+  mcp_agents.py         registry layer + management CLI (uses db.py)
   memory.py             conversation history + full-turn persistence + JSON save
   trace.py              the purple, Claude-Code-style terminal renderer
   specialists/
+    __init__.py
     coder.py            coder agent + its isolated file tools
-    researcher.py       researcher agent + its isolated web tools
-    media.py            media agent + its isolated load/sample/find tools
-  audio.py stt.py tts.py voice.py wakeword.py sentences.py   voice pipeline
+    email.py            email agent: Gmail via MCP server
+    knowledge.py        knowledge agent: curates the knowledge folder
+    media.py            media agent: reads images, PDFs, audio, video
+    mcp_agent.py        generic MCP specialist that runs each registered subagent
+    researcher.py       researcher agent: web search, news, page fetch
+    system.py           system agent: volume, brightness, media, wifi, power
+  audio.py              audio capture helpers
+  stt.py                speech-to-text (local faster-whisper or Groq cloud)
+  tts.py                text-to-speech (Piper local or Google Cloud)
+  voice.py              voice pipeline orchestration
+  wakeword.py           openwakeword integration
+  sentences.py          sentence splitting for TTS
 ```
 
 ---
 
-## Status
+## Status & roadmap
 
-Working: local text chat with the supervisor, the researcher and media
-specialists (the coder is wired but its delegation is currently off), email
-including send-by-name from the contacts file, full-turn memory, voice
-(push-to-talk + hands-free), and the web dashboard. Ongoing: a custom "Hey
-Mounir" wake word, more tools, and long-term memory of facts about the user.
+**Working:** local text chat with the supervisor, all built-in specialists
+(researcher, media, knowledge, system, email; coder is wired but delegation is
+off), dynamic MCP subagents registered at runtime, full-turn memory, voice
+(push-to-talk + hands-free), Telegram bridge, web dashboard, and admin UI.
+
+**Ongoing / future:**
+- Custom "Hey Mounir" wake word
+- More built-in tools
+- Long-term memory of facts about the user
+- Persistent MCP connection pool (servers currently spawn per task)
+- Nested subagent hierarchies (a subagent reporting to another subagent)
+
+---
+
+## Notes for AI contributors
+
+### Conventions
+
+- Keep the supervisor's tool list small and curated. It runs on a small local
+  model; too many tools degrades routing quality.
+- Specialists own their own tools and prompts. Never let a specialist's raw
+  tool chatter leak into the supervisor's context — only a compact report.
+- File edits are exact-string replacement (`edit_file` / `modify_file`), not
+  full rewrites, and require the file to have been read first.
+- `tools.confirm_fn` gates outward-facing actions. The CLI uses a terminal
+  prompt; `server.py` swaps in a WebSocket confirmation so the browser can
+  approve.
+- API keys for built-in specialists come from env vars. For dynamic MCP
+  subagents, keys come from the model preset in the SQLite DB; use `$VAR` or
+  `${VAR}` there to avoid storing raw secrets.
+
+### Adding a built-in specialist
+
+1. Create `mounir/specialists/<name>.py` with a `run(task: str) -> str` function.
+2. Add a node function in `mounir/langgraph_agent.py` following the existing
+   pattern (extract delegate task, call `run`, trace, return `Command`).
+3. Add the delegate tool name → node name mapping to `_DELEGATES`.
+4. Add the schema to `tools.py` so the supervisor is offered the tool.
+5. Mention it in `config.SYSTEM_PROMPT` so the model knows when to use it.
+6. Update this README's agents table.
+
+### Adding a dynamic MCP subagent
+
+No code changes. Use the admin UI at `/admin` or the CLI:
+
+1. Add a **model** preset. The **Model ID** is the actual identifier the API
+   expects (e.g. `qwen3:4b`, `gpt-4o`); **Name** is just the display label.
+2. Add an **MCP server** connection (stdio command or SSE URL).
+3. Add a **subagent** linking the two. The description field is the routing
+   signal — write it so the small supervisor model knows when to delegate.
+
+### Testing changes
+
+- `python -m compileall -q mounir server.py` for syntax.
+- `python -m mounir.mcp_agents agents list` to inspect the dynamic registry.
+- `python server.py` and open `http://localhost:8000/admin` for UI checks.
+- Run a quick graph build: `python -c "from mounir.langgraph_agent import build_graph; build_graph()"`.
