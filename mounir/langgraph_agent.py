@@ -37,7 +37,6 @@ from .specialists.coder import run as run_coder
 from .specialists.knowledge import run as run_knowledge
 from .specialists.media import run as run_media
 from .specialists.mcp_agent import run as run_mcp_agent
-from .specialists.researcher import run as run_researcher
 from .specialists.system import run as run_system
 from . import trace
 
@@ -56,7 +55,6 @@ MAX_DELEGATIONS = 3
 # Delegation tools mapped to the node they hand off to.
 _DELEGATES = {
     "delegate_to_coder": "coder",
-    "delegate_to_researcher": "researcher",
     "delegate_to_media": "media",
     "delegate_to_knowledge": "knowledge",
     "delegate_to_system": "system",
@@ -246,34 +244,6 @@ def _coder(state: TurnState) -> Command:
     )
 
 
-# --- researcher node --------------------------------------------------------
-
-def _researcher(state: TurnState) -> Command:
-    task, call_id = _extract_delegate(state["messages"], "delegate_to_researcher")
-    trace.node("researcher")
-    trace.block("received  ← supervisor", task)
-
-    report = run_researcher(task).strip() if task else "No task was provided to the researcher."
-
-    trace.block("returned  → supervisor", report)
-    trace.gap()  # breathing room before the supervisor's reply streams in
-    # Only the synthesized report (with sources) crosses back; the search/fetch
-    # chatter and raw page text stay inside this node.
-    return Command(
-        goto="supervisor",
-        update={
-            "messages": [
-                {
-                    "role": "tool",
-                    "tool_name": "delegate_to_researcher",
-                    "tool_call_id": call_id,
-                    "content": report,
-                }
-            ]
-        },
-    )
-
-
 # --- media node -------------------------------------------------------------
 
 def _media(state: TurnState) -> Command:
@@ -428,7 +398,6 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
         lambda state: _supervisor(state, stream_q, model, use_tools, delegates, dynamic),
     )
     graph.add_node("coder", _coder)
-    graph.add_node("researcher", _researcher)
     graph.add_node("media", _media)
     graph.add_node("knowledge", _knowledge)
     graph.add_node("system", _system)

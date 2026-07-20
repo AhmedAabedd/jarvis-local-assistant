@@ -56,9 +56,9 @@ report.
       ▼           ▼           ▼           ▼           ▼           ▼
 ┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐
 │RESEARCHER││  MEDIA   ││KNOWLEDGE ││  SYSTEM  ││  EMAIL   ││MCP AGENTS│
-│ollama.com││ NVIDIA  ││ Gemini  ││ NVIDIA  ││ dynamic  ││(dynamic) │
-│web search││img · pdf ││facts ·   ││vol·bri·wl││Gmail MCP ││any MCP   │
-│fetch page││audio·vid ││contacts  ││media·pwr ││registry  ││server    │
+│ dynamic  ││ NVIDIA  ││ Gemini  ││ NVIDIA  ││ dynamic  ││(dynamic) │
+│Playwright││img · pdf ││facts ·   ││vol·bri·wl││Gmail MCP ││any MCP   │
+│web·click ││audio·vid ││contacts  ││media·pwr ││registry  ││server    │
 └─────┴───────────┴─────────── report back ───────────┴───────────┴────┘
 ```
 
@@ -82,8 +82,8 @@ Key pieces in `langgraph_agent.py`:
 - `_supervisor()` is the main node. It streams the local model's reply. If the
   model calls a delegate tool, the node returns `Command(goto=<node>)` instead
   of running the tool inline.
-- Specialist nodes (`_coder`, `_researcher`, `_media`, `_knowledge`, `_system`,
-  and the dynamic `_make_mcp_node` nodes) extract the
+- Specialist nodes (`_coder`, `_media`, `_knowledge`, `_system`, and the
+  dynamic `_make_mcp_node` nodes) extract the
   task from the delegate call, run their own loop, and return
   `Command(goto="supervisor")` with a short report.
 - `_count_delegations()` caps how many hand-offs can happen per turn (currently
@@ -107,16 +107,17 @@ Key pieces in `langgraph_agent.py`:
 
 ---
 
-## Built-in specialists
+## Default specialist lineup
 
-| Agent | Model (default) | Provider | Tools |
+| Agent | Type | Model (default) | Tools |
 |---|---|---|---|
-| **Supervisor** | local `mounir` (Ollama) — or Mistral / Groq | local / hosted | `read_file`, `write_file`, `edit_file`, `list_directory`, `open_browser`, `play_on_youtube`, `open_path`, `bash` + one `delegate_to_*` tool per specialist |
-| **Researcher** | `nemotron-3-super:cloud` | Ollama Cloud | `web_search`, `search_news`, `fetch_url` |
-| **Media** | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | NVIDIA | `load_media`, `sample_frames`, `find_media` |
-| **Knowledge** | `gemini-2.5-flash` | Google Gemini | `list_knowledge`, `read_knowledge`, `search_knowledge`, `save_knowledge`, `append_knowledge`, `delete_knowledge` |
-| **System** | `meta/llama-3.1-8b-instruct` | NVIDIA | `set_volume`, `set_brightness`, `set_keyboard_backlight`, `media_control`, `system_status`, `set_wifi`, `set_bluetooth`, `lock_screen`, `suspend` |
-| **Coder** *(delegation off)* | `minimaxai/minimax-m3` | NVIDIA | `read_file`, `create_file`, `modify_file`, `delete_file`, `search_file` |
+| **Supervisor** | built in | local `mounir` (Ollama) — or Mistral / Groq | files, shell, browser launch + one `delegate_to_*` tool per specialist |
+| **Researcher** | dynamic MCP | `nemotron-3-super:cloud` | Playwright browser navigation, page reading, search, and interaction |
+| **Email** | dynamic MCP | `gpt-oss:120b-cloud` | whatever Gmail MCP advertises |
+| **Media** | built in | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | `load_media`, `sample_frames`, `find_media` |
+| **Knowledge** | built in | `gemini-2.5-flash` | knowledge read/search/save/update/delete |
+| **System** | built in | `meta/llama-3.1-8b-instruct` | volume, brightness, media, status, Wi-Fi, Bluetooth, power |
+| **Coder** *(delegation off)* | built in | `minimaxai/minimax-m3` | isolated file/code tools |
 
 Rules of thumb the supervisor prompt encodes:
 
@@ -149,6 +150,11 @@ Rules of thumb the supervisor prompt encodes:
   name**: the supervisor reads the address book (`knowledge/contacts.md`) and
   puts the real address in the delegated task. New contacts are stored via the
   knowledge agent.
+- **the dynamic Researcher** runs Microsoft's Playwright MCP in an isolated,
+  headless Chrome profile. It reads Bing's RSS search results without an API
+  key, opens the real source pages, and can interact with rendered sites.
+  Actions such as clicking, typing, form filling, uploads, and unsafe browser
+  code are confirmation-gated.
 - **`load_media` / `sample_frames`** (media agent) attach a file's bytes to the
   agent's own conversation so the omni model can analyse it directly — images and
   audio inline, PDFs as extracted text (or page images when scanned), and video as
@@ -160,8 +166,8 @@ Rules of thumb the supervisor prompt encodes:
 ## Dynamic MCP subagents
 
 You can register **specialists backed by any MCP server** — no code changes.
-Email is now one of these dynamic agents and is seeded automatically during the
-one-time upgrade from the former built-in implementation. The setup is
+Email and Researcher are dynamic agents seeded automatically during one-time
+upgrades from their former built-in implementations. The setup is
 three-tier and persisted in a
 SQLite DB at `~/.mounir/mounir.db`:
 
@@ -169,7 +175,7 @@ SQLite DB at `~/.mounir/mounir.db`:
    API key entered directly in the admin form. The endpoint must implement OpenAI-compatible
    `/chat/completions` including function/tool calls; the provider field is a
    display label, not a separate provider adapter.
-2. **MCP servers** — reusable connections. Use `stdio` for a local server
+2. **MCP servers** — reusable connections with an editable description. Use `stdio` for a local server
    process, Streamable HTTP for a remote server, or the deprecated HTTP+SSE
    transport only when an older server requires it. The admin form provides
    ordinary fields for bearer tokens, API keys, and local-server credentials;
@@ -209,8 +215,10 @@ Manage everything at **`http://localhost:8000/admin`**:
 5. Save it and click **Test Connection** to see its advertised tools.
 6. Create a subagent that links the model and server.
 
-For the seeded **Gmail MCP** server, its detail screen also provides OAuth-file
-upload and a **Connect Gmail** button. Authorization opens in the browser and
+For the seeded **Gmail MCP** server, its saved setup capability provides OAuth-file
+upload and a **Connect account** button. The admin UI renders these setup actions
+from the server's API data; it does not recognize Gmail from a package name.
+Authorization opens in the browser and
 stores Google's credential files locally under `~/.gmail-mcp/`.
 If Google's [OAuth publishing status](https://support.google.com/cloud/answer/15549945)
 is **Testing**, Gmail refresh tokens expire after seven days. Agent Studio detects that state and changes the action to
@@ -221,6 +229,13 @@ The preset keeps the existing
 [`@gongrzhe/server-gmail-autoauth-mcp`](https://github.com/GongRzhe/Gmail-MCP-Server)
 package for compatibility. Its upstream repository is archived, so review or
 replace that MCP server before relying on it for a sensitive long-term setup.
+
+The seeded **Playwright Web** server needs no account or search API key. Its
+saved server description explains the isolated-browser behavior without any
+package-name logic in Agent Studio. First use downloads the pinned MCP npm
+package and starts a temporary isolated Chrome profile. Ranked search results
+come from Bing's personal-use RSS output, then Playwright opens the selected
+source pages for reading or confirmed interaction.
 
 Credentials entered through the UI are stored in the local SQLite database,
 which Mounir restricts to the current operating-system user (`0600`). They are
@@ -236,10 +251,9 @@ python -m mounir.mcp_agents agents list
 python -m mounir.mcp_agents models add --name "Ollama Cloud" --model qwen3:4b \
   --provider Ollama --base-url https://ollama.com/v1 --api-key '$OLLAMA_API_KEY'
 
-python -m mounir.mcp_agents servers add --name "Brave Search" \
+python -m mounir.mcp_agents servers add --name "Playwright Web" \
   --transport stdio \
-  --connection "npx -y @modelcontextprotocol/server-brave-search" \
-  --env '{"BRAVE_API_KEY":"$BRAVE_API_KEY"}'
+  --connection "npx -y @playwright/mcp@0.0.78 --headless --isolated --browser chrome"
 
 python -m mounir.mcp_agents servers add --name "Remote tools" \
   --transport streamable_http --connection "https://example.com/mcp" \
@@ -256,12 +270,14 @@ migrated into the DB. Today every dynamic agent reports to the supervisor;
 nested parents (a subagent reporting to another subagent) are future work.
 New subagents ask for confirmation before every MCP tool call by default.
 The form can instead require approval only for named tools or allow all calls.
-The seeded Email agent confirms only send/delete operations.
+The seeded Email agent confirms only send/delete operations. The seeded
+Researcher confirms interactive and high-risk browser operations while ordinary
+navigation and read-only page inspection run without interruptions.
 After saving a server, open it in the admin UI and use **Test Connection** to
 verify the handshake and see the tools it advertises.
 
 Mounir is the MCP **host** and contains a generic MCP **client** used by every
-dynamic MCP agent, including Email. It does not expose an MCP server of its own.
+dynamic MCP agent, including Email and Researcher. It does not expose an MCP server of its own.
 The dynamic layer currently consumes MCP **tools**; it does not yet surface a
 server's prompts/resources or a generic interactive MCP OAuth browser flow.
 The seeded local Gmail integration has its own browser OAuth onboarding. Remote
@@ -288,6 +304,7 @@ instance; `respond()` appends the turn produced by the graph to it.
 ### Prerequisites
 
 - **Python 3.10+**
+- **Node.js 18+**, npm, and **Google Chrome** (for the seeded Playwright Researcher)
 - **[Ollama](https://ollama.com)** running locally (for the supervisor model)
 - Specialist keys (free tiers available; each powers different agents):
   - **[Ollama Cloud](https://ollama.com/settings/keys)** — researcher and the
@@ -332,9 +349,9 @@ MOUNIR_MODEL=qwen3:4b python cli.py
 ## Configuration
 
 Runtime defaults live in `mounir/config.py` and are overridable by environment variables.
-Dynamic MCP subagents—including Email—are stored in SQLite and managed from Agent Studio.
-The Email variables below are legacy seed overrides used only by the one-time migration
-from the old built-in Email agent.
+Dynamic MCP subagents—including Email and Researcher—are stored in SQLite and managed from Agent Studio.
+Their variables below are legacy seed overrides used only by one-time migrations
+from the old built-in specialists.
 
 ### Core / supervisor model
 
@@ -346,13 +363,14 @@ from the old built-in Email agent.
 | `MOUNIR_DATA_DIR` | `~/.mounir` | Where conversations, voices, and the SQLite DB are stored |
 | `MOUNIR_LOCATION` | `Tunis, Tunisia` | Location given to the model as context |
 
-### Built-in specialists and Email migration defaults
+### Built-in specialists and dynamic migration defaults
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `OLLAMA_API_KEY` | – | Ollama Cloud key — researcher and the seeded dynamic Email agent |
 | `OLLAMA_CLOUD_BASE_URL` | `https://ollama.com/v1` | OpenAI-compatible endpoint |
 | `RESEARCHER_MODEL` | `nemotron-3-super:cloud` | Researcher model |
+| `RESEARCHER_MCP_COMMAND` | pinned Playwright MCP command | One-time server-command override when seeding Researcher |
 | `EMAIL_MODEL` | `gpt-oss:120b-cloud` | One-time model override when seeding the dynamic Email agent |
 | `GMAIL_MCP_COMMAND` | `npx -y @gongrzhe/server-gmail-autoauth-mcp` | One-time server-command override when seeding Email |
 | `NVIDIA_API_KEY` | – | NVIDIA key — media, system, coder |
@@ -478,7 +496,7 @@ mounir/
   config.py             all tunables (env-overridable) + the supervisor prompt
   llm.py                provider clients (Ollama stream, Mistral, Groq, NVIDIA, generic OpenAI)
   tools.py              supervisor tools (files, bash, browser, delegation)
-  default_agents.py     one-time presets for migrated dynamic agents such as Email
+  default_agents.py     one-time presets for migrated dynamic agents such as Email and Researcher
   db.py                 SQLite persistence: models, MCP servers, subagents
   mcp_agents.py         registry layer + management CLI (uses db.py)
   memory.py             conversation history + full-turn persistence + JSON save
@@ -489,7 +507,6 @@ mounir/
     knowledge.py        knowledge agent: curates the knowledge folder
     media.py            media agent: reads images, PDFs, audio, video
     mcp_agent.py        generic MCP specialist that runs each registered subagent
-    researcher.py       researcher agent: web search, news, page fetch
     system.py           system agent: volume, brightness, media, wifi, power
   audio.py              audio capture helpers
   stt.py                speech-to-text (local faster-whisper or Groq cloud)
@@ -503,9 +520,9 @@ mounir/
 
 ## Status & roadmap
 
-**Working:** local text chat with the supervisor, all built-in specialists
-(researcher, media, knowledge, system; coder is wired but delegation is off),
-dynamic MCP subagents including Email registered at runtime (local stdio, remote
+**Working:** local text chat with the supervisor, built-in specialists
+(media, knowledge, system; coder is wired but delegation is off), dynamic MCP
+subagents including Email and the Playwright Researcher registered at runtime (local stdio, remote
 Streamable HTTP, and legacy SSE), full-turn memory, voice
 (push-to-talk + hands-free), Telegram bridge, web dashboard, and admin UI.
 

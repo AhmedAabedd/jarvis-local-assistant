@@ -331,12 +331,6 @@ async def agent_overview():
         },
         "builtins": [
             {
-                "name": "Researcher",
-                "model": cfg.RESEARCHER_MODEL,
-                "provider": "Ollama Cloud",
-                "description": "Web research and current information",
-            },
-            {
                 "name": "Media",
                 "model": cfg.MEDIA_MODEL,
                 "provider": "NVIDIA",
@@ -408,6 +402,7 @@ async def create_server(req: dict):
             transport=req.get("transport", "stdio"),
             headers=req.get("headers", "{}"),
             env=req.get("env", "{}"),
+            description=req.get("description", ""),
         )
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -443,11 +438,9 @@ async def test_server(server_id: int):
     return {"ok": True, "tools": tools_found}
 
 
-def _is_gmail_server(server: dict | None) -> bool:
-    return bool(
-        server
-        and "@gongrzhe/server-gmail-autoauth-mcp" in server.get("connection", "")
-    )
+def _server_setup_type(server: dict | None) -> str:
+    """Return saved onboarding capability; never guess it from a command or URL."""
+    return str((server or {}).get("setup_type") or "").strip()
 
 
 def _gmail_auth_state() -> dict:
@@ -497,19 +490,95 @@ def _gmail_auth_state() -> dict:
     }
 
 
-@app.get("/api/mcp-servers/{server_id}/gmail-auth")
-async def gmail_auth_status(server_id: int):
-    server = db.get_server(server_id)
-    if not _is_gmail_server(server):
-        return JSONResponse({"error": "This is not the Gmail MCP server."}, status_code=404)
-    return _gmail_auth_state()
+def _gmail_setup_view() -> dict:
+    """Build a UI-neutral setup descriptor for the bundled OAuth adapter."""
+    state = _gmail_auth_state()
+    if state["expired"]:
+        status = {"text": "Authorization expired", "kind": "error"}
+        description = (
+            "This Google authorization expired after seven days. Reconnect it, "
+            "then set the OAuth app publishing status to In production to avoid "
+            "the Testing-mode limit."
+            if state["refresh_lifetime_days"] == 7
+            else "The saved Google authorization expired. Reconnect the account."
+        )
+    elif state["invalid"]:
+        status = {"text": "Authorization is invalid", "kind": "error"}
+        description = (
+            "The saved authorization is incomplete or damaged. Reconnect the "
+            "account to replace it."
+        )
+    elif state["oauth_file_changed"]:
+        status = {"text": "Reconnection required", "kind": ""}
+        description = (
+            "The OAuth file changed. Reconnect the account to authorize this client."
+        )
+    elif state["connected"]:
+        status = {"text": "Ready", "kind": "ok"}
+        description = (
+            "Authorization is saved locally. Reconnect if the provider expires "
+            "or revokes it."
+        )
+    elif state["oauth_keys"]:
+        status = {"text": "Ready to connect", "kind": ""}
+        description = "The OAuth client file is ready. Connect the account."
+    else:
+        status = {"text": "OAuth file required", "kind": ""}
+        description = (
+            "Choose the OAuth client JSON supplied by the provider, then connect "
+            "the account in your browser. Files stay on this computer."
+        )
+
+    return {
+        "title": "Gmail account",
+        "description": description,
+        "status": status,
+        "file_actions": [
+            {
+                "id": "oauth_file",
+                "label": (
+                    "Replace OAuth file"
+                    if state["oauth_keys"]
+                    else "Choose OAuth file"
+                ),
+                "accept": "application/json,.json",
+                "busy_label": "Uploading…",
+            }
+        ],
+        "actions": [
+            {
+                "id": "connect",
+                "label": (
+                    "Reconnect account"
+                    if state["credentials_saved"]
+                    else "Connect account"
+                ),
+                "busy_label": "Waiting for browser…",
+                "disabled": not state["oauth_keys"],
+                "style": "primary",
+            }
+        ],
+    }
 
 
-@app.post("/api/mcp-servers/{server_id}/gmail-auth/keys")
-async def upload_gmail_oauth_keys(server_id: int, file: UploadFile = File(...)):
+@app.get("/api/mcp-servers/{server_id}/setup")
+async def server_setup_status(server_id: int):
     server = db.get_server(server_id)
-    if not _is_gmail_server(server):
-        return JSONResponse({"error": "This is not the Gmail MCP server."}, status_code=404)
+    setup_type = _server_setup_type(server)
+    if setup_type == "gmail_oauth":
+        return _gmail_setup_view()
+    return JSONResponse(
+        {"error": "This server has no additional setup actions."}, status_code=404
+    )
+
+
+@app.post("/api/mcp-servers/{server_id}/setup/files/{action_id}")
+async def run_server_setup_file_action(
+    server_id: int, action_id: str, file: UploadFile = File(...)
+):
+    server = db.get_server(server_id)
+    if _server_setup_type(server) != "gmail_oauth" or action_id != "oauth_file":
+        return JSONResponse({"error": "Setup file action not found."}, status_code=404)
     raw = await file.read(65_537)
     if len(raw) > 65_536:
         return JSONResponse({"error": "OAuth key file is too large."}, status_code=400)
@@ -530,23 +599,23 @@ async def upload_gmail_oauth_keys(server_id: int, file: UploadFile = File(...)):
     GMAIL_AUTH_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     GMAIL_OAUTH_KEYS.write_bytes(raw)
     _secure_gmail_auth_files()
-    return {"ok": True, **_gmail_auth_state()}
+    return {"ok": True, "setup": _gmail_setup_view()}
 
 
-@app.post("/api/mcp-servers/{server_id}/gmail-auth/connect")
-async def connect_gmail(server_id: int, force: bool = False):
+@app.post("/api/mcp-servers/{server_id}/setup/actions/{action_id}")
+async def run_server_setup_action(server_id: int, action_id: str):
     spec = db.build_server_spec(server_id)
     server = db.get_server(server_id)
-    if not _is_gmail_server(server) or spec is None:
-        return JSONResponse({"error": "This is not the Gmail MCP server."}, status_code=404)
+    if (
+        _server_setup_type(server) != "gmail_oauth"
+        or action_id != "connect"
+        or spec is None
+    ):
+        return JSONResponse({"error": "Setup action not found."}, status_code=404)
     if not GMAIL_OAUTH_KEYS.exists():
         return JSONResponse(
             {"error": "Upload the Google OAuth client JSON first."}, status_code=400
         )
-    auth_state = _gmail_auth_state()
-    if auth_state["connected"] and not force:
-        return {"ok": True, **auth_state}
-
     argv = shlex.split(spec["connection"])
     if not argv:
         return JSONResponse({"error": "The Gmail server command is empty."}, status_code=400)
@@ -587,7 +656,7 @@ async def connect_gmail(server_id: int, force: bool = False):
             {"error": "Gmail saved credentials, but they are not usable."},
             status_code=400,
         )
-    return {"ok": True, **state}
+    return {"ok": True, "setup": _gmail_setup_view()}
 
 
 @app.delete("/api/mcp-servers/{server_id}")

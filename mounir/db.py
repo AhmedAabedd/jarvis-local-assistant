@@ -71,6 +71,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
 
+            -- User-facing information shown by Agent Studio. This belongs to
+            -- the saved server instead of being inferred from its package.
+            description TEXT NOT NULL DEFAULT '',
+
+            -- Optional built-in onboarding adapter. Ordinary MCP servers leave
+            -- this empty and use the standard transport/authentication fields.
+            setup_type TEXT NOT NULL DEFAULT '',
+
             -- stdio | sse | streamable_http
             transport TEXT NOT NULL DEFAULT 'stdio',
 
@@ -116,6 +124,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     migrations = {
         "models": {"model": "TEXT"},
         "mcp_servers": {
+            "description": "TEXT NOT NULL DEFAULT ''",
+            "setup_type": "TEXT NOT NULL DEFAULT ''",
             "transport": "TEXT NOT NULL DEFAULT 'stdio'",
             "headers": "TEXT NOT NULL DEFAULT '{}'",
             "env": "TEXT NOT NULL DEFAULT '{}'",
@@ -378,6 +388,8 @@ def _migrate_builtin_email(conn: sqlite3.Connection) -> None:
                 conn,
                 _unique_name(conn, "mcp_servers", default_agents.EMAIL_SERVER_NAME),
                 default_agents.EMAIL_SERVER_COMMAND,
+                description=default_agents.EMAIL_SERVER_DESCRIPTION,
+                setup_type=default_agents.EMAIL_SERVER_SETUP_TYPE,
             )
 
         _add_subagent(
@@ -397,12 +409,124 @@ def _migrate_builtin_email(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_builtin_researcher(conn: sqlite3.Connection) -> None:
+    """Move the former hand-written web researcher into the dynamic registry once."""
+    migration_key = "builtin_researcher_to_dynamic_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
+    ).fetchone():
+        return
+
+    existing = conn.execute(
+        "SELECT 1 FROM subagents WHERE lower(name) = 'researcher'"
+    ).fetchone()
+    if not existing:
+        base_url = _normalize_model_base_url(
+            default_agents.researcher_model_base_url()
+        )
+        model_row = conn.execute(
+            "SELECT id FROM models WHERE model = ? AND rtrim(base_url, '/') = ? LIMIT 1",
+            (default_agents.RESEARCHER_MODEL, base_url),
+        ).fetchone()
+        if model_row:
+            model_id = model_row["id"]
+        else:
+            model_id = _add_model(
+                conn,
+                _unique_name(conn, "models", default_agents.RESEARCHER_MODEL_NAME),
+                default_agents.RESEARCHER_MODEL,
+                "Ollama Cloud",
+                base_url,
+                cfg.OLLAMA_API_KEY,
+            )
+
+        command = default_agents.researcher_server_command()
+        server_row = conn.execute(
+            """
+            SELECT id FROM mcp_servers
+            WHERE transport = 'stdio' AND connection = ?
+            LIMIT 1
+            """,
+            (command,),
+        ).fetchone()
+        if server_row:
+            server_id = server_row["id"]
+        else:
+            server_id = _add_server(
+                conn,
+                _unique_name(
+                    conn, "mcp_servers", default_agents.RESEARCHER_SERVER_NAME
+                ),
+                command,
+                description=default_agents.RESEARCHER_SERVER_DESCRIPTION,
+            )
+
+        _add_subagent(
+            conn,
+            default_agents.RESEARCHER_AGENT_NAME,
+            default_agents.RESEARCHER_DESCRIPTION,
+            default_agents.RESEARCHER_SYSTEM_PROMPT,
+            model_id,
+            server_id,
+            confirm_tools=default_agents.RESEARCHER_CONFIRM_TOOLS,
+        )
+
+    conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+        (migration_key, _now()),
+    )
+    conn.commit()
+
+
+def _migrate_server_metadata(conn: sqlite3.Connection) -> None:
+    """Attach UI metadata to already-seeded servers without inspecting commands."""
+    migration_key = "dynamic_server_metadata_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
+    ).fetchone():
+        return
+
+    presets = (
+        (
+            default_agents.EMAIL_AGENT_NAME,
+            default_agents.EMAIL_SERVER_DESCRIPTION,
+            default_agents.EMAIL_SERVER_SETUP_TYPE,
+        ),
+        (
+            default_agents.RESEARCHER_AGENT_NAME,
+            default_agents.RESEARCHER_SERVER_DESCRIPTION,
+            "",
+        ),
+    )
+    for agent_name, description, setup_type in presets:
+        conn.execute(
+            """
+            UPDATE mcp_servers
+            SET description = CASE
+                    WHEN trim(description) = '' THEN ? ELSE description END,
+                setup_type = CASE
+                    WHEN trim(setup_type) = '' THEN ? ELSE setup_type END
+            WHERE id IN (
+                SELECT mcp_server_id FROM subagents WHERE lower(name) = lower(?)
+            )
+            """,
+            (description, setup_type, agent_name),
+        )
+    conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+        (migration_key, _now()),
+    )
+    conn.commit()
+
+
 def init() -> None:
     """Create tables and run one-time registry migrations."""
     with _connect() as conn:
         _init_schema(conn)
         _migrate_legacy(conn)
         _migrate_builtin_email(conn)
+        _migrate_builtin_researcher(conn)
+        _migrate_server_metadata(conn)
 
 
 # -----------------------------------------------------------------------------
@@ -510,17 +634,21 @@ def _add_server(
     transport: str = "stdio",
     headers="{}",
     env="{}",
+    description: str = "",
+    setup_type: str = "",
 ) -> int:
     transport, connection = _validate_transport(transport, connection)
     try:
         cur = conn.execute(
             """
             INSERT INTO mcp_servers
-                (name, transport, connection, headers, env, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (name, description, setup_type, transport, connection, headers, env, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
+                (description or "").strip(),
+                (setup_type or "").strip(),
                 transport,
                 connection,
                 _json_object(headers, "headers"),
@@ -540,6 +668,7 @@ def add_server(
     transport="stdio",
     headers="{}",
     env="{}",
+    description: str = "",
 ) -> dict:
     with _connect() as conn:
         sid = _add_server(
@@ -549,6 +678,7 @@ def add_server(
             transport,
             headers,
             env,
+            description,
         )
         return get_server(sid)
 
@@ -572,7 +702,8 @@ def update_server(server_id: int, **kwargs) -> dict | None:
         "connection",
         "transport",
         "headers",
-        "env"
+        "env",
+        "description",
     }
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
@@ -593,6 +724,8 @@ def update_server(server_id: int, **kwargs) -> dict | None:
         fields["headers"] = _json_object(fields["headers"], "headers")
     if "env" in fields:
         fields["env"] = _json_object(fields["env"], "environment")
+    if "description" in fields:
+        fields["description"] = (fields["description"] or "").strip()
     with _connect() as conn:
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:

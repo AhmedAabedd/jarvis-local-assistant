@@ -20,8 +20,8 @@ def nvidia_chat(messages, tools=None, model=None, *, disable_thinking=False,
                 temperature=0.2, max_tokens=8192) -> dict:
     """One non-streaming NVIDIA chat-completion (OpenAI-compatible).
 
-    Returns the assistant message dict ({content, tool_calls}). Used by the
-    coder and researcher specialists, each with their own model.
+    Returns the assistant message dict ({content, tool_calls}). Used by fixed
+    NVIDIA-backed specialists with their own models.
     """
     import requests
 
@@ -138,8 +138,8 @@ def ollama_cloud_chat(messages, tools=None, model=None, *, temperature=0.2,
     not the local daemon). OpenAI-compatible, same message/tool format as
     nvidia_chat.
 
-    Returns the assistant message dict ({content, tool_calls}). Used by the
-    researcher specialist.
+    Returns the assistant message dict ({content, tool_calls}). Kept as a
+    provider-specific helper; dynamic MCP agents use ``openai_chat``.
     """
     import requests
 

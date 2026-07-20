@@ -302,16 +302,16 @@
   }
   .credential-add { align-self: flex-start; padding: 7px 12px; }
   .credential-empty { color: var(--text-dim); font-size: 11px; }
-  .gmail-setup {
+  .server-setup {
     grid-column: 1 / -1; border-color: rgba(168,85,247,.3);
     background: linear-gradient(135deg, rgba(168,85,247,.08), var(--bg));
   }
-  .gmail-setup-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .gmail-status { font-size: 11px; color: var(--text-mid); }
-  .gmail-status.ok { color: var(--ok); }
-  .gmail-status.error { color: var(--danger); }
-  .gmail-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .gmail-file { display: none; }
+  .server-setup-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .server-setup-status { font-size: 11px; color: var(--text-mid); }
+  .server-setup-status.ok { color: var(--ok); }
+  .server-setup-status.error { color: var(--danger); }
+  .server-setup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .server-setup-file { display: none; }
 
   .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
 
@@ -798,12 +798,13 @@ function buildFormHtml(item, readonly) {
     const environment = parseObject(item?.env);
     const auth = remoteAuthFromHeaders(headers);
     const disabled = readonly ? ' disabled' : '';
-    const isGmail = Boolean(
-      item?.id && String(item.connection || '').includes('@gongrzhe/server-gmail-autoauth-mcp')
-    );
     return `
     <form class="form-grid" id="formEl">
       <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="e.g. Company Search" required${ro}></label>
+      <label class="full">Description
+        <span class="hint">Optional information about what this server provides or how it is configured.</span>
+        <textarea name="description" rows="2" placeholder="What this MCP server does and anything the user should know."${ro}>${e('description')}</textarea>
+      </label>
       <label class="full">Server type
         <span class="hint">Choose the type specified by the MCP provider.</span>
         <select name="transport" id="serverTransport" required${dis}>
@@ -846,19 +847,14 @@ function buildFormHtml(item, readonly) {
           <button type="button" class="btn outline credential-add" data-add-credential="headers"${disabled}>+ Add header</button>
         </div>
       </div>
-      ${isGmail ? `
-      <div class="credential-box gmail-setup" id="gmailSetup" data-server-id="${item.id}">
-        <div class="gmail-setup-head">
+      ${item?.id && item?.setup_type ? `
+      <div class="credential-box server-setup" id="serverSetup" data-server-id="${item.id}">
+        <div class="server-setup-head">
           <div>
-            <div class="credential-title">Gmail account</div>
-            <div class="hint" id="gmailHint">Connect Gmail through Google's browser authorization. Your OAuth files stay on this computer.</div>
+            <div class="credential-title">Additional setup</div>
+            <div class="hint">Loading setup information…</div>
           </div>
-          <div class="gmail-status" id="gmailStatus">Checking…</div>
-        </div>
-        <div class="gmail-actions">
-          <input class="gmail-file" type="file" id="gmailOauthFile" accept="application/json,.json">
-          <button type="button" class="btn outline" id="gmailChooseKeys">Choose Google OAuth file</button>
-          <button type="button" class="btn primary" id="gmailConnect">Connect Gmail</button>
+          <div class="server-setup-status">Checking…</div>
         </div>
       </div>` : ''}
       <div class="full success" id="testResult"></div>
@@ -952,85 +948,97 @@ function updateConfirmationVisibility() {
   $('confirmationToolsField').style.display = mode === 'selected' ? '' : 'none';
 }
 
-function showGmailStatus(message, kind = '') {
-  const status = $('gmailStatus');
-  if (!status) return;
-  status.textContent = message;
-  status.className = `gmail-status ${kind}`.trim();
+function renderServerSetup(data) {
+  const setup = $('serverSetup');
+  if (!setup) return;
+  const fileActions = Array.isArray(data.file_actions) ? data.file_actions : [];
+  const actions = Array.isArray(data.actions) ? data.actions : [];
+  const status = data.status || {};
+  setup.innerHTML = `
+    <div class="server-setup-head">
+      <div>
+        <div class="credential-title">${esc(data.title || 'Additional setup')}</div>
+        <div class="hint">${esc(data.description || '')}</div>
+      </div>
+      <div class="server-setup-status ${esc(status.kind || '')}">${esc(status.text || '')}</div>
+    </div>
+    <div class="server-setup-actions">
+      ${fileActions.map(action => `
+        <input class="server-setup-file" type="file" data-setup-file-input="${esc(action.id)}" accept="${esc(action.accept || '')}">
+        <button type="button" class="btn outline" data-setup-file="${esc(action.id)}" data-busy-label="${esc(action.busy_label || 'Working…')}">${esc(action.label || 'Choose file')}</button>
+      `).join('')}
+      ${actions.map(action => `
+        <button type="button" class="btn ${action.style === 'primary' ? 'primary' : 'outline'}" data-setup-action="${esc(action.id)}" data-busy-label="${esc(action.busy_label || 'Working…')}"${action.disabled ? ' disabled' : ''}>${esc(action.label || 'Continue')}</button>
+      `).join('')}
+    </div>`;
 }
 
-async function loadGmailStatus() {
-  const setup = $('gmailSetup');
+function showServerSetupError(message) {
+  const setup = $('serverSetup');
+  if (!setup) return;
+  setup.innerHTML = `
+    <div class="server-setup-head">
+      <div class="credential-title">Additional setup</div>
+      <div class="server-setup-status error">${esc(message)}</div>
+    </div>`;
+}
+
+async function loadServerSetup() {
+  const setup = $('serverSetup');
   if (!setup) return;
   try {
-    const status = await api('GET', `/api/mcp-servers/${setup.dataset.serverId}/gmail-auth`);
-    $('gmailChooseKeys').textContent = status.oauth_keys ? 'Replace OAuth file' : 'Choose Google OAuth file';
-    $('gmailConnect').disabled = !status.oauth_keys;
-    $('gmailConnect').textContent = status.credentials_saved ? 'Reconnect Gmail' : 'Connect Gmail';
-    if (status.expired) {
-      showGmailStatus('Authorization expired', 'error');
-      $('gmailHint').textContent = status.refresh_lifetime_days === 7
-        ? 'This Google authorization expired after 7 days. Reconnect now. To prevent this, change the OAuth app publishing status from Testing to In production.'
-        : 'The saved Google authorization expired. Reconnect Gmail to continue.';
-    } else if (status.invalid) {
-      showGmailStatus('Authorization is invalid', 'error');
-      $('gmailHint').textContent = 'The saved authorization is incomplete or damaged. Reconnect Gmail to replace it.';
-    } else if (status.oauth_file_changed) {
-      showGmailStatus('Reconnection required');
-      $('gmailHint').textContent = 'The Google OAuth file changed. Reconnect Gmail to authorize this client.';
-    } else if (status.connected) {
-      showGmailStatus('Ready', 'ok');
-      $('gmailHint').textContent = 'Authorization is saved locally. You can reconnect anytime if Google expires or revokes it.';
-    } else if (status.oauth_keys) {
-      showGmailStatus('Ready to connect');
-    } else {
-      showGmailStatus('OAuth file required');
-    }
+    const data = await api('GET', `/api/mcp-servers/${setup.dataset.serverId}/setup`);
+    renderServerSetup(data);
   } catch (error) {
-    showGmailStatus(error.message, 'error');
+    showServerSetupError(error.message);
   }
 }
 
-function attachGmailSetupEvents() {
-  const setup = $('gmailSetup');
+function attachServerSetupEvents() {
+  const setup = $('serverSetup');
   if (!setup) return;
   const serverId = setup.dataset.serverId;
-  $('gmailChooseKeys').addEventListener('click', () => $('gmailOauthFile').click());
-  $('gmailOauthFile').addEventListener('change', async event => {
-    const file = event.target.files[0];
+  setup.addEventListener('click', async event => {
+    const fileButton = event.target.closest('[data-setup-file]');
+    if (fileButton) {
+      setup.querySelector(`[data-setup-file-input="${CSS.escape(fileButton.dataset.setupFile)}"]`)?.click();
+      return;
+    }
+    const actionButton = event.target.closest('[data-setup-action]');
+    if (!actionButton) return;
+    const idleLabel = actionButton.textContent;
+    actionButton.disabled = true;
+    actionButton.textContent = actionButton.dataset.busyLabel;
+    try {
+      await api('POST', `/api/mcp-servers/${serverId}/setup/actions/${encodeURIComponent(actionButton.dataset.setupAction)}`);
+      await loadServerSetup();
+    } catch (error) {
+      actionButton.disabled = false;
+      actionButton.textContent = idleLabel;
+      showServerSetupError(error.message);
+    }
+  });
+  setup.addEventListener('change', async event => {
+    const input = event.target.closest('[data-setup-file-input]');
+    const file = input?.files?.[0];
     if (!file) return;
     const body = new FormData();
     body.append('file', file);
-    showGmailStatus('Uploading…');
+    const button = setup.querySelector(`[data-setup-file="${CSS.escape(input.dataset.setupFileInput)}"]`);
+    if (button) {
+      button.disabled = true;
+      button.textContent = button.dataset.busyLabel;
+    }
     try {
-      const response = await fetch(`/api/mcp-servers/${serverId}/gmail-auth/keys`, {
-        method: 'POST', body,
-      });
+      const response = await fetch(`/api/mcp-servers/${serverId}/setup/files/${encodeURIComponent(input.dataset.setupFileInput)}`, {method: 'POST', body});
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || 'OAuth upload failed.');
-      await loadGmailStatus();
+      if (!response.ok) throw new Error(result.error || 'File setup failed.');
+      await loadServerSetup();
     } catch (error) {
-      showGmailStatus(error.message, 'error');
-    } finally {
-      event.target.value = '';
+      showServerSetupError(error.message);
     }
   });
-  $('gmailConnect').addEventListener('click', async () => {
-    const button = $('gmailConnect');
-    const idleLabel = button.textContent;
-    button.disabled = true;
-    button.textContent = 'Waiting for browser…';
-    showGmailStatus('Complete authorization in the browser…');
-    try {
-      await api('POST', `/api/mcp-servers/${serverId}/gmail-auth/connect?force=true`);
-      await loadGmailStatus();
-    } catch (error) {
-      button.disabled = false;
-      button.textContent = idleLabel;
-      showGmailStatus(error.message, 'error');
-    }
-  });
-  loadGmailStatus();
+  loadServerSetup();
 }
 
 function addCredentialRow(kind) {
@@ -1079,7 +1087,7 @@ function attachFormEvents() {
     }
   });
   updateServerFormVisibility();
-  attachGmailSetupEvents();
+  attachServerSetupEvents();
 }
 
 /* ========== form submit ========== */

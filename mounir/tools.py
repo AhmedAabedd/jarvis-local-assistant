@@ -23,12 +23,6 @@ def delegate_to_coder(task: str, context: str = "") -> str:
     return run(task)
 
 
-def delegate_to_researcher(task: str) -> str:
-    """Ask the researcher agent to look something up on the web."""
-    from .specialists.researcher import run
-    return run(task)
-
-
 def delegate_to_knowledge(task: str) -> str:
     """Hand a knowledge-folder change to the knowledge agent; returns its report."""
     from .specialists.knowledge import run
@@ -618,30 +612,6 @@ SCHEMAS += [
     {
         "type": "function",
         "function": {
-            "name": "delegate_to_researcher",
-            "description": (
-                "Delegate ANY web lookup to the researcher agent: current events, "
-                "facts that may have changed, prices, documentation, product or "
-                "tech comparisons — anything you'd need the internet for. The "
-                "researcher searches, reads pages, cross-checks, and returns a "
-                "concise report WITH sources. You have no web tools yourself, so "
-                "always delegate lookups here. State exactly what you need to know."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The research question or topic, with any specifics (timeframe, what to compare, what detail you need).",
-                    },
-                },
-                "required": ["task"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "delegate_to_knowledge",
             "description": (
                 "Delegate ANY change to long-term knowledge to the knowledge "
@@ -731,7 +701,6 @@ _REGISTRY = {
     "open_path": open_path,
     "bash": bash,
     "delegate_to_coder": delegate_to_coder,
-    "delegate_to_researcher": delegate_to_researcher,
     "delegate_to_media": delegate_to_media,
     "delegate_to_knowledge": delegate_to_knowledge,
     "delegate_to_system": delegate_to_system,

@@ -44,7 +44,7 @@ def node_name(name: str) -> str:
 
 # Names a dynamic agent may not take: the built-in graph nodes and their
 # delegate tools are already wired by hand.
-_RESERVED = {"supervisor", "coder", "researcher", "media", "knowledge", "system"}
+_RESERVED = {"supervisor", "coder", "media", "knowledge", "system"}
 
 
 def _validate_agent_name(name: str, *, exclude_id: int | None = None) -> None:

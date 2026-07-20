@@ -72,7 +72,10 @@ class DatabaseTests(TemporaryDatabaseTest):
             agent_columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(subagents)")
             }
-        self.assertTrue({"transport", "headers", "env"} <= server_columns)
+        self.assertTrue(
+            {"description", "setup_type", "transport", "headers", "env"}
+            <= server_columns
+        )
         self.assertTrue({"description", "confirm_tool_calls", "confirm_tools"} <= agent_columns)
         self.assertEqual(db.get_server(1)["transport"], "streamable_http")
         self.assertEqual(db.get_model(1)["model"], "qwen3:4b")
@@ -116,6 +119,9 @@ class DatabaseTests(TemporaryDatabaseTest):
         email = db.get_subagent_by_name("Email")
         self.assertIsNotNone(email)
         self.assertEqual(email["server_name"], "Gmail MCP")
+        email_server = db.get_server(email["mcp_server_id"])
+        self.assertEqual(email_server["setup_type"], "gmail_oauth")
+        self.assertTrue(email_server["description"])
         self.assertEqual(
             json.loads(email["confirm_tools"]),
             ["send_email", "delete_email", "batch_delete_emails"],
@@ -132,6 +138,57 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertTrue(db.delete_subagent(email["id"]))
         db.init()
         self.assertIsNone(db.get_subagent_by_name("Email"))
+
+    def test_builtin_researcher_is_migrated_once_to_playwright(self):
+        db.init()
+        researcher = db.get_subagent_by_name("Researcher")
+        self.assertIsNotNone(researcher)
+        researcher_server = db.get_server(researcher["mcp_server_id"])
+        self.assertTrue(researcher_server["description"])
+        self.assertEqual(researcher_server["setup_type"], "")
+        self.assertEqual(researcher["server_name"], "Playwright Web")
+        self.assertIn("@playwright/mcp@0.0.78", researcher["connection"])
+        self.assertIn("--headless", researcher["connection"])
+        self.assertIn("--isolated", researcher["connection"])
+        self.assertEqual(
+            json.loads(researcher["confirm_tools"]),
+            [
+                "browser_click",
+                "browser_type",
+                "browser_fill_form",
+                "browser_press_key",
+                "browser_select_option",
+                "browser_handle_dialog",
+                "browser_file_upload",
+                "browser_drop",
+                "browser_run_code_unsafe",
+            ],
+        )
+        researcher_spec = next(
+            spec for spec in db.build_specs() if spec["name"] == "Researcher"
+        )
+        self.assertEqual(
+            mcp_agents.delegate_schema(researcher_spec)["function"]["name"],
+            "delegate_to_researcher",
+        )
+        builtin_names = {
+            schema["function"]["name"] for schema in mounir_tools.SCHEMAS
+        }
+        self.assertNotIn("delegate_to_researcher", builtin_names)
+        self.assertTrue(db.delete_subagent(researcher["id"]))
+        db.init()
+        self.assertIsNone(db.get_subagent_by_name("Researcher"))
+
+    def test_dynamic_default_agents_compile_into_the_graph(self):
+        from mounir.langgraph_agent import build_graph
+
+        db.init()
+        graph = build_graph()
+        node_names = set(graph.get_graph().nodes)
+        self.assertIn("mcp_email", node_names)
+        self.assertIn("mcp_researcher", node_names)
+        self.assertNotIn("email", node_names)
+        self.assertNotIn("researcher", node_names)
 
     def test_foreign_keys_prevent_deleting_in_use_presets(self):
         db.init()
@@ -296,14 +353,22 @@ class AdminApiTests(TemporaryDatabaseTest):
                 transport=transport, base_url="http://localhost"
             ) as client:
                 gmail = db.get_subagent_by_name("Email")
-                gmail_status = await client.get(
-                    f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth"
+                # Setup capability is saved metadata, not inferred from a known
+                # npm package string in the editable connection command.
+                db.update_server(
+                    gmail["mcp_server_id"],
+                    connection="npx -y user-selected-email-server",
                 )
-                self.assertFalse(gmail_status.json()["oauth_keys"])
-                self.assertFalse(gmail_status.json()["credentials_saved"])
-                self.assertFalse(gmail_status.json()["connected"])
+                gmail_status = await client.get(
+                    f"/api/mcp-servers/{gmail['mcp_server_id']}/setup"
+                )
+                self.assertEqual(gmail_status.status_code, 200)
+                self.assertEqual(gmail_status.json()["title"], "Gmail account")
+                self.assertEqual(
+                    gmail_status.json()["status"]["text"], "OAuth file required"
+                )
                 oauth_upload = await client.post(
-                    f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth/keys",
+                    f"/api/mcp-servers/{gmail['mcp_server_id']}/setup/files/oauth_file",
                     files={
                         "file": (
                             "oauth.json",
@@ -336,10 +401,13 @@ class AdminApiTests(TemporaryDatabaseTest):
 
                 with patch("asyncio.create_subprocess_exec", fake_auth_process):
                     gmail_connect = await client.post(
-                        f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth/connect"
+                        f"/api/mcp-servers/{gmail['mcp_server_id']}/setup/actions/connect"
                     )
                 self.assertEqual(gmail_connect.status_code, 200)
-                self.assertTrue(gmail_connect.json()["connected"])
+                self.assertEqual(
+                    gmail_connect.json()["setup"]["status"],
+                    {"text": "Ready", "kind": "ok"},
+                )
                 self.assertEqual(
                     stat.S_IMODE(web_server.GMAIL_CREDENTIALS.stat().st_mode), 0o600
                 )
@@ -358,17 +426,21 @@ class AdminApiTests(TemporaryDatabaseTest):
                     (expired_time, expired_time),
                 )
                 expired_status = await client.get(
-                    f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth"
+                    f"/api/mcp-servers/{gmail['mcp_server_id']}/setup"
                 )
-                self.assertTrue(expired_status.json()["expired"])
-                self.assertFalse(expired_status.json()["connected"])
+                self.assertEqual(
+                    expired_status.json()["status"],
+                    {"text": "Authorization expired", "kind": "error"},
+                )
 
                 with patch("asyncio.create_subprocess_exec", fake_auth_process):
                     gmail_reconnect = await client.post(
-                        f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth/connect?force=true"
+                        f"/api/mcp-servers/{gmail['mcp_server_id']}/setup/actions/connect"
                     )
                 self.assertEqual(gmail_reconnect.status_code, 200)
-                self.assertTrue(gmail_reconnect.json()["connected"])
+                self.assertEqual(
+                    gmail_reconnect.json()["setup"]["status"]["text"], "Ready"
+                )
                 model_response = await client.post(
                     "/api/models",
                     json={
@@ -384,6 +456,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                     "/api/mcp-servers",
                     json={
                         "name": "Echo",
+                        "description": "A generic MCP server used by tests.",
                         "transport": "stdio",
                         "connection": f'{sys.executable} "{fixture}"',
                         "headers": "{}",
@@ -392,6 +465,14 @@ class AdminApiTests(TemporaryDatabaseTest):
                 )
                 self.assertEqual(server_response.status_code, 200)
                 self.assertEqual(server_response.json()["transport"], "stdio")
+                self.assertEqual(
+                    server_response.json()["description"],
+                    "A generic MCP server used by tests.",
+                )
+                generic_setup = await client.get(
+                    f"/api/mcp-servers/{server_response.json()['id']}/setup"
+                )
+                self.assertEqual(generic_setup.status_code, 404)
                 self.assertEqual(
                     db.build_server_spec(server_response.json()["id"])["env"],
                     {"ECHO_TOKEN": "pasted-in-the-interface"},
@@ -421,7 +502,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(overview_response.status_code, 200)
                 overview = overview_response.json()
                 self.assertEqual(overview["supervisor"]["name"], "Mounir")
-                self.assertEqual(len(overview["builtins"]), 4)
+                self.assertEqual(len(overview["builtins"]), 3)
                 self.assertTrue(overview["supervisor"]["model"])
 
                 web_server.agent.conversation.reset()
