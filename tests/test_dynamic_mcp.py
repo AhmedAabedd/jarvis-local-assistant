@@ -495,8 +495,13 @@ class AdminApiTests(TemporaryDatabaseTest):
                 )
                 self.assertEqual(test_response.status_code, 200)
                 self.assertEqual(
-                    [tool["name"] for tool in test_response.json()["tools"]],
-                    ["echo"],
+                    test_response.json()["tools"],
+                    [
+                        {
+                            "name": "echo",
+                            "description": "Return the supplied text.",
+                        }
+                    ],
                 )
                 overview_response = await client.get("/api/agent-overview")
                 self.assertEqual(overview_response.status_code, 200)
