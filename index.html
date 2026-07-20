@@ -404,7 +404,7 @@
       </div>
       <div>
         <div class="modal-title">Confirm action</div>
-        <div class="modal-sub">Mounir wants to do something on your machine.</div>
+        <div class="modal-sub">The assistant wants to do something on your machine.</div>
       </div>
     </div>
     <div class="modal-body mono" id="modalBody"></div>
@@ -458,10 +458,11 @@ function escapeHtml(s){ return s.replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;',
 function render(text){ return escapeHtml(text).replace(/`([^`]+)`/g,'<code>$1</code>'); }
 function scrollDown(){ transcriptScroll.scrollTop = transcriptScroll.scrollHeight; }
 
+let assistantName = 'Mounir';
 function addMessage(role, text){
   const row = document.createElement('div');
   row.className = 'row ' + role;
-  row.innerHTML = `<div class="cap">${role==='user'?'You':'Mounir'}</div>
+  row.innerHTML = `<div class="cap">${role==='user'?'You':escapeHtml(assistantName)}</div>
                    <div class="bubble">${render(text)}</div>`;
   transcriptScroll.classList.remove('empty');
   transcript.appendChild(row); scrollDown();
@@ -517,7 +518,18 @@ function connect(){
     }
   };
 }
-restoreConversation().finally(connect);
+async function loadProfile(){
+  try {
+    const response = await fetch('/api/profile');
+    if(!response.ok) return;
+    const profile = await response.json();
+    assistantName = profile.assistant_name || assistantName;
+    document.title = assistantName + ' — Local Assistant';
+    const modalSub = document.querySelector('.modal-sub');
+    if(modalSub) modalSub.textContent = assistantName + ' wants to do something on your machine.';
+  } catch(e) {}
+}
+loadProfile().finally(() => restoreConversation().finally(connect));
 
 function sendText(){
   const input = document.getElementById('msgInput');

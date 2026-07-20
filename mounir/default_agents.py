@@ -20,6 +20,7 @@ EMAIL_SERVER_DESCRIPTION = (
 )
 EMAIL_SERVER_SETUP_TYPE = "gmail_oauth"
 EMAIL_CONFIRM_TOOLS = ["send_email", "delete_email", "batch_delete_emails"]
+EMAIL_DEDUPE_TOOLS = ["send_email"]
 
 EMAIL_DESCRIPTION = (
     "Handle anything about Gmail: search and read messages, send or reply, "
@@ -29,7 +30,7 @@ EMAIL_DESCRIPTION = (
 )
 
 EMAIL_SYSTEM_PROMPT = """\
-You are Mounir's email specialist. You operate the user's Gmail account through
+You are the email specialist. You operate the user's Gmail account through
 the provided MCP tools, which act on the real mailbox.
 
 RULES
@@ -83,7 +84,7 @@ RESEARCHER_DESCRIPTION = (
 )
 
 RESEARCHER_SYSTEM_PROMPT = """\
-You are Mounir's dedicated web researcher and browser specialist. You operate
+You are the dedicated web researcher and browser specialist. You operate
 an isolated, headless Chrome browser through Playwright MCP. Search the live
 web, read real pages, cross-check important claims, and return a concise report
 with the real source URLs you used.

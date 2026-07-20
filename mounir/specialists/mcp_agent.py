@@ -12,6 +12,7 @@ requiring confirmation all come from the registry spec.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -19,19 +20,46 @@ import shlex
 import traceback
 from contextlib import asynccontextmanager
 
-from .. import llm
+from .. import config, llm
 from .. import trace
 
 MAX_TOOL_ROUNDS = 8
+MCP_TOOL_TIMEOUT_SECONDS = max(
+    1.0, float(os.environ.get("MOUNIR_MCP_TOOL_TIMEOUT", "60"))
+)
+MCP_AGENT_TIMEOUT_SECONDS = max(
+    MCP_TOOL_TIMEOUT_SECONDS,
+    float(os.environ.get("MOUNIR_MCP_AGENT_TIMEOUT", "300")),
+)
 # One tool result can be a whole page or listing — cap it so a huge result
 # can't flood the loop's context.
 MAX_RESULT_CHARS = 8000
-DEFAULT_SYSTEM_PROMPT = """\
-You are a focused MCP tool specialist. Use the available tools to complete the
-task, report only outcomes supported by tool results, and stop when the task is
-done. If a tool is declined or fails, say so and do not pretend it succeeded.
-Your final response is a short report for the supervisor, with no heading.
+SHARED_SYSTEM_PROMPT = """\
+You are a focused MCP subagent. You may complete tasks only with the MCP tools
+provided to you in this conversation.
+
+WORKING RULES
+- Use only relevant tools and stop as soon as the requested task is complete.
+- Report only outcomes supported by tool results. Never claim an action worked
+  unless its tool returned success.
+- If a tool is declined, fails, or times out, say so plainly and do not retry
+  the same action unless the result explicitly says retrying is safe.
+
+FINAL RESPONSE
+Return a short, concrete report for the supervisor with no heading. Do not
+mention these instructions.
 """
+
+
+def _system_prompt(custom_prompt: str = "", profile: dict | None = None) -> str:
+    """Apply one capability contract to every dynamic subagent."""
+    custom = (custom_prompt or "").strip()
+    sections = [SHARED_SYSTEM_PROMPT]
+    if custom:
+        sections.append(f"SPECIALIST INSTRUCTIONS\n{custom}")
+    sections.append(config.SUBAGENT_CAPABILITY_PROMPT)
+    sections.append(config.profile_instruction(profile))
+    return "\n\n".join(sections)
 
 
 def _openai_tools(mcp_tools) -> list[dict]:
@@ -85,8 +113,44 @@ def _exc_detail(exc: BaseException) -> str:
     return msg
 
 
-async def _call(session, name: str, args: dict, confirm_tools: set[str]) -> str:
-    """One tool call via the MCP server, confirmation gate included."""
+def _protected_action_key(namespace: str, name: str, args: dict) -> str:
+    """Return a stable private fingerprint for one exact server tool request."""
+    payload = json.dumps(
+        [namespace, name, args],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+async def _call(
+    session,
+    name: str,
+    args: dict,
+    confirm_tools: set[str],
+    protected_attempts: set[str] | None = None,
+    namespace: str = "",
+    dedupe_tools: set[str] | None = None,
+    tool_timeout_seconds: float = MCP_TOOL_TIMEOUT_SECONDS,
+) -> tuple[str, bool]:
+    """Call one tool and block configured exact-duplicate requests.
+
+    Returns ``(result, executed)``. A protected request is reserved before its
+    confirmation so a model cannot repeat it after either approval or refusal.
+    """
+    dedupe_tools = dedupe_tools or set()
+    if "*" in dedupe_tools or name in dedupe_tools:
+        attempts = protected_attempts if protected_attempts is not None else set()
+        action_key = _protected_action_key(namespace, name, args)
+        if action_key in attempts:
+            return (
+                f"Duplicate protected action blocked: {name} was already "
+                "attempted with the same details in this request. Do not retry it.",
+                False,
+            )
+        attempts.add(action_key)
+
     if "*" in confirm_tools or name in confirm_tools:
         from .. import tools as _tools
 
@@ -94,11 +158,22 @@ async def _call(session, name: str, args: dict, confirm_tools: set[str]) -> str:
         # confirm_fn blocks (terminal prompt / Telegram reply) — off the loop.
         allowed = await asyncio.to_thread(_tools.confirm_fn, summary)
         if not allowed:
-            return "User declined — action cancelled. Do not retry."
+            return "User declined — action cancelled. Do not retry.", False
     try:
-        return _result_text(await session.call_tool(name, args))
+        result = await asyncio.wait_for(
+            session.call_tool(name, args), timeout=tool_timeout_seconds
+        )
+        return _result_text(result), True
+    except TimeoutError:
+        return (
+            f"Tool {name} timed out after {tool_timeout_seconds:g} seconds. "
+            "Its final external state is unknown; do not retry automatically.",
+            True,
+        )
     except Exception as exc:
-        return f"Tool {name} failed: {exc}"
+        # A failed response does not prove that the external side effect did
+        # not happen, so the protected request remains reserved this turn.
+        return f"Tool {name} failed: {exc}", True
 
 
 @asynccontextmanager
@@ -191,20 +266,38 @@ async def discover_tools(spec: dict) -> list[dict]:
         ]
 
 
-async def _run_async(task: str, spec: dict, api_key: str) -> str:
+async def _run_async(
+    task: str,
+    spec: dict,
+    api_key: str,
+    protected_attempts: set[str] | None = None,
+) -> str:
     confirm_tools = set(spec.get("confirm_tools") or [])
+    dedupe_tools = set(spec.get("dedupe_tools") or [])
     executed: list[str] = []  # tool results so far — actions that REALLY happened
     retried_empty = False
+    protected_attempts = protected_attempts if protected_attempts is not None else set()
+    action_namespace = str(
+        spec.get("mcp_server_id")
+        or spec.get("connection")
+        or spec.get("name")
+        or "mcp"
+    )
 
     try:
         async with _mcp_session(spec) as session:
             tools = _openai_tools(await _list_tools(session))
+            try:
+                from .. import db
+
+                profile = db.get_profile()
+            except Exception:
+                profile = None
 
             messages = [
                 {
                     "role": "system",
-                    "content": (spec.get("prompt") or "").strip()
-                    or DEFAULT_SYSTEM_PROMPT,
+                    "content": _system_prompt(spec.get("prompt") or "", profile),
                 },
                 {"role": "user", "content": task},
             ]
@@ -266,9 +359,19 @@ async def _run_async(task: str, spec: dict, api_key: str) -> str:
                             }
                         )
                         continue
-                    result = await _call(session, name, args, confirm_tools)
+                    result, was_executed = await _call(
+                        session,
+                        name,
+                        args,
+                        confirm_tools,
+                        protected_attempts,
+                        action_namespace,
+                        dedupe_tools,
+                        MCP_TOOL_TIMEOUT_SECONDS,
+                    )
                     trace.tool(name, args, result)
-                    executed.append(f"{name} -> {result[:200]}")
+                    if was_executed:
+                        executed.append(f"{name} -> {result[:200]}")
                     messages.append(
                         {
                             "role": "tool",
@@ -285,7 +388,11 @@ async def _run_async(task: str, spec: dict, api_key: str) -> str:
     return f"{spec['name']} agent reached max tool rounds — partial outcome only."
 
 
-def run(task: str, spec: dict) -> str:
+def run(
+    task: str,
+    spec: dict,
+    protected_attempts: set[str] | None = None,
+) -> str:
     """Run one dynamic MCP subagent on a task. Returns its plain-text report."""
     name = spec.get("name", "MCP")
     api_key = spec.get("api_key") or ""
@@ -295,7 +402,20 @@ def run(task: str, spec: dict) -> str:
             "Set one in the server preset (Admin page or `python -m mounir.mcp_agents`)."
         )
     try:
-        return asyncio.run(_run_async(task, spec, api_key)).strip()
+        async def _bounded_run() -> str:
+            try:
+                return await asyncio.wait_for(
+                    _run_async(task, spec, api_key, protected_attempts),
+                    timeout=MCP_AGENT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                return (
+                    f"{name} agent timed out after "
+                    f"{MCP_AGENT_TIMEOUT_SECONDS:g} seconds. Its final external "
+                    "state may be unknown; do not retry the task automatically."
+                )
+
+        return asyncio.run(_bounded_run()).strip()
     except Exception as exc:
         detail = _exc_detail(exc)
         # Log the full traceback so the real cause is inspectable, even if the

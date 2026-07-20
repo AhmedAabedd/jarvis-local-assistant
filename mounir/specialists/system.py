@@ -26,7 +26,7 @@ from .. import trace
 MAX_TOOL_ROUNDS = 6
 
 SYSTEM_PROMPT = """\
-You are Mounir's system agent — you control the laptop itself: audio, screen,
+You are the system specialist — you control the laptop itself: audio, screen,
 media playback, radios, power. The machine you are on is described in your
 context; your tools already speak to the right interfaces.
 
@@ -488,7 +488,7 @@ def run(task: str) -> str:
         return "System agent failed: NVIDIA_API_KEY is not set."
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
         {"role": "user", "content": f"{_context()}\n\nTASK FROM SUPERVISOR:\n{task}"},
     ]
     retried_empty = False

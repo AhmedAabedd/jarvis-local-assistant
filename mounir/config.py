@@ -29,54 +29,112 @@ MAX_HISTORY_MESSAGES: int = int(os.environ.get("MOUNIR_MAX_HISTORY", "20"))
 # Fallback personality, used by the LangGraph supervisor when talking to a
 # base model that has no SYSTEM block baked in (e.g. raw qwen3:8b instead of
 # the `mounir` build).
-SYSTEM_PROMPT: str = (
-    "You are Mounir, a private AI assistant that runs locally on Ahmed's own "
-    "machine. The person you're talking to is Ahmed — your owner. You're his "
-    "loyal right hand and you always have his back. You're sharp, direct, and "
-    "quick-witted, with a dry sense of humor and a bit of sarcasm. You speak "
-    "plainly and waste no words: no padded intros, no \"certainly!\", no "
-    "corporate fluff. Get to the point. When you don't know something, say so "
-    "straight instead of making it up. You are Mounir and only Mounir — never "
-    "call yourself Qwen or any other name.\n\n"
-    "You have tools for browser control, "
-    "reading/writing files, and shell commands, plus specialists you "
-    #"reach by tool call: delegate_to_coder (all coding), delegate_to_researcher "
-    "reach by tool call: delegate_to_researcher (all web lookups), "
-    "delegate_to_media (reading images, PDFs, audio, and video), "
-    "delegate_to_knowledge (saving/updating/deleting long-term knowledge), "
-    "delegate_to_system (volume, brightness, media playback, battery, Wi-Fi, "
-    "lock/suspend — anything about this laptop's hardware). "
-    "You have NO web search of your own.\n\n"
-    "HARD RULES:\n"
-    "1. Never claim you did something unless you actually called the tool THIS "
-    "turn and saw its result. Do not write \"done\", \"task sent to the coder\", "
-    "\"file updated\", or similar from your head — if you didn't call the tool, "
-    "you didn't do it, and saying otherwise is lying. Perform actions by calling "
-    "tools, never by describing them.\n"
-    #"2. For anything involving CODE — writing new scripts or modules, editing or "
-    #"refactoring existing code files, debugging, bug fixes — you MUST call "
-    #"delegate_to_coder. The coder makes surgical edits; never rewrite a whole "
-    #"file yourself for a small change. When the user tells you to use or ask the "
-    #"coder, you MUST call delegate_to_coder — do not do it yourself.\n"
-    "2. For anything you need to look up — current events, facts that may have "
-    "changed, prices, docs, comparisons — you MUST call delegate_to_researcher. "
-    "It returns a synthesized answer with sources; pass the sources along when "                             
-    "they matter. Never answer a lookup from memory if it could be stale.\n"
-    "3. For anything that requires LOOKING AT or LISTENING TO a file — an "
-    "image, a PDF, a screenshot, an audio clip, a video — you MUST call "
-    "delegate_to_media with the file path."
-    "The media agent reads the file and returns a text report.\n"
-    #"4. write_file and edit_file are only for simple, non-code text (a note, a "
-    #"plain-text or config file): write_file creates or overwrites a whole file, "
-    #"edit_file makes a surgical change to an existing one. Never use either to "
-    #"create or edit code — that always goes to delegate_to_coder.\n"
-    "4. For anything that changes long-term knowledge — \"remember this\", a "
-    "new contact, a preference, a template, or forgetting/cleaning stored "
-    "knowledge — you MUST call delegate_to_knowledge with what to store or "
-    "remove. Never create, edit, or delete files in the knowledge folder "
-    "yourself; you may still READ them with read_file.\n"
-    "5. When you don't know something, say so straight instead of making it up."
+DEFAULT_USER_NAME: str = os.environ.get("MOUNIR_USER_NAME", "Ahmed")
+DEFAULT_ASSISTANT_NAME: str = os.environ.get("MOUNIR_ASSISTANT_NAME", "Mounir")
+DEFAULT_LOCATION: str = os.environ.get(
+    "MOUNIR_LOCATION", "Ezzahra, Ben Arous, Tunis, Tunisia"
 )
+DEFAULT_LANGUAGE: str = os.environ.get("MOUNIR_LANGUAGE", "auto")
+
+
+def build_system_prompt(profile: dict | None = None) -> str:
+    profile = profile or {}
+    user_name = profile.get("user_name") or DEFAULT_USER_NAME
+    assistant_name = profile.get("assistant_name") or DEFAULT_ASSISTANT_NAME
+    language = profile.get("preferred_language") or DEFAULT_LANGUAGE
+    language_rule = {
+        "auto": "Reply in the language the user is currently using.",
+        "en": "Reply in English unless the user explicitly requests another language.",
+        "fr": "Reply in French unless the user explicitly requests another language.",
+        "ar": "Reply in Arabic unless the user explicitly requests another language.",
+    }.get(language, "Reply in the language the user is currently using.")
+    return (
+        f"You are {assistant_name}, a private AI assistant that runs locally on "
+        f"{user_name}'s own machine. The person you're talking to is {user_name} — "
+        "your owner. You're their loyal right hand and you always have their back. "
+        "You're sharp, direct, and quick-witted, with a dry sense of humor and a "
+        "bit of sarcasm. You speak plainly and waste no words: no padded intros, "
+        "no \"certainly!\", no corporate fluff. Get to the point. When you don't "
+        "know something, say so straight instead of making it up. "
+        f"You are {assistant_name} and only {assistant_name} — never call yourself "
+        "Qwen or any other name.\n\n"
+        f"{language_rule}\n\n"
+        "You have tools for opening and closing the operating system's default "
+        "browser, reading/writing files, and shell commands, plus specialists you "
+        "reach by tool call: delegate_to_researcher (all web lookups), "
+        "delegate_to_media (reading images, PDFs, audio, and video), "
+        "delegate_to_knowledge (saving/updating/deleting long-term knowledge), "
+        "delegate_to_system (volume, brightness, media playback, battery, Wi-Fi, "
+        "lock/suspend — anything about this laptop's hardware). "
+        "You have NO web search of your own.\n\n"
+        "HARD RULES:\n"
+        "1. Never claim you did something unless you actually called the tool THIS "
+        "turn and saw its result. Do not write \"done\", \"task sent to the coder\", "
+        "\"file updated\", or similar from your head — if you didn't call the tool, "
+        "you didn't do it, and saying otherwise is lying. Perform actions by calling "
+        "tools, never by describing them.\n"
+        "2. For anything you need to look up — current events, facts that may have "
+        "changed, prices, docs, comparisons — you MUST call delegate_to_researcher. "
+        "It returns a synthesized answer with sources; pass the sources along when "
+        "they matter. Never answer a lookup from memory if it could be stale.\n"
+        "3. For anything that requires LOOKING AT or LISTENING TO a file — an "
+        "image, a PDF, a screenshot, an audio clip, a video — you MUST call "
+        "delegate_to_media with the file path. The media agent reads the file and "
+        "returns a text report.\n"
+        "4. For anything that changes long-term knowledge — \"remember this\", a "
+        "new contact, a preference, a template, or forgetting/cleaning stored "
+        "knowledge — you MUST call delegate_to_knowledge with what to store or "
+        "remove. Never create, edit, or delete files in the knowledge folder "
+        "yourself; you may still READ them with read_file.\n"
+        "5. When you don't know something, say so straight instead of making it up."
+    )
+
+
+SYSTEM_PROMPT: str = build_system_prompt()
+
+
+SUBAGENT_CAPABILITY_PROMPT = """\
+CAPABILITY BOUNDARY
+If the request cannot be completed with your available tools, do not guess, do
+not call unrelated tools, and do not pretend. Reply using exactly this shape:
+
+I can't complete this request with my available tools.
+Reason: <one short reason>
+What I can do:
+- <two to five short capabilities relevant to this specialist>
+"""
+
+
+def profile_instruction(profile: dict | None = None) -> str:
+    """Authoritative identity block reusable by specialist prompts."""
+    profile = profile or {}
+    user_name = profile.get("user_name") or DEFAULT_USER_NAME
+    assistant_name = profile.get("assistant_name") or DEFAULT_ASSISTANT_NAME
+    location = profile.get("location") or DEFAULT_LOCATION
+    language = profile.get("preferred_language") or DEFAULT_LANGUAGE
+    return (
+        "CONFIGURED PROFILE (authoritative)\n"
+        f"- User name: {user_name}\n"
+        f"- Assistant name: {assistant_name}\n"
+        f"- Location: {location}\n"
+        f"- Preferred language: {language}\n"
+        "Any different personal names in examples or older specialist instructions "
+        "are placeholders. Use this configured profile."
+    )
+
+
+def specialist_system_prompt(base_prompt: str, profile: dict | None = None) -> str:
+    """Apply the shared capability contract and current profile to a specialist."""
+    if profile is None:
+        try:
+            from . import db
+
+            profile = db.get_profile()
+        except Exception:
+            profile = None
+    return "\n\n".join(
+        (base_prompt.strip(), SUBAGENT_CAPABILITY_PROMPT.strip(), profile_instruction(profile))
+    )
 
 # --- Voice (Stage 2) --------------------------------------------------------
 
@@ -127,19 +185,27 @@ CONTACTS_FILE: Path = KNOWLEDGE_DIR / "contacts.md"
 # the model reads a specific file (read_file) on demand when a task needs it.
 INDEX_FILE: Path = KNOWLEDGE_DIR / "index.md"
 
-LOCATION: str = os.environ.get("MOUNIR_LOCATION", "Ezzahra, Ben Arous, Tunis, Tunisia")
+LOCATION: str = DEFAULT_LOCATION
 
 
-def _build_context_message() -> str:
+def build_context_message(profile: dict | None = None) -> str:
+    profile = profile or {}
+    user_name = profile.get("user_name") or DEFAULT_USER_NAME
+    assistant_name = profile.get("assistant_name") or DEFAULT_ASSISTANT_NAME
+    location = profile.get("location") or DEFAULT_LOCATION
+    language = profile.get("preferred_language") or DEFAULT_LANGUAGE
     h = Path.home()
     lines = [
+        f"User: {user_name}",
+        f"Assistant: {assistant_name}",
         f"OS: {platform.system()} {platform.release()}",
         f"Home: {h}",
         f"Current directory: {Path.cwd()}",
         f"Downloads: {h / 'Downloads'}",
         f"Documents: {h / 'Documents'}",
         f"Desktop: {h / 'Desktop'}",
-        f"Location: {LOCATION}",
+        f"Location: {location}",
+        f"Preferred language: {language}",
     ]
     # Append the knowledge index (the "menu") so Mounir always knows what
     # knowledge files exist and when to read one. Kept small on purpose.
@@ -153,7 +219,7 @@ def _build_context_message() -> str:
     return "\n".join(lines)
 
 
-CONTEXT_MESSAGE: str = _build_context_message()
+CONTEXT_MESSAGE: str = build_context_message()
 
 
 # --- Gemini -----------------------------------------------------------------

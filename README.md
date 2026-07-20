@@ -111,7 +111,7 @@ Key pieces in `langgraph_agent.py`:
 
 | Agent | Type | Model (default) | Tools |
 |---|---|---|---|
-| **Supervisor** | built in | local `mounir` (Ollama) — or Mistral / Groq | files, shell, browser launch + one `delegate_to_*` tool per specialist |
+| **Supervisor** | built in | local `mounir` (Ollama) — or Mistral / Groq | files, shell, default-browser open/close + one `delegate_to_*` tool per specialist |
 | **Researcher** | dynamic MCP | `nemotron-3-super:cloud` | Playwright browser navigation, page reading, search, and interaction |
 | **Email** | dynamic MCP | `gpt-oss:120b-cloud` | whatever Gmail MCP advertises |
 | **Media** | built in | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | `load_media`, `sample_frames`, `find_media` |
@@ -142,6 +142,11 @@ Rules of thumb the supervisor prompt encodes:
 - **`bash`** runs shell commands behind a confirmation prompt, with a per-call
   `timeout` and a `run_in_background` flag for long-running processes.
 - **`open_path`** opens any file/folder/URL with the system default app (xdg-open).
+- **`open_browser` / `close_browser`** use the browser registered as the
+  operating system default instead of assuming Chrome or Firefox. Opening uses
+  the standard OS launcher. Closing detects that same application on Linux,
+  Windows, or macOS, asks for confirmation, and requests a graceful shutdown;
+  it never force-kills an unidentified browser.
 - **`play_on_youtube`** resolves a search to the top YouTube result via yt-dlp
   and opens it in the browser.
 - **the dynamic Email agent** runs Gmail over an MCP server (OAuth — no IMAP/SMTP):
@@ -183,12 +188,25 @@ SQLite DB at `~/.mounir/mounir.db`:
 3. **Subagents** — the actual delegation targets: name, optional icon,
    description (the routing signal for the small supervisor model), system
    prompt, plus a chosen model and MCP server. Uploaded icons are validated and
-   stored directly in the local SQLite database.
+   stored directly in the local SQLite database. Each subagent can also name
+   tools whose exact calls must not run twice in one user turn; the seeded Email
+   agent enables this protection for `send_email`.
 
 Each subagent becomes one `delegate_to_<slug>` tool and one graph node. Only
 its short report crosses back; the server's own tools never enter the
 supervisor's context. Subagents are loaded when each turn compiles, so a new
 one is live from your next message.
+
+Every specialist receives the same capability-boundary system instruction. If
+a task is outside its available tools, it must state that it cannot complete
+the request, give one short reason, and list what it can do instead. Its own
+specialist prompt is still appended for server-specific operating rules.
+
+MCP calls have two independent safety deadlines: each server tool call defaults
+to 60 seconds, and the whole dynamic subagent task defaults to 300 seconds.
+Both are configurable. A timed-out tool is treated as possibly executed because
+its final external state may be unknown, so Mounir explicitly tells the model
+not to retry it automatically.
 
 ### How it is wired
 
@@ -362,7 +380,12 @@ from the old built-in specialists.
 | `MOUNIR_THINK` | `false` | Qwen3 thinking mode (slower, smarter) |
 | `MOUNIR_MAX_HISTORY` | `20` | Recent messages kept in the prompt window |
 | `MOUNIR_DATA_DIR` | `~/.mounir` | Where conversations, voices, and the SQLite DB are stored |
-| `MOUNIR_LOCATION` | `Tunis, Tunisia` | Location given to the model as context |
+| `MOUNIR_USER_NAME` | `Ahmed` | Initial user name used when the profile row is first created |
+| `MOUNIR_ASSISTANT_NAME` | `Mounir` | Initial assistant name used when the profile row is first created |
+| `MOUNIR_LOCATION` | `Ezzahra, Ben Arous, Tunis, Tunisia` | Initial location used when the profile row is first created |
+| `MOUNIR_LANGUAGE` | `auto` | Initial response language (`auto`, `en`, `fr`, or `ar`) |
+| `MOUNIR_MCP_TOOL_TIMEOUT` | `60` | Maximum seconds for one dynamic MCP tool call |
+| `MOUNIR_MCP_AGENT_TIMEOUT` | `300` | Maximum seconds for one complete dynamic MCP subagent task |
 
 ### Built-in specialists and dynamic migration defaults
 
@@ -443,9 +466,16 @@ Two separate pages, both served by `server.py`:
 - **`/`** — the chat dashboard: voice orb, transcript, live CPU/RAM/network
   stats, tool-confirmation modal. It talks to the same shared `Agent`
   instance over a WebSocket (`/ws/chat`).
-- **`/admin`** — the management UI for models, MCP servers, and dynamic
-  subagents. It uses the REST endpoints under `/api/models`, `/api/mcp-servers`,
-  and `/api/subagents`.
+- **`/admin`** — the management UI for models, MCP servers, dynamic subagents,
+  and the local profile. The **Profile** view sets the user name, assistant
+  name, location, and preferred response language. Changes are stored in SQLite
+  and are picked up by the supervisor and every specialist on the next message,
+  without restarting the app.
+
+If the local `mounir` Ollama model was built from an older checkout whose
+Modelfile contained fixed personal names, rebuild it once with
+`ollama create mounir -f modelfiles/mounir.Modelfile`. The current Modelfile is
+profile-neutral; the live profile now comes from SQLite at runtime.
 
 ```bash
 sudo apt install ffmpeg
@@ -495,10 +525,11 @@ mounir/
   agent.py              thin compatibility wrapper around the LangGraph agent
   langgraph_agent.py    the supervisor + specialists graph (built-ins + dynamic MCP agents)
   config.py             all tunables (env-overridable) + the supervisor prompt
+  browser_control.py    cross-platform default-browser discovery/open/close adapter
   llm.py                provider clients (Ollama stream, Mistral, Groq, NVIDIA, generic OpenAI)
   tools.py              supervisor tools (files, bash, browser, delegation)
   default_agents.py     one-time presets for migrated dynamic agents such as Email and Researcher
-  db.py                 SQLite persistence: models, MCP servers, subagents
+  db.py                 SQLite persistence: profile, models, MCP servers, subagents
   mcp_agents.py         registry layer + management CLI (uses db.py)
   memory.py             conversation history + full-turn persistence + JSON save
   trace.py              the purple, Claude-Code-style terminal renderer
@@ -525,7 +556,8 @@ mounir/
 (media, knowledge, system; coder is wired but delegation is off), dynamic MCP
 subagents including Email and the Playwright Researcher registered at runtime (local stdio, remote
 Streamable HTTP, and legacy SSE), full-turn memory, voice
-(push-to-talk + hands-free), Telegram bridge, web dashboard, and admin UI.
+(push-to-talk + hands-free), Telegram bridge, web dashboard, profile settings,
+default-browser control, MCP timeouts, and admin UI.
 
 **Ongoing / future:**
 - Custom "Hey Mounir" wake word
@@ -562,6 +594,9 @@ Streamable HTTP, and legacy SSE), full-turn memory, voice
 4. Add the schema to `tools.py` so the supervisor is offered the tool.
 5. Mention it in `config.SYSTEM_PROMPT` so the model knows when to use it.
 6. Update this README's agents table.
+
+Build its runtime system message with `config.specialist_system_prompt(...)` so
+it also receives the common capability boundary and current profile.
 
 ### Adding a dynamic MCP subagent
 

@@ -27,7 +27,7 @@ import time
 
 import telebot
 
-from mounir import config, llm, tools, trace
+from mounir import config, db, llm, tools, trace
 from mounir.agent import Agent
 
 # Telegram hard limit per message; longer replies are split at line breaks.
@@ -137,7 +137,7 @@ def _handle(message: telebot.types.Message) -> None:
         return
 
     if text == "/start":
-        _send(chat_id, "Mounir here. Say the word.")
+        _send(chat_id, f"{db.get_profile()['assistant_name']} here. Say the word.")
         return
     if text == "/reset":
         agent.conversation.reset()

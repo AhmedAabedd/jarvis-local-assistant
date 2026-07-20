@@ -45,7 +45,7 @@ VIDEO_DEFAULT_FRAMES = 6      # keyframes sampled from a video by default
 
 
 SYSTEM_PROMPT = """\
-You are Mounir's dedicated media analyst. You read and understand media —
+You are the dedicated media specialist. You read and understand media —
 images, PDFs, audio clips, and video — and report what's in them.
 
 Your tools:
@@ -354,7 +354,7 @@ def run(task: str) -> str:
         return "Media agent failed: NVIDIA_API_KEY is not set."
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
         {"role": "user", "content": task},
     ]
 

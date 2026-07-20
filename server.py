@@ -314,6 +314,18 @@ async def voice_turn(file: UploadFile = File(...)):
 
 # --- Admin: models, MCP servers, subagents ------------------------------------
 
+@app.get("/api/profile")
+async def get_profile():
+    return db.get_profile()
+
+
+@app.put("/api/profile")
+async def update_profile(req: dict):
+    try:
+        return db.update_profile(**req)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
 @app.get("/api/agent-overview")
 async def agent_overview():
     """Return the configured, user-visible agent topology for Agent Studio."""
@@ -324,9 +336,10 @@ async def agent_overview():
     else:
         supervisor_provider = "Ollama (local)"
 
+    profile = db.get_profile()
     return {
         "supervisor": {
-            "name": "Mounir",
+            "name": profile["assistant_name"],
             "model": llm.active_model(agent.model),
             "provider": supervisor_provider,
         },
@@ -730,6 +743,7 @@ async def create_subagent(req: dict):
             confirm_tool_calls=req.get("confirm_tool_calls", True),
             parent="supervisor",
             confirm_tools=req.get("confirm_tools"),
+            dedupe_tools=req.get("dedupe_tools"),
             **icon,
         )
     except (ValueError, TypeError) as exc:

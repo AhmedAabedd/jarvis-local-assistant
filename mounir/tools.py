@@ -12,7 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import config
+from . import browser_control, config
 
 # Specialist agents (lazy imports — only load the specialist when actually
 # called). These are reached via handoff in the graph; the registry entries are
@@ -206,42 +206,29 @@ USER_DECLINED = (
 )
 
 
-# Browser binaries to try, in order; first one on PATH wins.
-_BROWSERS = [
-    "google-chrome-stable",
-    "google-chrome",
-    "chromium-browser",
-    "chromium",
-    "firefox",
-    "brave-browser",
-]
-
-
 def open_browser(url: str = "") -> str:
-    """Open the web browser, optionally to a URL (a new tab if it's running).
-
-    Launched detached so it never blocks. Pass nothing to just open the browser,
-    or a URL/site (the model supplies "youtube.com" for "open youtube").
-    """
+    """Open a URL in the operating system's configured default browser."""
     url = (url or "").strip()
-    browser = next((shutil.which(b) for b in _BROWSERS if shutil.which(b)), None)
-    if browser is None:
-        return "No web browser found on this machine."
-
     if url and not url.startswith(("http://", "https://")):
         url = "https://" + url
-    argv = [browser, url] if url else [browser]
     try:
-        subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,  # detach so it survives this turn
-        )
+        opened = browser_control.open_default(url)
     except Exception as exc:
-        return f"Could not open the browser: {exc}"
-    return f"Opening {url} in the browser." if url else "Opening the browser."
+        return f"Could not open the default browser: {exc}"
+    if not opened:
+        return "The operating system could not open its default browser."
+    return f"Opening {url} in the default browser." if url else "Opening the default browser."
+
+
+def close_browser() -> str:
+    """Close the operating system's configured default browser after confirmation."""
+    app = browser_control.default_browser()
+    if app is None:
+        return "Could not identify the operating system's default browser."
+    if not confirm_fn(f"Close {app.name} and all of its open windows?"):
+        return USER_DECLINED
+    _, message = browser_control.close_default(app)
+    return message
 
 
 def play_on_youtube(query: str) -> str:
@@ -410,6 +397,19 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "close_browser",
+            "description": (
+                "Close the operating system's configured default browser and all "
+                "of its windows. The code detects the default application instead "
+                "of assuming Chrome, Chromium, Firefox, or another browser. It asks "
+                "the user to confirm before closing anything."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
             "description": (
                 "Write text to a file on the local machine, creating it (and any "
@@ -490,8 +490,8 @@ SCHEMAS = [
         "function": {
             "name": "open_browser",
             "description": (
-                "Open the web browser. Pass a URL or site to open it in a tab "
-                "Use this for anything web/browser."
+                "Open the operating system's default browser. Pass a URL or site "
+                "to open it in a tab. Use this for anything web/browser."
             ),
             "parameters": {
                 "type": "object",
@@ -697,6 +697,7 @@ _REGISTRY = {
     "edit_file": edit_file,
     "list_directory": list_directory,
     "open_browser": open_browser,
+    "close_browser": close_browser,
     "play_on_youtube": play_on_youtube,
     "open_path": open_path,
     "bash": bash,

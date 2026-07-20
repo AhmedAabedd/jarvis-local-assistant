@@ -28,7 +28,7 @@ MAX_READ_CHARS = 24000  # hard char ceiling per read
 _files_read: set[str] = set()
 
 SYSTEM_PROMPT = """\
-You are an expert software engineer working as Mounir's dedicated coder agent.
+You are an expert software engineer working as the dedicated coder specialist.
 You write clean, correct, production-quality code. You have tools to read,
 create, modify, delete, and search files directly — use them.
 
@@ -348,7 +348,7 @@ def run(task: str) -> str:
         return "Coder failed: NVIDIA_API_KEY is not set."
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
         {"role": "user", "content": task},
     ]
 

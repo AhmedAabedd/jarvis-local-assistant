@@ -31,7 +31,7 @@ import threading
 from importlib import import_module
 from typing import Annotated, Iterator, TypedDict
 
-from . import config as cfg, llm, mcp_agents, tools
+from . import config as cfg, db, llm, mcp_agents, tools
 from .memory import Conversation
 from .specialists.coder import run as run_coder
 from .specialists.knowledge import run as run_knowledge
@@ -329,7 +329,11 @@ def _system(state: TurnState) -> Command:
 
 # --- dynamic MCP agent nodes ---------------------------------------------------
 
-def _make_mcp_node(spec: dict, valid_parents: set[str]):
+def _make_mcp_node(
+    spec: dict,
+    valid_parents: set[str],
+    protected_attempts: set[str],
+):
     """Build a graph node for one registered MCP agent.
 
     Same contract as the built-in specialist nodes: receive the task from the
@@ -349,7 +353,7 @@ def _make_mcp_node(spec: dict, valid_parents: set[str]):
         trace.block("received  ← supervisor", task)
 
         report = (
-            run_mcp_agent(task, spec).strip()
+            run_mcp_agent(task, spec, protected_attempts).strip()
             if task
             else f"No task was provided to the {spec['name']} agent."
         )
@@ -406,8 +410,15 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
     # specialist would arrive with no matching call. Nested parents (subagent
     # reporting to subagent) need that hand-off protocol first — future work.
     valid_parents = {"supervisor"}
+    # One set for the complete user turn, shared by every dynamic MCP node.
+    # This also catches repeats after a second delegation or through another
+    # subagent connected to the same server.
+    protected_attempts: set[str] = set()
     for spec in dynamic:
-        graph.add_node(mcp_agents.node_name(spec["name"]), _make_mcp_node(spec, valid_parents))
+        graph.add_node(
+            mcp_agents.node_name(spec["name"]),
+            _make_mcp_node(spec, valid_parents, protected_attempts),
+        )
     graph.add_edge(START, "supervisor")
     return graph.compile()
 
@@ -419,14 +430,22 @@ class Agent:
         model: str = cfg.MODEL,
         use_tools: bool = True,
     ) -> None:
+        db.init()
         if conversation is None:
-            conversation = Conversation(system_prompt=cfg.SYSTEM_PROMPT)
+            conversation = Conversation(
+                system_prompt=cfg.build_system_prompt(db.get_profile())
+            )
+            self._profile_managed_prompt = True
+        else:
+            self._profile_managed_prompt = False
         self.conversation = conversation
         self.model = model
         self.use_tools = use_tools
 
     def respond(self, user_input: str) -> Iterator[str]:
         """Run one user turn through the graph, streaming the reply chunks."""
+        if self._profile_managed_prompt:
+            self.conversation.system_prompt = cfg.build_system_prompt(db.get_profile())
         self.conversation.add_user(user_input)
         stream_q: queue.Queue[str | None] = queue.Queue()
         state: TurnState = {"messages": self.conversation.to_messages()}

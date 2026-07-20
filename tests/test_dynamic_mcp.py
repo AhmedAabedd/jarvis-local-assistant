@@ -16,8 +16,9 @@ from unittest.mock import patch
 _IMPORT_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["MOUNIR_DATA_DIR"] = _IMPORT_DATA_DIR.name
 
-from mounir import db, mcp_agents, tools as mounir_tools
-from mounir.specialists.mcp_agent import _call, _mcp_session, discover_tools
+from mounir import browser_control, config, db, mcp_agents, tools as mounir_tools
+from mounir.specialists import mcp_agent
+from mounir.specialists.mcp_agent import _call, _mcp_session, _system_prompt, discover_tools
 
 
 class TemporaryDatabaseTest(unittest.TestCase):
@@ -35,6 +36,22 @@ class TemporaryDatabaseTest(unittest.TestCase):
 
 
 class DatabaseTests(TemporaryDatabaseTest):
+    def test_profile_is_persisted_and_builds_runtime_prompts(self):
+        db.init()
+        profile = db.update_profile(
+            user_name="Lina",
+            assistant_name="Atlas",
+            location="Paris, France",
+            preferred_language="fr",
+        )
+
+        self.assertEqual(db.get_profile(), profile)
+        self.assertEqual(profile["assistant_name"], "Atlas")
+        self.assertIn("You are Atlas", config.build_system_prompt(profile))
+        self.assertIn("User: Lina", config.build_context_message(profile))
+        self.assertIn("Reply in French", config.build_system_prompt(profile))
+        self.assertIn("Location: Paris, France", config.profile_instruction(profile))
+
     def test_existing_database_is_migrated(self):
         with sqlite3.connect(db.DB_PATH) as conn:
             conn.executescript(
@@ -80,7 +97,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertTrue(
             {
                 "description", "icon_data", "icon_mime",
-                "confirm_tool_calls", "confirm_tools",
+                "confirm_tool_calls", "confirm_tools", "dedupe_tools",
             }
             <= agent_columns
         )
@@ -111,6 +128,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             model["id"],
             server["id"],
             confirm_tools=["dangerous_action"],
+            dedupe_tools=["dangerous_action"],
         )
 
         spec = next(item for item in db.build_specs() if item["name"] == "Remote helper")
@@ -118,6 +136,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(spec["transport"], "streamable_http")
         self.assertEqual(spec["headers"]["Authorization"], "Bearer secret-token")
         self.assertEqual(spec["confirm_tools"], ["dangerous_action"])
+        self.assertEqual(spec["dedupe_tools"], ["dangerous_action"])
         self.assertEqual(agent["confirm_tool_calls"], 1)
         self.assertEqual(agent["confirm_tools"], '["dangerous_action"]')
 
@@ -133,6 +152,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             json.loads(email["confirm_tools"]),
             ["send_email", "delete_email", "batch_delete_emails"],
         )
+        self.assertEqual(json.loads(email["dedupe_tools"]), ["send_email"])
         email_spec = next(spec for spec in db.build_specs() if spec["name"] == "Email")
         self.assertEqual(
             mcp_agents.delegate_schema(email_spec)["function"]["name"],
@@ -241,6 +261,59 @@ class DatabaseTests(TemporaryDatabaseTest):
 
 
 class TransportTests(unittest.TestCase):
+    def test_mcp_tool_timeout_reports_unknown_external_state(self):
+        class SlowSession:
+            async def call_tool(self, name, args):
+                await asyncio.sleep(0.05)
+
+        result, executed = asyncio.run(
+            _call(
+                SlowSession(),
+                "slow_action",
+                {},
+                set(),
+                tool_timeout_seconds=0.001,
+            )
+        )
+
+        self.assertTrue(executed)
+        self.assertIn("timed out", result)
+        self.assertIn("state is unknown", result)
+        self.assertIn("do not retry", result)
+
+    def test_whole_mcp_agent_has_a_deadline(self):
+        async def slow_agent(*_args, **_kwargs):
+            await asyncio.sleep(0.05)
+            return "late"
+
+        spec = {
+            "name": "Slow helper",
+            "connection": "fake-server",
+            "api_key": "",
+        }
+        with (
+            patch.object(mcp_agent, "_run_async", slow_agent),
+            patch.object(mcp_agent, "MCP_AGENT_TIMEOUT_SECONDS", 0.001),
+        ):
+            result = mcp_agent.run("wait", spec)
+
+        self.assertIn("Slow helper agent timed out", result)
+        self.assertIn("do not retry", result)
+
+    def test_all_specialists_share_the_capability_boundary(self):
+        profile = {
+            "user_name": "Lina",
+            "assistant_name": "Atlas",
+            "preferred_language": "auto",
+        }
+        dynamic_prompt = _system_prompt("Use the echo tool.", profile)
+        builtin_prompt = config.specialist_system_prompt("You are a tester.", profile)
+
+        for prompt in (dynamic_prompt, builtin_prompt):
+            self.assertIn(config.SUBAGENT_CAPABILITY_PROMPT.strip(), prompt)
+            self.assertIn("I can't complete this request", prompt)
+            self.assertIn("Assistant name: Atlas", prompt)
+
     def test_only_selected_tools_require_confirmation(self):
         calls = []
 
@@ -256,13 +329,84 @@ class TransportTests(unittest.TestCase):
             patch("asyncio.to_thread", immediate_thread_call),
             patch("mounir.tools.confirm_fn", return_value=False) as confirm,
         ):
-            declined = asyncio.run(_call(Session(), "send_email", {"to": "x"}, {"send_email"}))
-            allowed = asyncio.run(_call(Session(), "search_emails", {"q": "x"}, {"send_email"}))
+            declined, declined_executed = asyncio.run(
+                _call(Session(), "send_email", {"to": "x"}, {"send_email"})
+            )
+            allowed, allowed_executed = asyncio.run(
+                _call(Session(), "search_emails", {"q": "x"}, {"send_email"})
+            )
 
         self.assertIn("declined", declined.lower())
+        self.assertFalse(declined_executed)
         self.assertEqual(allowed, "(empty result)")
+        self.assertTrue(allowed_executed)
         confirm.assert_called_once()
         self.assertEqual(calls, [("search_emails", {"q": "x"})])
+
+    def test_duplicate_protected_action_is_blocked_for_the_whole_turn(self):
+        calls = []
+        protected_attempts = set()
+
+        class Session:
+            async def call_tool(self, name, args):
+                calls.append((name, args))
+                return type("Result", (), {"content": [], "isError": False})()
+
+        async def immediate_thread_call(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with (
+            patch("asyncio.to_thread", immediate_thread_call),
+            patch("mounir.tools.confirm_fn", return_value=True) as confirm,
+        ):
+            first, first_executed = asyncio.run(
+                _call(
+                    Session(),
+                    "send_email",
+                    {"to": "x", "subject": "Hello"},
+                    {"send_email"},
+                    protected_attempts,
+                    "gmail-server",
+                    {"send_email"},
+                )
+            )
+            duplicate, duplicate_executed = asyncio.run(
+                _call(
+                    Session(),
+                    "send_email",
+                    {"subject": "Hello", "to": "x"},
+                    {"send_email"},
+                    protected_attempts,
+                    "gmail-server",
+                    {"send_email"},
+                )
+            )
+            different, different_executed = asyncio.run(
+                _call(
+                    Session(),
+                    "send_email",
+                    {"to": "y", "subject": "Hello"},
+                    {"send_email"},
+                    protected_attempts,
+                    "gmail-server",
+                    {"send_email"},
+                )
+            )
+
+        self.assertEqual(first, "(empty result)")
+        self.assertTrue(first_executed)
+        self.assertIn("duplicate protected action blocked", duplicate.lower())
+        self.assertFalse(duplicate_executed)
+        self.assertEqual(different, "(empty result)")
+        self.assertTrue(different_executed)
+        self.assertEqual(confirm.call_count, 2)
+        self.assertEqual(
+            calls,
+            [
+                ("send_email", {"to": "x", "subject": "Hello"}),
+                ("send_email", {"to": "y", "subject": "Hello"}),
+            ],
+        )
 
     def test_stdio_server_initializes_and_advertises_tools(self):
         fixture = Path(__file__).parent / "fixtures" / "echo_mcp_server.py"
@@ -493,6 +637,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                         "model_id": model_response.json()["id"],
                         "mcp_server_id": server_response.json()["id"],
                         "confirm_tools": ["echo"],
+                        "dedupe_tools": ["echo"],
                         "icon_data": (
                             "data:image/png;base64,"
                             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
@@ -502,6 +647,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                 )
                 self.assertEqual(agent_response.status_code, 200)
                 self.assertEqual(json.loads(agent_response.json()["confirm_tools"]), ["echo"])
+                self.assertEqual(json.loads(agent_response.json()["dedupe_tools"]), ["echo"])
                 self.assertEqual(agent_response.json()["has_icon"], 1)
                 icon_response = await client.get(
                     f"/api/subagents/{agent_response.json()['id']}/icon"
@@ -530,6 +676,22 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(overview["supervisor"]["name"], "Mounir")
                 self.assertEqual(len(overview["builtins"]), 3)
                 self.assertTrue(overview["supervisor"]["model"])
+
+                profile_response = await client.put(
+                    "/api/profile",
+                    json={
+                        "user_name": "Lina",
+                        "assistant_name": "Atlas",
+                        "location": "Paris, France",
+                        "preferred_language": "fr",
+                    },
+                )
+                self.assertEqual(profile_response.status_code, 200)
+                self.assertEqual(profile_response.json()["assistant_name"], "Atlas")
+                updated_overview = await client.get("/api/agent-overview")
+                self.assertEqual(
+                    updated_overview.json()["supervisor"]["name"], "Atlas"
+                )
 
                 remove_icon = await client.put(
                     f"/api/subagents/{agent_response.json()['id']}",
@@ -564,6 +726,39 @@ class AdminApiTests(TemporaryDatabaseTest):
                 web_server.agent.conversation.reset()
 
         asyncio.run(exercise_api())
+
+
+class BrowserToolTests(unittest.TestCase):
+    def test_open_uses_the_operating_system_default_browser(self):
+        with patch.object(browser_control, "open_default", return_value=True) as opened:
+            result = mounir_tools.open_browser("example.com")
+
+        opened.assert_called_once_with("https://example.com")
+        self.assertIn("default browser", result)
+
+    def test_close_requires_confirmation_and_never_closes_when_declined(self):
+        app = browser_control.BrowserApp("Firefox", executable="/usr/bin/firefox")
+        with (
+            patch.object(browser_control, "default_browser", return_value=app),
+            patch.object(browser_control, "close_default") as close,
+            patch.object(mounir_tools, "confirm_fn", return_value=False),
+        ):
+            result = mounir_tools.close_browser()
+
+        self.assertEqual(result, mounir_tools.USER_DECLINED)
+        close.assert_not_called()
+
+    def test_close_delegates_to_the_portable_browser_adapter(self):
+        app = browser_control.BrowserApp("Firefox", executable="/usr/bin/firefox")
+        with (
+            patch.object(browser_control, "default_browser", return_value=app),
+            patch.object(browser_control, "close_default", return_value=(True, "Closed Firefox.")) as close,
+            patch.object(mounir_tools, "confirm_fn", return_value=True),
+        ):
+            result = mounir_tools.close_browser()
+
+        self.assertEqual(result, "Closed Firefox.")
+        close.assert_called_once_with(app)
 
 
 if __name__ == "__main__":

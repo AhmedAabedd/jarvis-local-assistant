@@ -74,7 +74,11 @@
   .nav-item .ico { width: 17px; height: 17px; flex: 0 0 17px; }
   .nav-item:hover { color: var(--text); background: var(--bg-elev); }
   .nav-item.active { background: var(--soft); color: var(--lav); }
-  .sidebar-footer { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line); }
+  .sidebar-footer {
+    margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .sidebar-footer .nav-item { width: 100%; }
   .sidebar-footer a {
     color: var(--text-mid); text-decoration: none;
     display: flex; align-items: center; gap: 10px; padding: 10px;
@@ -482,11 +486,15 @@
       </button>
     </nav>
     <div class="sidebar-footer">
-      <a href="/" title="Back to Mounir">
+      <button class="nav-item" data-tab="profile">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/></svg>
+        <span>Profile</span>
+      </button>
+      <a href="/" title="Back to Assistant">
         <span class="back-icon">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
         </span>
-        <span class="back-copy"><strong>Back to Assistant</strong><small>Return to Mounir</small></span>
+        <span class="back-copy"><strong>Back to Assistant</strong><small id="backAssistantName">Return to Mounir</small></span>
       </a>
     </div>
   </aside>
@@ -520,6 +528,7 @@ const S = {
   editing: null,       // null | item object (null = create mode)
   formReadonly: true,  // true when viewing an instance, false when creating/modifying
   overview: { supervisor: {}, builtins: [] },
+  profile: {},
   models: [],
   servers: [],
   agents: [],
@@ -529,6 +538,7 @@ let pendingAgentIcon;
 
 const API = {
   overview: '/api/agent-overview',
+  profile:  { update: () => '/api/profile' },
   models:  { list: '/api/models',  create: '/api/models',  update: id => `/api/models/${id}`,  del: id => `/api/models/${id}` },
   servers: { list: '/api/mcp-servers', create: '/api/mcp-servers', update: id => `/api/mcp-servers/${id}`, del: id => `/api/mcp-servers/${id}` },
   agents:  { list: '/api/subagents',   create: '/api/subagents',   update: id => `/api/subagents/${id}`,   del: id => `/api/subagents/${id}` },
@@ -536,6 +546,7 @@ const API = {
 
 const TAB_META = {
   overview: { title: 'Agent Overview', labelSingular: '', subtitle: 'How your assistant is connected' },
+  profile: { title: 'Profile', labelSingular: 'Profile', subtitle: 'Who the assistant is and who it works for' },
   models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Language models available to dynamic subagents' },
   servers: { title: 'MCP Servers',   labelSingular: 'Server', subtitle: 'External capabilities connected through MCP' },
   agents:  { title: 'Subagents',     labelSingular: 'Subagent', subtitle: 'Dynamic specialists available to the supervisor' },
@@ -606,21 +617,27 @@ async function api(method, url, body) {
 }
 
 async function loadAll() {
-  const [o, m, s, a] = await Promise.all([
+  const [o, p, m, s, a] = await Promise.all([
     api('GET', API.overview),
+    api('GET', '/api/profile'),
     api('GET', API.models.list),
     api('GET', API.servers.list),
     api('GET', API.agents.list),
   ]);
   S.overview = o;
+  S.profile = p;
   S.models = m;
   S.servers = s;
   S.agents = a;
+  const assistantName = p.assistant_name || 'Mounir';
+  document.title = `${assistantName} Agent Studio`;
+  $('backAssistantName').textContent = `Return to ${assistantName}`;
 }
 
 /* ========== rendering ========== */
 function render() {
   if (S.tab === 'overview') renderOverview();
+  else if (S.tab === 'profile') renderForm();
   else if (S.view === 'list') renderList();
   else renderForm();
   updateHeader();
@@ -629,16 +646,19 @@ function render() {
 function updateHeader() {
   const meta = TAB_META[S.tab];
   const inOverview = S.tab === 'overview';
+  const inProfile = S.tab === 'profile';
   const inForm = S.view === 'form';
   const editing = inForm && S.editing;
-  $('viewTitle').textContent = editing
+  $('viewTitle').textContent = inProfile
+    ? meta.title
+    : editing
     ? meta.labelSingular + ' — ' + S.editing.name
     : meta.title;
   $('viewSubtitle').textContent = meta.subtitle;
   // Create New: only in list view
-  $('createBtn').style.display = (inOverview || inForm) ? 'none' : '';
+  $('createBtn').style.display = (inOverview || inProfile || inForm) ? 'none' : '';
   // Delete: only in readonly form view
-  $('deleteBtn').style.display = (!inOverview && editing && S.formReadonly) ? '' : 'none';
+  $('deleteBtn').style.display = (!inOverview && !inProfile && editing && S.formReadonly) ? '' : 'none';
   $('testBtn').style.display = (S.tab === 'servers' && editing && S.formReadonly) ? '' : 'none';
   // Cancel: in form view but NOT in readonly edit mode
   $('cancelBtn').style.display = (inForm && !(editing && S.formReadonly)) ? '' : 'none';
@@ -928,6 +948,31 @@ function buildFormHtml(item, readonly) {
   const e = (field, def) => item ? esc(item[field] ?? '') : (def ?? '');
   const ro = readonly ? ' readonly' : '';
   const dis = readonly ? ' disabled' : '';
+  if (S.tab === 'profile') return `
+    <form class="form-grid" id="formEl">
+      <label>User name
+        <span class="hint">The person using this assistant.</span>
+        <input type="text" name="user_name" value="${e('user_name')}" placeholder="e.g. Ahmed" maxlength="80" required${ro}>
+      </label>
+      <label>Assistant name
+        <span class="hint">Used in the assistant prompt and interface.</span>
+        <input type="text" name="assistant_name" value="${e('assistant_name')}" placeholder="e.g. Mounir" maxlength="80" required${ro}>
+      </label>
+      <label class="full">Location
+        <span class="hint">Used for location-aware questions such as weather and local recommendations.</span>
+        <input type="text" name="location" value="${e('location')}" placeholder="City, region, country" maxlength="160" required${ro}>
+      </label>
+      <label class="full">Preferred response language
+        <span class="hint">Automatic follows the language used in each message.</span>
+        <select name="preferred_language"${dis}>
+          <option value="auto"${item?.preferred_language === 'auto' ? ' selected' : ''}>Automatic</option>
+          <option value="en"${item?.preferred_language === 'en' ? ' selected' : ''}>English</option>
+          <option value="fr"${item?.preferred_language === 'fr' ? ' selected' : ''}>French</option>
+          <option value="ar"${item?.preferred_language === 'ar' ? ' selected' : ''}>Arabic</option>
+        </select>
+      </label>
+      <div class="full error" id="formError"></div>
+    </form>`;
   if (S.tab === 'models') return `
     <form class="form-grid" id="formEl">
       <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="e.g. Ollama Cloud" required${ro}></label>
@@ -1021,6 +1066,7 @@ function buildFormHtml(item, readonly) {
   const selectedConfirmationTools = confirmationMode === 'selected'
     ? confirmationTools.join(', ')
     : '';
+  const duplicateProtectionTools = parseStringList(item?.dedupe_tools).join(', ');
   const agentInitial = (item?.name || '?').trim().charAt(0).toUpperCase();
   const iconPreview = item?.has_icon
     ? `<img src="/api/subagents/${item.id}/icon" alt="">`
@@ -1063,6 +1109,10 @@ function buildFormHtml(item, readonly) {
       <label class="full" id="confirmationToolsField">Tools requiring confirmation
         <span class="hint">Enter the exact MCP tool names, separated by commas. Example: send_email, delete_email</span>
         <textarea id="confirmationTools" rows="2" placeholder="send_email, delete_email"${ro}>${esc(selectedConfirmationTools)}</textarea>
+      </label>
+      <label class="full">Prevent exact duplicate actions
+        <span class="hint">Tool names separated by commas. Use for irreversible actions such as send_email, not repeatable navigation actions such as browser_click.</span>
+        <textarea id="dedupeTools" rows="2" placeholder="send_email, create_payment"${ro}>${esc(duplicateProtectionTools)}</textarea>
       </label>
       <div class="full error" id="formError"></div>
     </form>`;
@@ -1337,6 +1387,10 @@ async function onFormSubmit(e) {
       body.confirm_tools = [];
     }
     body.confirm_tool_calls = body.confirm_tools.length > 0;
+    body.dedupe_tools = $('dedupeTools').value
+      .split(/[\n,]/)
+      .map(name => name.trim())
+      .filter(Boolean);
     if (pendingAgentIcon !== undefined) body.icon_data = pendingAgentIcon;
   }
   try {
@@ -1372,6 +1426,13 @@ async function onFormSubmit(e) {
       await api('POST', API[S.tab].create, body);
     }
     await loadAll();
+    if (S.tab === 'profile') {
+      S.editing = S.profile;
+      S.formReadonly = true;
+      S.view = 'form';
+      renderForm();
+      return;
+    }
     S.editing = null;
     S.formReadonly = true;
     S.view = 'list';
@@ -1523,8 +1584,8 @@ document.querySelectorAll('.nav-item').forEach(btn => {
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     S.tab = btn.dataset.tab;
-    S.view = S.tab === 'overview' ? 'overview' : 'list';
-    S.editing = null;
+    S.view = S.tab === 'overview' ? 'overview' : S.tab === 'profile' ? 'form' : 'list';
+    S.editing = S.tab === 'profile' ? S.profile : null;
     S.formReadonly = true;
     render();
   });
@@ -1536,6 +1597,13 @@ window.addEventListener('resize', () => {
 
 /* ========== cancel button ========== */
 $('cancelBtn').addEventListener('click', () => {
+  if (S.tab === 'profile') {
+    S.editing = S.profile;
+    S.view = 'form';
+    S.formReadonly = true;
+    renderForm();
+    return;
+  }
   S.editing = null;
   S.view = 'list';
   S.formReadonly = true;

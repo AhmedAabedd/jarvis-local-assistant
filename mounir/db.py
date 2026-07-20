@@ -111,6 +111,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             mcp_server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT,
             confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
             confirm_tools TEXT NOT NULL DEFAULT '["*"]',
+            dedupe_tools TEXT NOT NULL DEFAULT '[]',
             parent TEXT DEFAULT 'supervisor',
             created_at TEXT
         );
@@ -119,7 +120,30 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS profile_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            user_name TEXT NOT NULL,
+            assistant_name TEXT NOT NULL,
+            location TEXT NOT NULL,
+            preferred_language TEXT NOT NULL DEFAULT 'auto',
+            updated_at TEXT
+        );
         """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO profile_settings
+            (id, user_name, assistant_name, location, preferred_language, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?)
+        """,
+        (
+            cfg.DEFAULT_USER_NAME,
+            cfg.DEFAULT_ASSISTANT_NAME,
+            cfg.DEFAULT_LOCATION,
+            cfg.DEFAULT_LANGUAGE,
+            _now(),
+        ),
     )
     # CREATE TABLE does not add columns to an existing SQLite table. Keep the
     # migrations explicit so upgrading an earlier feature-branch DB works.
@@ -138,6 +162,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "icon_mime": "TEXT NOT NULL DEFAULT ''",
             "confirm_tool_calls": "INTEGER NOT NULL DEFAULT 1",
             "confirm_tools": "TEXT NOT NULL DEFAULT '[\"*\"]'",
+            "dedupe_tools": "TEXT NOT NULL DEFAULT '[]'",
         },
     }
     added_columns: set[tuple[str, str]] = set()
@@ -404,6 +429,7 @@ def _migrate_builtin_email(conn: sqlite3.Connection) -> None:
             model_id,
             server_id,
             confirm_tools=default_agents.EMAIL_CONFIRM_TOOLS,
+            dedupe_tools=default_agents.EMAIL_DEDUPE_TOOLS,
         )
 
     conn.execute(
@@ -523,6 +549,31 @@ def _migrate_server_metadata(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_action_deduplication(conn: sqlite3.Connection) -> None:
+    """Enable duplicate-send protection for an existing seeded Email agent."""
+    migration_key = "dynamic_action_deduplication_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
+    ).fetchone():
+        return
+    conn.execute(
+        """
+        UPDATE subagents SET dedupe_tools = ?
+        WHERE lower(name) = lower(?)
+          AND (dedupe_tools IS NULL OR trim(dedupe_tools) IN ('', '[]'))
+        """,
+        (
+            json.dumps(default_agents.EMAIL_DEDUPE_TOOLS),
+            default_agents.EMAIL_AGENT_NAME,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+        (migration_key, _now()),
+    )
+    conn.commit()
+
+
 def init() -> None:
     """Create tables and run one-time registry migrations."""
     with _connect() as conn:
@@ -531,6 +582,66 @@ def init() -> None:
         _migrate_builtin_email(conn)
         _migrate_builtin_researcher(conn)
         _migrate_server_metadata(conn)
+        _migrate_action_deduplication(conn)
+
+
+# -----------------------------------------------------------------------------
+# User profile
+# -----------------------------------------------------------------------------
+
+def get_profile() -> dict:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM profile_settings WHERE id = 1"
+        ).fetchone()
+        if row:
+            return dict(row)
+    return {
+        "id": 1,
+        "user_name": cfg.DEFAULT_USER_NAME,
+        "assistant_name": cfg.DEFAULT_ASSISTANT_NAME,
+        "location": cfg.DEFAULT_LOCATION,
+        "preferred_language": cfg.DEFAULT_LANGUAGE,
+        "updated_at": None,
+    }
+
+
+def _profile_text(value, field: str, max_length: int) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        raise ValueError(f"{field} is required")
+    if len(text) > max_length:
+        raise ValueError(f"{field} must be {max_length} characters or fewer")
+    return text
+
+
+def update_profile(**kwargs) -> dict:
+    allowed = {"user_name", "assistant_name", "location", "preferred_language"}
+    fields = {key: value for key, value in kwargs.items() if key in allowed}
+    if "user_name" in fields:
+        fields["user_name"] = _profile_text(fields["user_name"], "user name", 80)
+    if "assistant_name" in fields:
+        fields["assistant_name"] = _profile_text(
+            fields["assistant_name"], "assistant name", 80
+        )
+    if "location" in fields:
+        fields["location"] = _profile_text(fields["location"], "location", 160)
+    if "preferred_language" in fields:
+        language = str(fields["preferred_language"] or "").strip().lower()
+        if language not in {"auto", "en", "fr", "ar"}:
+            raise ValueError("preferred language is not supported")
+        fields["preferred_language"] = language
+    if not fields:
+        return get_profile()
+    fields["updated_at"] = _now()
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE profile_settings SET {sets} WHERE id = 1",
+            tuple(fields.values()),
+        )
+        conn.commit()
+    return get_profile()
 
 
 # -----------------------------------------------------------------------------
@@ -769,10 +880,12 @@ def _add_subagent(
     confirm_tools=None,
     icon_data: bytes = b"",
     icon_mime: str = "",
+    dedupe_tools=None,
 ) -> int:
     if confirm_tools is None:
         confirm_tools = ["*"] if _bool(confirm_tool_calls, "confirm_tool_calls") else []
     confirm_tools_json = _json_string_list(confirm_tools, "confirmation tools")
+    dedupe_tools_json = _json_string_list(dedupe_tools or [], "duplicate protection tools")
     has_confirmations = bool(json.loads(confirm_tools_json))
     try:
         cur = conn.execute(
@@ -780,8 +893,8 @@ def _add_subagent(
             INSERT INTO subagents
                 (name, description, system_prompt, icon_data, icon_mime,
                  model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
-                 parent, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 dedupe_tools, parent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
@@ -793,6 +906,7 @@ def _add_subagent(
                 int(mcp_server_id),
                 int(has_confirmations),
                 confirm_tools_json,
+                dedupe_tools_json,
                 (parent or "supervisor").strip() or "supervisor",
                 _now(),
             ),
@@ -814,11 +928,13 @@ def add_subagent(
     confirm_tools=None,
     icon_data: bytes = b"",
     icon_mime: str = "",
+    dedupe_tools=None,
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
             confirm_tool_calls, parent, confirm_tools, icon_data, icon_mime,
+            dedupe_tools,
         )
         return get_subagent(aid)
 
@@ -826,6 +942,7 @@ def add_subagent(
 _SUBAGENT_SELECT = """
     SELECT s.id, s.name, s.description, s.system_prompt,
            s.model_id, s.mcp_server_id, s.confirm_tool_calls, s.confirm_tools,
+           s.dedupe_tools,
            s.parent, s.created_at,
            CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
            m.name AS model_name, m.model, m.provider, m.base_url, m.api_key,
@@ -879,7 +996,7 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     allowed = {
         "name", "description", "system_prompt", "model_id",
         "mcp_server_id", "confirm_tool_calls", "confirm_tools", "parent",
-        "icon_data", "icon_mime",
+        "icon_data", "icon_mime", "dedupe_tools",
     }
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
@@ -901,6 +1018,10 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
         enabled = _bool(fields["confirm_tool_calls"], "confirm_tool_calls")
         fields["confirm_tool_calls"] = int(enabled)
         fields["confirm_tools"] = '["*"]' if enabled else "[]"
+    if "dedupe_tools" in fields:
+        fields["dedupe_tools"] = _json_string_list(
+            fields["dedupe_tools"], "duplicate protection tools"
+        )
     with _connect() as conn:
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
@@ -969,6 +1090,7 @@ def build_specs() -> list[dict]:
         specs.append(
             {
                 "id": s["id"],
+                "mcp_server_id": s["mcp_server_id"],
                 "name": s["name"],
                 "description": s.get("description") or f"Uses the {s['server_name']} MCP server.",
                 "prompt": s["system_prompt"],
@@ -991,6 +1113,12 @@ def build_specs() -> list[dict]:
                         if s.get("confirm_tools") is not None
                         else (["*"] if s.get("confirm_tool_calls", 1) else []),
                         "confirmation tools",
+                    )
+                ),
+                "dedupe_tools": json.loads(
+                    _json_string_list(
+                        s.get("dedupe_tools") or "[]",
+                        "duplicate protection tools",
                     )
                 ),
             }
