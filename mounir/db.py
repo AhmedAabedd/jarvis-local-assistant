@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config as cfg
+from . import config as cfg, default_agents
 
 DB_PATH: Path = cfg.DATA_DIR / "mounir.db"
 LEGACY_REGISTRY: Path = cfg.DATA_DIR / "mcp_agents.json"
@@ -100,8 +100,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             model_id INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
             mcp_server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT,
             confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
+            confirm_tools TEXT NOT NULL DEFAULT '["*"]',
             parent TEXT DEFAULT 'supervisor',
             created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
         """
     )
@@ -117,8 +123,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         "subagents": {
             "description": "TEXT NOT NULL DEFAULT ''",
             "confirm_tool_calls": "INTEGER NOT NULL DEFAULT 1",
+            "confirm_tools": "TEXT NOT NULL DEFAULT '[\"*\"]'",
         },
     }
+    added_columns: set[tuple[str, str]] = set()
     for table, columns in migrations.items():
         existing = {
             row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
@@ -126,6 +134,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         for column, definition in columns.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                added_columns.add((table, column))
     # Earlier versions inferred every URL as legacy SSE and had no transport
     # column. A URL cannot be a valid stdio command, so migrate it to the
     # current remote default; users can explicitly switch old servers to SSE.
@@ -139,6 +148,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "UPDATE models SET model = name WHERE model IS NULL OR trim(model) = ''"
+    )
+    confirmation_filter = (
+        "" if ("subagents", "confirm_tools") in added_columns
+        else "WHERE confirm_tools IS NULL OR trim(confirm_tools) = ''"
+    )
+    conn.execute(
+        f"""
+        UPDATE subagents
+        SET confirm_tools = CASE
+            WHEN confirm_tool_calls = 1 THEN '["*"]'
+            ELSE '[]'
+        END
+        {confirmation_filter}
+        """
     )
     # Normalize values accepted by the earlier UI: a full completions URL and
     # Ollama's native /api/chat URL were commonly pasted into "Base URL".
@@ -192,6 +215,27 @@ def _json_object(value, field: str) -> str:
         raise ValueError(f"{field} must be a JSON object.")
     normalized = {str(k): str(v) for k, v in parsed.items()}
     return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+
+def _json_string_list(value, field: str) -> str:
+    """Validate and canonicalize a JSON list of unique, non-empty strings."""
+    if value in (None, ""):
+        parsed = []
+    elif isinstance(value, (list, tuple, set)):
+        parsed = list(value)
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{field} must be a valid JSON list: {exc.msg}.") from exc
+    else:
+        raise ValueError(f"{field} must be a JSON list.")
+    if not isinstance(parsed, list):
+        raise ValueError(f"{field} must be a JSON list.")
+    normalized = list(dict.fromkeys(str(item).strip() for item in parsed if str(item).strip()))
+    if "*" in normalized and len(normalized) > 1:
+        raise ValueError(f"{field} cannot combine '*' with named tools.")
+    return json.dumps(normalized, ensure_ascii=False)
 
 
 def _bool(value, field: str) -> bool:
@@ -278,11 +322,87 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _unique_name(conn: sqlite3.Connection, table: str, preferred: str) -> str:
+    """Return a readable unused name for a seeded model or server."""
+    candidate = preferred
+    suffix = 2
+    while conn.execute(
+        f"SELECT 1 FROM {table} WHERE lower(name) = lower(?)", (candidate,)
+    ).fetchone():
+        candidate = f"{preferred} {suffix}"
+        suffix += 1
+    return candidate
+
+
+def _migrate_builtin_email(conn: sqlite3.Connection) -> None:
+    """Move the former hard-coded Gmail specialist into the dynamic registry once."""
+    migration_key = "builtin_email_to_dynamic_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
+    ).fetchone():
+        return
+
+    existing = conn.execute(
+        "SELECT 1 FROM subagents WHERE lower(name) = 'email'"
+    ).fetchone()
+    if not existing:
+        base_url = _normalize_model_base_url(default_agents.email_model_base_url())
+        model_row = conn.execute(
+            "SELECT id FROM models WHERE model = ? AND rtrim(base_url, '/') = ? LIMIT 1",
+            (default_agents.EMAIL_MODEL, base_url),
+        ).fetchone()
+        if model_row:
+            model_id = model_row["id"]
+        else:
+            model_id = _add_model(
+                conn,
+                _unique_name(conn, "models", default_agents.EMAIL_MODEL_NAME),
+                default_agents.EMAIL_MODEL,
+                "Ollama Cloud",
+                base_url,
+                cfg.OLLAMA_API_KEY,
+            )
+
+        server_row = conn.execute(
+            """
+            SELECT id FROM mcp_servers
+            WHERE transport = 'stdio' AND connection = ?
+            LIMIT 1
+            """,
+            (default_agents.EMAIL_SERVER_COMMAND,),
+        ).fetchone()
+        if server_row:
+            server_id = server_row["id"]
+        else:
+            server_id = _add_server(
+                conn,
+                _unique_name(conn, "mcp_servers", default_agents.EMAIL_SERVER_NAME),
+                default_agents.EMAIL_SERVER_COMMAND,
+            )
+
+        _add_subagent(
+            conn,
+            default_agents.EMAIL_AGENT_NAME,
+            default_agents.EMAIL_DESCRIPTION,
+            default_agents.EMAIL_SYSTEM_PROMPT,
+            model_id,
+            server_id,
+            confirm_tools=default_agents.EMAIL_CONFIRM_TOOLS,
+        )
+
+    conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+        (migration_key, _now()),
+    )
+    conn.commit()
+
+
 def init() -> None:
-    """Create tables and migrate legacy JSON once."""
+    """Create tables and run one-time registry migrations."""
     with _connect() as conn:
         _init_schema(conn)
         _migrate_legacy(conn)
+        _migrate_builtin_email(conn)
 
 
 # -----------------------------------------------------------------------------
@@ -509,14 +629,19 @@ def _add_subagent(
     mcp_server_id: int,
     confirm_tool_calls: bool = True,
     parent: str = "supervisor",
+    confirm_tools=None,
 ) -> int:
+    if confirm_tools is None:
+        confirm_tools = ["*"] if _bool(confirm_tool_calls, "confirm_tool_calls") else []
+    confirm_tools_json = _json_string_list(confirm_tools, "confirmation tools")
+    has_confirmations = bool(json.loads(confirm_tools_json))
     try:
         cur = conn.execute(
             """
             INSERT INTO subagents
                 (name, description, system_prompt, model_id, mcp_server_id,
-                 confirm_tool_calls, parent, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 confirm_tool_calls, confirm_tools, parent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
@@ -524,7 +649,8 @@ def _add_subagent(
                 (system_prompt or "").strip(),
                 int(model_id),
                 int(mcp_server_id),
-                int(_bool(confirm_tool_calls, "confirm_tool_calls")),
+                int(has_confirmations),
+                confirm_tools_json,
                 (parent or "supervisor").strip() or "supervisor",
                 _now(),
             ),
@@ -543,11 +669,12 @@ def add_subagent(
     mcp_server_id: int,
     confirm_tool_calls: bool = True,
     parent: str = "supervisor",
+    confirm_tools=None,
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
-            confirm_tool_calls, parent,
+            confirm_tool_calls, parent, confirm_tools,
         )
         return get_subagent(aid)
 
@@ -591,7 +718,7 @@ def list_subagents() -> list[dict]:
 def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     allowed = {
         "name", "description", "system_prompt", "model_id",
-        "mcp_server_id", "confirm_tool_calls", "parent",
+        "mcp_server_id", "confirm_tool_calls", "confirm_tools", "parent",
     }
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
@@ -600,10 +727,15 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
         fields["name"] = _required(fields["name"], "name")
     if "description" in fields:
         fields["description"] = _required(fields["description"], "description")
-    if "confirm_tool_calls" in fields:
-        fields["confirm_tool_calls"] = int(
-            _bool(fields["confirm_tool_calls"], "confirm_tool_calls")
+    if "confirm_tools" in fields:
+        fields["confirm_tools"] = _json_string_list(
+            fields["confirm_tools"], "confirmation tools"
         )
+        fields["confirm_tool_calls"] = int(bool(json.loads(fields["confirm_tools"])))
+    elif "confirm_tool_calls" in fields:
+        enabled = _bool(fields["confirm_tool_calls"], "confirm_tool_calls")
+        fields["confirm_tool_calls"] = int(enabled)
+        fields["confirm_tools"] = '["*"]' if enabled else "[]"
     with _connect() as conn:
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
@@ -632,7 +764,12 @@ def _resolve_key(key: str) -> str:
     """Expand $VAR / ${VAR} references from the environment."""
     if not key:
         return ""
-    return os.path.expandvars(key)
+    expanded = os.path.expandvars(key)
+    # os.path.expandvars leaves an unknown $NAME untouched. Treat that as an
+    # unset optional key instead of sending the literal "$NAME" as a secret.
+    if expanded == key and key.strip().startswith("$"):
+        return ""
+    return expanded
 
 
 def _resolved_json_object(value: str) -> dict[str, str]:
@@ -683,7 +820,14 @@ def build_specs() -> list[dict]:
                 "base_url": s["base_url"],
                 "api_key": _resolve_key(s.get("api_key") or ""),
 
-                "confirm_tools": ["*"] if s.get("confirm_tool_calls", 1) else [],
+                "confirm_tools": json.loads(
+                    _json_string_list(
+                        s.get("confirm_tools")
+                        if s.get("confirm_tools") is not None
+                        else (["*"] if s.get("confirm_tool_calls", 1) else []),
+                        "confirmation tools",
+                    )
+                ),
             }
         )
     return specs

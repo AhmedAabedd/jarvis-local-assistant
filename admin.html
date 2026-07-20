@@ -302,6 +302,16 @@
   }
   .credential-add { align-self: flex-start; padding: 7px 12px; }
   .credential-empty { color: var(--text-dim); font-size: 11px; }
+  .gmail-setup {
+    grid-column: 1 / -1; border-color: rgba(168,85,247,.3);
+    background: linear-gradient(135deg, rgba(168,85,247,.08), var(--bg));
+  }
+  .gmail-setup-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .gmail-status { font-size: 11px; color: var(--text-mid); }
+  .gmail-status.ok { color: var(--ok); }
+  .gmail-status.error { color: var(--danger); }
+  .gmail-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .gmail-file { display: none; }
 
   .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
 
@@ -479,6 +489,15 @@ function parseObject(value) {
     const parsed = JSON.parse(value);
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch (_) { return {}; }
+}
+
+function parseStringList(value, fallback = []) {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (!value) return fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : fallback;
+  } catch (_) { return fallback; }
 }
 
 function credentialRowsHtml(entries, readonly) {
@@ -779,6 +798,9 @@ function buildFormHtml(item, readonly) {
     const environment = parseObject(item?.env);
     const auth = remoteAuthFromHeaders(headers);
     const disabled = readonly ? ' disabled' : '';
+    const isGmail = Boolean(
+      item?.id && String(item.connection || '').includes('@gongrzhe/server-gmail-autoauth-mcp')
+    );
     return `
     <form class="form-grid" id="formEl">
       <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="e.g. Company Search" required${ro}></label>
@@ -824,10 +846,35 @@ function buildFormHtml(item, readonly) {
           <button type="button" class="btn outline credential-add" data-add-credential="headers"${disabled}>+ Add header</button>
         </div>
       </div>
+      ${isGmail ? `
+      <div class="credential-box gmail-setup" id="gmailSetup" data-server-id="${item.id}">
+        <div class="gmail-setup-head">
+          <div>
+            <div class="credential-title">Gmail account</div>
+            <div class="hint" id="gmailHint">Connect Gmail through Google's browser authorization. Your OAuth files stay on this computer.</div>
+          </div>
+          <div class="gmail-status" id="gmailStatus">Checking…</div>
+        </div>
+        <div class="gmail-actions">
+          <input class="gmail-file" type="file" id="gmailOauthFile" accept="application/json,.json">
+          <button type="button" class="btn outline" id="gmailChooseKeys">Choose Google OAuth file</button>
+          <button type="button" class="btn primary" id="gmailConnect">Connect Gmail</button>
+        </div>
+      </div>` : ''}
       <div class="full success" id="testResult"></div>
       <div class="full error" id="formError"></div>
     </form>`;
   }
+  const confirmationTools = parseStringList(
+    item?.confirm_tools,
+    !item || item.confirm_tool_calls ? ['*'] : []
+  );
+  const confirmationMode = confirmationTools.includes('*')
+    ? 'all'
+    : confirmationTools.length ? 'selected' : 'none';
+  const selectedConfirmationTools = confirmationMode === 'selected'
+    ? confirmationTools.join(', ')
+    : '';
   return `
     <form class="form-grid" id="formEl">
       <label class="full">Name
@@ -844,11 +891,16 @@ function buildFormHtml(item, readonly) {
       <label>Model <select name="model_id" required${dis}></select></label>
       <label>MCP server <select name="mcp_server_id" required${dis}></select></label>
       <label class="full">Tool confirmation
-        <span class="hint">Unknown MCP servers can perform real actions. Confirmation is safest and is the default.</span>
-        <select name="confirm_tool_calls"${dis}>
-          <option value="true"${!item || item.confirm_tool_calls ? ' selected' : ''}>Ask before every MCP tool call</option>
-          <option value="false"${item && !item.confirm_tool_calls ? ' selected' : ''}>Allow tool calls without asking</option>
+        <span class="hint">Control which MCP actions need your approval before they run.</span>
+        <select name="confirmation_mode" id="confirmationMode"${dis}>
+          <option value="all"${confirmationMode === 'all' ? ' selected' : ''}>Ask before every MCP tool call</option>
+          <option value="selected"${confirmationMode === 'selected' ? ' selected' : ''}>Ask only for selected tools</option>
+          <option value="none"${confirmationMode === 'none' ? ' selected' : ''}>Allow tool calls without asking</option>
         </select>
+      </label>
+      <label class="full" id="confirmationToolsField">Tools requiring confirmation
+        <span class="hint">Enter the exact MCP tool names, separated by commas. Example: send_email, delete_email</span>
+        <textarea id="confirmationTools" rows="2" placeholder="send_email, delete_email"${ro}>${esc(selectedConfirmationTools)}</textarea>
       </label>
       <div class="full error" id="formError"></div>
     </form>`;
@@ -894,6 +946,93 @@ function updateRemoteAuthVisibility() {
   $('customHeaderFields').style.display = mode === 'custom' ? '' : 'none';
 }
 
+function updateConfirmationVisibility() {
+  const mode = $('confirmationMode')?.value;
+  if (!mode) return;
+  $('confirmationToolsField').style.display = mode === 'selected' ? '' : 'none';
+}
+
+function showGmailStatus(message, kind = '') {
+  const status = $('gmailStatus');
+  if (!status) return;
+  status.textContent = message;
+  status.className = `gmail-status ${kind}`.trim();
+}
+
+async function loadGmailStatus() {
+  const setup = $('gmailSetup');
+  if (!setup) return;
+  try {
+    const status = await api('GET', `/api/mcp-servers/${setup.dataset.serverId}/gmail-auth`);
+    $('gmailChooseKeys').textContent = status.oauth_keys ? 'Replace OAuth file' : 'Choose Google OAuth file';
+    $('gmailConnect').disabled = !status.oauth_keys;
+    $('gmailConnect').textContent = status.credentials_saved ? 'Reconnect Gmail' : 'Connect Gmail';
+    if (status.expired) {
+      showGmailStatus('Authorization expired', 'error');
+      $('gmailHint').textContent = status.refresh_lifetime_days === 7
+        ? 'This Google authorization expired after 7 days. Reconnect now. To prevent this, change the OAuth app publishing status from Testing to In production.'
+        : 'The saved Google authorization expired. Reconnect Gmail to continue.';
+    } else if (status.invalid) {
+      showGmailStatus('Authorization is invalid', 'error');
+      $('gmailHint').textContent = 'The saved authorization is incomplete or damaged. Reconnect Gmail to replace it.';
+    } else if (status.oauth_file_changed) {
+      showGmailStatus('Reconnection required');
+      $('gmailHint').textContent = 'The Google OAuth file changed. Reconnect Gmail to authorize this client.';
+    } else if (status.connected) {
+      showGmailStatus('Ready', 'ok');
+      $('gmailHint').textContent = 'Authorization is saved locally. You can reconnect anytime if Google expires or revokes it.';
+    } else if (status.oauth_keys) {
+      showGmailStatus('Ready to connect');
+    } else {
+      showGmailStatus('OAuth file required');
+    }
+  } catch (error) {
+    showGmailStatus(error.message, 'error');
+  }
+}
+
+function attachGmailSetupEvents() {
+  const setup = $('gmailSetup');
+  if (!setup) return;
+  const serverId = setup.dataset.serverId;
+  $('gmailChooseKeys').addEventListener('click', () => $('gmailOauthFile').click());
+  $('gmailOauthFile').addEventListener('change', async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    const body = new FormData();
+    body.append('file', file);
+    showGmailStatus('Uploading…');
+    try {
+      const response = await fetch(`/api/mcp-servers/${serverId}/gmail-auth/keys`, {
+        method: 'POST', body,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || 'OAuth upload failed.');
+      await loadGmailStatus();
+    } catch (error) {
+      showGmailStatus(error.message, 'error');
+    } finally {
+      event.target.value = '';
+    }
+  });
+  $('gmailConnect').addEventListener('click', async () => {
+    const button = $('gmailConnect');
+    const idleLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Waiting for browser…';
+    showGmailStatus('Complete authorization in the browser…');
+    try {
+      await api('POST', `/api/mcp-servers/${serverId}/gmail-auth/connect?force=true`);
+      await loadGmailStatus();
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = idleLabel;
+      showGmailStatus(error.message, 'error');
+    }
+  });
+  loadGmailStatus();
+}
+
 function addCredentialRow(kind) {
   const container = kind === 'headers' ? $('headerRows') : $('environmentRows');
   container.querySelector('.credential-empty')?.remove();
@@ -919,6 +1058,11 @@ function attachFormEvents() {
   const f = $('formEl');
   if (!f) return;
   f.addEventListener('submit', onFormSubmit);
+  if (S.tab === 'agents') {
+    $('confirmationMode').addEventListener('change', updateConfirmationVisibility);
+    updateConfirmationVisibility();
+    return;
+  }
   if (S.tab !== 'servers') return;
   $('serverTransport').addEventListener('change', updateServerFormVisibility);
   $('remoteAuthMode').addEventListener('change', updateRemoteAuthVisibility);
@@ -935,6 +1079,7 @@ function attachFormEvents() {
     }
   });
   updateServerFormVisibility();
+  attachGmailSetupEvents();
 }
 
 /* ========== form submit ========== */
@@ -949,7 +1094,23 @@ async function onFormSubmit(e) {
   if (S.tab === 'agents') {
     body.model_id = +body.model_id;
     body.mcp_server_id = +body.mcp_server_id;
-    body.confirm_tool_calls = body.confirm_tool_calls === 'true';
+    const mode = body.confirmation_mode;
+    delete body.confirmation_mode;
+    if (mode === 'all') {
+      body.confirm_tools = ['*'];
+    } else if (mode === 'selected') {
+      body.confirm_tools = $('confirmationTools').value
+        .split(/[\n,]/)
+        .map(name => name.trim())
+        .filter(Boolean);
+      if (!body.confirm_tools.length) {
+        errEl.textContent = 'Add at least one tool that requires confirmation.';
+        return;
+      }
+    } else {
+      body.confirm_tools = [];
+    }
+    body.confirm_tool_calls = body.confirm_tools.length > 0;
   }
   try {
     if (S.tab === 'servers') {

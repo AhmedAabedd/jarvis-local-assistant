@@ -1,14 +1,12 @@
 """Generic MCP specialist — one dynamic subagent instance per registry entry.
 
-Same shape as the email agent (Mounir's hand-tuned MCP specialist): connect to
-the configured server for the task, adopt whatever tools it advertises as OpenAI
+Connect to the configured server for the task, adopt whatever tools it advertises as OpenAI
 schemas, loop with the LLM until it reports, and return ONLY the short report.
 The server's tool schemas and raw results never leave this module — the parent
 just sees its delegate tool and the report.
 
-What the email agent hardcodes, this module takes from the registry spec:
-the server command, the system prompt, the LLM endpoint, the extra env, and
-which tools need the user's confirmation.
+The server command, system prompt, LLM endpoint, extra environment, and tools
+requiring confirmation all come from the registry spec.
 """
 
 from __future__ import annotations

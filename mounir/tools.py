@@ -46,12 +46,6 @@ def delegate_to_system(task: str) -> str:
     return run(task)
 
 
-def delegate_to_email(task: str) -> str:
-    """Hand a Gmail task to the email agent (MCP-backed); returns its report."""
-    from .specialists.email import run
-    return run(task)
-
-
 # The supervisor runs on a small, local model with a modest context window, and
 # reads files only incidentally (a note, a config, a path the user mentions) —
 # heavy code reading is the coder's job. So keep a read to a quick glance the
@@ -704,33 +698,6 @@ SCHEMAS += [
     {
         "type": "function",
         "function": {
-            "name": "delegate_to_email",
-            "description": (
-                "Delegate ANYTHING about Ahmed's Gmail to the email agent: "
-                "search or read emails (full Gmail query power — sender, "
-                "subject, unread, dates, attachments), send or reply, drafts, "
-                "labels, mark read/unread, delete. It acts on the real mailbox "
-                "via the Gmail API and asks the user to confirm by itself "
-                "before sending or deleting. When sending to a person named by "
-                "name, resolve the real address from the contacts file first "
-                "and put it in the task. Describe the outcome you want; it "
-                "returns a short report."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The email task, e.g. 'find unread from LinkedIn this week and summarize', 'send <text> to sami@x.com with subject Y'.",
-                    },
-                },
-                "required": ["task"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "delegate_to_media",
             "description": (
                 "Delegate ANYTHING that needs reading media to the media agent: "
@@ -768,7 +735,6 @@ _REGISTRY = {
     "delegate_to_media": delegate_to_media,
     "delegate_to_knowledge": delegate_to_knowledge,
     "delegate_to_system": delegate_to_system,
-    "delegate_to_email": delegate_to_email,
 }
 
 

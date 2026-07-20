@@ -9,7 +9,7 @@ the keyboard backlight, MPRIS D-Bus for media players (the same protocol
 playerctl wraps), nmcli/rfkill for radios — so there is nothing to install.
 
 Destructive actions are gated: suspend asks the user for confirmation through
-the same confirm flow the email tools use, so it works from the terminal and
+the same shared confirmation flow MCP tools use, so it works from the terminal and
 the Telegram bridge alike.
 """
 

@@ -45,8 +45,7 @@ SYSTEM_PROMPT: str = (
     "delegate_to_media (reading images, PDFs, audio, and video), "
     "delegate_to_knowledge (saving/updating/deleting long-term knowledge), "
     "delegate_to_system (volume, brightness, media playback, battery, Wi-Fi, "
-    "lock/suspend — anything about this laptop's hardware), and "
-    "delegate_to_email (ALL email: search, read, send, reply, labels, drafts). "
+    "lock/suspend — anything about this laptop's hardware). "
     "You have NO web search of your own.\n\n"
     "HARD RULES:\n"
     "1. Never claim you did something unless you actually called the tool THIS "
@@ -117,7 +116,7 @@ VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
 
 # Mounir's "knowledge" folder: plain files the assistant reads for context.
 # contacts.md is the address book — the model reads it to turn a spoken name
-# into the real address before delegating a send to the email agent (so a
+# into the real address before delegating a send to a mail agent (so a
 # misheard name can't reach the mailbox).
 KNOWLEDGE_DIR: Path = Path(
     os.environ.get("MOUNIR_KNOWLEDGE_DIR", Path(__file__).resolve().parent.parent / "knowledge")
@@ -221,18 +220,6 @@ OLLAMA_CLOUD_BASE_URL: str = os.environ.get(
     "OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"
 )
 RESEARCHER_MODEL: str = os.environ.get("RESEARCHER_MODEL", "nemotron-3-super:cloud")
-
-
-# --- Email specialist (Gmail via MCP) -----------------------------------------
-# The email agent spawns this MCP server over stdio for each task and uses
-# whatever tools the server advertises — no hand-written Gmail schemas.
-# One-time OAuth setup: see specialists/email.py run() for the exact steps.
-GMAIL_MCP_COMMAND: str = os.environ.get(
-    "GMAIL_MCP_COMMAND", "npx -y @gongrzhe/server-gmail-autoauth-mcp"
-)
-# ~15 tool schemas per call needs a solid tool-caller. On Ollama Cloud like
-# the researcher: gpt-oss answers in ~1-2s (NVIDIA's 49b queued 7-22s/call).
-EMAIL_MODEL: str = os.environ.get("EMAIL_MODEL", "gpt-oss:120b-cloud")
 
 
 # --- Cloud text-to-speech (Google Cloud TTS) --------------------------------

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import stat
@@ -14,8 +15,8 @@ from unittest.mock import patch
 _IMPORT_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["MOUNIR_DATA_DIR"] = _IMPORT_DATA_DIR.name
 
-from mounir import db, mcp_agents
-from mounir.specialists.mcp_agent import _mcp_session, discover_tools
+from mounir import db, mcp_agents, tools as mounir_tools
+from mounir.specialists.mcp_agent import _call, _mcp_session, discover_tools
 
 
 class TemporaryDatabaseTest(unittest.TestCase):
@@ -48,12 +49,17 @@ class DatabaseTests(TemporaryDatabaseTest):
                 CREATE TABLE subagents (
                     id INTEGER PRIMARY KEY, name TEXT UNIQUE,
                     system_prompt TEXT NOT NULL, model_id INTEGER NOT NULL,
-                    mcp_server_id INTEGER NOT NULL, parent TEXT, created_at TEXT
+                    mcp_server_id INTEGER NOT NULL,
+                    confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
+                    parent TEXT, created_at TEXT
                 );
                 INSERT INTO mcp_servers (id, name, connection)
                 VALUES (1, 'Old remote', 'https://example.test/mcp');
                 INSERT INTO models (id, name, base_url)
                 VALUES (1, 'qwen3:4b', 'http://localhost:11434/api/chat');
+                INSERT INTO subagents
+                    (id, name, system_prompt, model_id, mcp_server_id, confirm_tool_calls)
+                VALUES (1, 'Old helper', '', 1, 1, 0);
                 """
             )
 
@@ -67,10 +73,11 @@ class DatabaseTests(TemporaryDatabaseTest):
                 row["name"] for row in conn.execute("PRAGMA table_info(subagents)")
             }
         self.assertTrue({"transport", "headers", "env"} <= server_columns)
-        self.assertTrue({"description", "confirm_tool_calls"} <= agent_columns)
+        self.assertTrue({"description", "confirm_tool_calls", "confirm_tools"} <= agent_columns)
         self.assertEqual(db.get_server(1)["transport"], "streamable_http")
         self.assertEqual(db.get_model(1)["model"], "qwen3:4b")
         self.assertEqual(db.get_model(1)["base_url"], "http://localhost:11434/v1")
+        self.assertEqual(json.loads(db.get_subagent(1)["confirm_tools"]), [])
         self.assertEqual(stat.S_IMODE(db.DB_PATH.stat().st_mode), 0o600)
 
     def test_resolved_spec_preserves_transport_model_and_permissions(self):
@@ -93,14 +100,38 @@ class DatabaseTests(TemporaryDatabaseTest):
             "",
             model["id"],
             server["id"],
+            confirm_tools=["dangerous_action"],
         )
 
-        spec = db.build_specs()[0]
+        spec = next(item for item in db.build_specs() if item["name"] == "Remote helper")
         self.assertEqual(spec["model"], "qwen3:4b")
         self.assertEqual(spec["transport"], "streamable_http")
         self.assertEqual(spec["headers"]["Authorization"], "Bearer secret-token")
-        self.assertEqual(spec["confirm_tools"], ["*"])
+        self.assertEqual(spec["confirm_tools"], ["dangerous_action"])
         self.assertEqual(agent["confirm_tool_calls"], 1)
+        self.assertEqual(agent["confirm_tools"], '["dangerous_action"]')
+
+    def test_builtin_email_is_migrated_once_to_dynamic_registry(self):
+        db.init()
+        email = db.get_subagent_by_name("Email")
+        self.assertIsNotNone(email)
+        self.assertEqual(email["server_name"], "Gmail MCP")
+        self.assertEqual(
+            json.loads(email["confirm_tools"]),
+            ["send_email", "delete_email", "batch_delete_emails"],
+        )
+        email_spec = next(spec for spec in db.build_specs() if spec["name"] == "Email")
+        self.assertEqual(
+            mcp_agents.delegate_schema(email_spec)["function"]["name"],
+            "delegate_to_email",
+        )
+        builtin_names = {
+            schema["function"]["name"] for schema in mounir_tools.SCHEMAS
+        }
+        self.assertNotIn("delegate_to_email", builtin_names)
+        self.assertTrue(db.delete_subagent(email["id"]))
+        db.init()
+        self.assertIsNone(db.get_subagent_by_name("Email"))
 
     def test_foreign_keys_prevent_deleting_in_use_presets(self):
         db.init()
@@ -146,6 +177,29 @@ class DatabaseTests(TemporaryDatabaseTest):
 
 
 class TransportTests(unittest.TestCase):
+    def test_only_selected_tools_require_confirmation(self):
+        calls = []
+
+        class Session:
+            async def call_tool(self, name, args):
+                calls.append((name, args))
+                return type("Result", (), {"content": [], "isError": False})()
+
+        async def immediate_thread_call(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with (
+            patch("asyncio.to_thread", immediate_thread_call),
+            patch("mounir.tools.confirm_fn", return_value=False) as confirm,
+        ):
+            declined = asyncio.run(_call(Session(), "send_email", {"to": "x"}, {"send_email"}))
+            allowed = asyncio.run(_call(Session(), "search_emails", {"q": "x"}, {"send_email"}))
+
+        self.assertIn("declined", declined.lower())
+        self.assertEqual(allowed, "(empty result)")
+        confirm.assert_called_once()
+        self.assertEqual(calls, [("search_emails", {"q": "x"})])
+
     def test_stdio_server_initializes_and_advertises_tools(self):
         fixture = Path(__file__).parent / "fixtures" / "echo_mcp_server.py"
         tools = asyncio.run(
@@ -231,6 +285,9 @@ class AdminApiTests(TemporaryDatabaseTest):
         import server as web_server
 
         db.init()
+        web_server.GMAIL_AUTH_DIR = Path(self.temp_dir.name) / ".gmail-mcp"
+        web_server.GMAIL_OAUTH_KEYS = web_server.GMAIL_AUTH_DIR / "gcp-oauth.keys.json"
+        web_server.GMAIL_CREDENTIALS = web_server.GMAIL_AUTH_DIR / "credentials.json"
         fixture = Path(__file__).parent / "fixtures" / "echo_mcp_server.py"
 
         async def exercise_api():
@@ -238,6 +295,80 @@ class AdminApiTests(TemporaryDatabaseTest):
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://localhost"
             ) as client:
+                gmail = db.get_subagent_by_name("Email")
+                gmail_status = await client.get(
+                    f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth"
+                )
+                self.assertFalse(gmail_status.json()["oauth_keys"])
+                self.assertFalse(gmail_status.json()["credentials_saved"])
+                self.assertFalse(gmail_status.json()["connected"])
+                oauth_upload = await client.post(
+                    f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth/keys",
+                    files={
+                        "file": (
+                            "oauth.json",
+                            json.dumps(
+                                {
+                                    "installed": {
+                                        "client_id": "test-client",
+                                        "client_secret": "test-secret",
+                                    }
+                                }
+                            ),
+                            "application/json",
+                        )
+                    },
+                )
+                self.assertEqual(oauth_upload.status_code, 200)
+                self.assertTrue(web_server.GMAIL_OAUTH_KEYS.exists())
+
+                class FakeAuthProcess:
+                    returncode = 0
+
+                    async def communicate(self):
+                        web_server.GMAIL_CREDENTIALS.write_text(
+                            json.dumps({"refresh_token": "test-refresh-token"})
+                        )
+                        return b"connected", b""
+
+                async def fake_auth_process(*args, **kwargs):
+                    return FakeAuthProcess()
+
+                with patch("asyncio.create_subprocess_exec", fake_auth_process):
+                    gmail_connect = await client.post(
+                        f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth/connect"
+                    )
+                self.assertEqual(gmail_connect.status_code, 200)
+                self.assertTrue(gmail_connect.json()["connected"])
+                self.assertEqual(
+                    stat.S_IMODE(web_server.GMAIL_CREDENTIALS.stat().st_mode), 0o600
+                )
+
+                web_server.GMAIL_CREDENTIALS.write_text(
+                    json.dumps(
+                        {
+                            "refresh_token": "expired-test-token",
+                            "refresh_token_expires_in": 1,
+                        }
+                    )
+                )
+                expired_time = web_server.GMAIL_CREDENTIALS.stat().st_mtime - 10
+                os.utime(
+                    web_server.GMAIL_CREDENTIALS,
+                    (expired_time, expired_time),
+                )
+                expired_status = await client.get(
+                    f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth"
+                )
+                self.assertTrue(expired_status.json()["expired"])
+                self.assertFalse(expired_status.json()["connected"])
+
+                with patch("asyncio.create_subprocess_exec", fake_auth_process):
+                    gmail_reconnect = await client.post(
+                        f"/api/mcp-servers/{gmail['mcp_server_id']}/gmail-auth/connect?force=true"
+                    )
+                self.assertEqual(gmail_reconnect.status_code, 200)
+                self.assertTrue(gmail_reconnect.json()["connected"])
                 model_response = await client.post(
                     "/api/models",
                     json={
@@ -273,10 +404,11 @@ class AdminApiTests(TemporaryDatabaseTest):
                         "system_prompt": "",
                         "model_id": model_response.json()["id"],
                         "mcp_server_id": server_response.json()["id"],
-                        "confirm_tool_calls": True,
+                        "confirm_tools": ["echo"],
                     },
                 )
                 self.assertEqual(agent_response.status_code, 200)
+                self.assertEqual(json.loads(agent_response.json()["confirm_tools"]), ["echo"])
                 test_response = await client.post(
                     f"/api/mcp-servers/{server_response.json()['id']}/test"
                 )
@@ -289,7 +421,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(overview_response.status_code, 200)
                 overview = overview_response.json()
                 self.assertEqual(overview["supervisor"]["name"], "Mounir")
-                self.assertEqual(len(overview["builtins"]), 5)
+                self.assertEqual(len(overview["builtins"]), 4)
                 self.assertTrue(overview["supervisor"]["model"])
 
                 web_server.agent.conversation.reset()

@@ -44,7 +44,7 @@ def node_name(name: str) -> str:
 
 # Names a dynamic agent may not take: the built-in graph nodes and their
 # delegate tools are already wired by hand.
-_RESERVED = {"supervisor", "coder", "researcher", "media", "knowledge", "system", "email"}
+_RESERVED = {"supervisor", "coder", "researcher", "media", "knowledge", "system"}
 
 
 def _validate_agent_name(name: str, *, exclude_id: int | None = None) -> None:
@@ -196,6 +196,11 @@ def _agents_cmd(args):
             args.server_id,
             confirm_tool_calls=args.confirm_tool_calls is not False,
             parent="supervisor",
+            confirm_tools=(
+                [name.strip() for name in args.confirm_tools.split(",") if name.strip()]
+                if args.confirm_tools is not None
+                else None
+            ),
         )
         print(f"Added agent {a['id']}: {a['name']} ({delegate_tool_name(a['name'])})")
     elif args.action == "update":
@@ -215,6 +220,10 @@ def _agents_cmd(args):
             fields["mcp_server_id"] = args.server_id
         if args.confirm_tool_calls is not None:
             fields["confirm_tool_calls"] = args.confirm_tool_calls
+        if args.confirm_tools is not None:
+            fields["confirm_tools"] = [
+                name.strip() for name in args.confirm_tools.split(",") if name.strip()
+            ]
         a = db.update_subagent(args.id, **fields)
         print(f"Updated agent {a['id']}: {a['name']}" if a else "Agent not found.")
     elif args.action == "remove":
@@ -281,6 +290,10 @@ def _main() -> int:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Require confirmation before every MCP tool call (default on add).",
+    )
+    p_ag.add_argument(
+        "--confirm-tools",
+        help="Comma-separated MCP tool names that require confirmation; overrides --confirm-tool-calls.",
     )
     p_ag.set_defaults(func=_agents_cmd)
 

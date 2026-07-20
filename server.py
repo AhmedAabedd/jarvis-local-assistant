@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import os
+import shlex
 import threading
 import time
 import uuid
@@ -55,6 +57,25 @@ ALLOWED_ORIGINS = {
     ).split(",")
     if origin.strip()
 }
+GMAIL_AUTH_DIR = Path.home() / ".gmail-mcp"
+GMAIL_OAUTH_KEYS = GMAIL_AUTH_DIR / "gcp-oauth.keys.json"
+GMAIL_CREDENTIALS = GMAIL_AUTH_DIR / "credentials.json"
+
+
+def _secure_gmail_auth_files() -> None:
+    """Keep Google OAuth material private even if an older setup wrote it loosely."""
+    try:
+        if GMAIL_AUTH_DIR.exists():
+            GMAIL_AUTH_DIR.chmod(0o700)
+        for path in (GMAIL_OAUTH_KEYS, GMAIL_CREDENTIALS):
+            if path.exists():
+                path.chmod(0o600)
+    except OSError:
+        # Status/connect endpoints will still report the underlying file error.
+        pass
+
+
+_secure_gmail_auth_files()
 
 app = FastAPI(title="Mounir")
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
@@ -67,7 +88,7 @@ agent = Agent()
 _agent_lock = threading.Lock()
 
 # --- in-browser tool confirmation -------------------------------------------
-# Tools like bash and the email agent's send gate on tools.confirm_fn. By
+# Tools like bash and selected dynamic MCP actions gate on tools.confirm_fn. By
 # default that prompts on the SERVER's terminal, which is useless from the web
 # UI. We redirect it here: send the action to the open browser over the chat
 # WebSocket and block the worker thread until the user clicks Confirm/Cancel.
@@ -333,12 +354,6 @@ async def agent_overview():
                 "provider": "NVIDIA",
                 "description": "Computer and hardware controls",
             },
-            {
-                "name": "Email",
-                "model": cfg.EMAIL_MODEL,
-                "provider": "Ollama Cloud",
-                "description": "Email through Gmail MCP",
-            },
         ],
     }
 
@@ -428,6 +443,153 @@ async def test_server(server_id: int):
     return {"ok": True, "tools": tools_found}
 
 
+def _is_gmail_server(server: dict | None) -> bool:
+    return bool(
+        server
+        and "@gongrzhe/server-gmail-autoauth-mcp" in server.get("connection", "")
+    )
+
+
+def _gmail_auth_state() -> dict:
+    """Describe saved OAuth state without exposing any token or client value."""
+    oauth_keys = GMAIL_OAUTH_KEYS.exists()
+    credentials_saved = GMAIL_CREDENTIALS.exists()
+    expired = False
+    invalid = False
+    oauth_file_changed = False
+    refresh_expires_at = None
+    refresh_lifetime_days = None
+
+    if credentials_saved:
+        try:
+            credentials = json.loads(GMAIL_CREDENTIALS.read_text(encoding="utf-8"))
+            if not isinstance(credentials, dict) or not credentials.get("refresh_token"):
+                invalid = True
+            lifetime = credentials.get("refresh_token_expires_in")
+            if isinstance(lifetime, (int, float)) and lifetime > 0:
+                refresh_lifetime_days = round(float(lifetime) / 86_400)
+                refresh_expires_at = GMAIL_CREDENTIALS.stat().st_mtime + float(lifetime)
+                expired = time.time() >= refresh_expires_at
+            if oauth_keys:
+                oauth_file_changed = (
+                    GMAIL_OAUTH_KEYS.stat().st_mtime
+                    > GMAIL_CREDENTIALS.stat().st_mtime + 1
+                )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            invalid = True
+
+    connected = bool(
+        oauth_keys
+        and credentials_saved
+        and not expired
+        and not invalid
+        and not oauth_file_changed
+    )
+    return {
+        "oauth_keys": oauth_keys,
+        "credentials_saved": credentials_saved,
+        "connected": connected,
+        "expired": expired,
+        "invalid": invalid,
+        "oauth_file_changed": oauth_file_changed,
+        "refresh_expires_at": refresh_expires_at,
+        "refresh_lifetime_days": refresh_lifetime_days,
+    }
+
+
+@app.get("/api/mcp-servers/{server_id}/gmail-auth")
+async def gmail_auth_status(server_id: int):
+    server = db.get_server(server_id)
+    if not _is_gmail_server(server):
+        return JSONResponse({"error": "This is not the Gmail MCP server."}, status_code=404)
+    return _gmail_auth_state()
+
+
+@app.post("/api/mcp-servers/{server_id}/gmail-auth/keys")
+async def upload_gmail_oauth_keys(server_id: int, file: UploadFile = File(...)):
+    server = db.get_server(server_id)
+    if not _is_gmail_server(server):
+        return JSONResponse({"error": "This is not the Gmail MCP server."}, status_code=404)
+    raw = await file.read(65_537)
+    if len(raw) > 65_536:
+        return JSONResponse({"error": "OAuth key file is too large."}, status_code=400)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+        oauth = payload.get("installed") or payload.get("web")
+        if (
+            not isinstance(oauth, dict)
+            or not oauth.get("client_id")
+            or not oauth.get("client_secret")
+        ):
+            raise ValueError
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, AttributeError):
+        return JSONResponse(
+            {"error": "Choose the OAuth client JSON downloaded from Google Cloud."},
+            status_code=400,
+        )
+    GMAIL_AUTH_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    GMAIL_OAUTH_KEYS.write_bytes(raw)
+    _secure_gmail_auth_files()
+    return {"ok": True, **_gmail_auth_state()}
+
+
+@app.post("/api/mcp-servers/{server_id}/gmail-auth/connect")
+async def connect_gmail(server_id: int, force: bool = False):
+    spec = db.build_server_spec(server_id)
+    server = db.get_server(server_id)
+    if not _is_gmail_server(server) or spec is None:
+        return JSONResponse({"error": "This is not the Gmail MCP server."}, status_code=404)
+    if not GMAIL_OAUTH_KEYS.exists():
+        return JSONResponse(
+            {"error": "Upload the Google OAuth client JSON first."}, status_code=400
+        )
+    auth_state = _gmail_auth_state()
+    if auth_state["connected"] and not force:
+        return {"ok": True, **auth_state}
+
+    argv = shlex.split(spec["connection"])
+    if not argv:
+        return JSONResponse({"error": "The Gmail server command is empty."}, status_code=400)
+    env = os.environ.copy()
+    env.update(spec.get("env") or {})
+    _secure_gmail_auth_files()
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            "auth",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+    except TimeoutError:
+        process.terminate()
+        await process.wait()
+        return JSONResponse(
+            {"error": "Gmail connection timed out before authorization completed."},
+            status_code=504,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Could not start Gmail authorization: {exc}"},
+            status_code=400,
+        )
+
+    if process.returncode != 0 or not GMAIL_CREDENTIALS.exists():
+        detail = (stderr or stdout).decode(errors="replace").strip()[-700:]
+        return JSONResponse(
+            {"error": detail or "Gmail authorization did not complete."}, status_code=400
+        )
+    _secure_gmail_auth_files()
+    state = _gmail_auth_state()
+    if not state["connected"]:
+        return JSONResponse(
+            {"error": "Gmail saved credentials, but they are not usable."},
+            status_code=400,
+        )
+    return {"ok": True, **state}
+
+
 @app.delete("/api/mcp-servers/{server_id}")
 async def delete_server(server_id: int):
     if db.delete_server(server_id):
@@ -452,6 +614,7 @@ async def create_subagent(req: dict):
             int(req.get("mcp_server_id", 0)),
             confirm_tool_calls=req.get("confirm_tool_calls", True),
             parent="supervisor",
+            confirm_tools=req.get("confirm_tools"),
         )
     except (ValueError, TypeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
