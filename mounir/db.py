@@ -105,6 +105,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             name TEXT NOT NULL UNIQUE,
             description TEXT NOT NULL,
             system_prompt TEXT NOT NULL,
+            icon_data BLOB NOT NULL DEFAULT X'',
+            icon_mime TEXT NOT NULL DEFAULT '',
             model_id INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
             mcp_server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT,
             confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
@@ -132,6 +134,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         },
         "subagents": {
             "description": "TEXT NOT NULL DEFAULT ''",
+            "icon_data": "BLOB NOT NULL DEFAULT X''",
+            "icon_mime": "TEXT NOT NULL DEFAULT ''",
             "confirm_tool_calls": "INTEGER NOT NULL DEFAULT 1",
             "confirm_tools": "TEXT NOT NULL DEFAULT '[\"*\"]'",
         },
@@ -763,6 +767,8 @@ def _add_subagent(
     confirm_tool_calls: bool = True,
     parent: str = "supervisor",
     confirm_tools=None,
+    icon_data: bytes = b"",
+    icon_mime: str = "",
 ) -> int:
     if confirm_tools is None:
         confirm_tools = ["*"] if _bool(confirm_tool_calls, "confirm_tool_calls") else []
@@ -772,14 +778,17 @@ def _add_subagent(
         cur = conn.execute(
             """
             INSERT INTO subagents
-                (name, description, system_prompt, model_id, mcp_server_id,
-                 confirm_tool_calls, confirm_tools, parent, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (name, description, system_prompt, icon_data, icon_mime,
+                 model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
+                 parent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
                 _required(description, "description"),
                 (system_prompt or "").strip(),
+                bytes(icon_data or b""),
+                (icon_mime or "").strip(),
                 int(model_id),
                 int(mcp_server_id),
                 int(has_confirmations),
@@ -803,17 +812,23 @@ def add_subagent(
     confirm_tool_calls: bool = True,
     parent: str = "supervisor",
     confirm_tools=None,
+    icon_data: bytes = b"",
+    icon_mime: str = "",
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
-            confirm_tool_calls, parent, confirm_tools,
+            confirm_tool_calls, parent, confirm_tools, icon_data, icon_mime,
         )
         return get_subagent(aid)
 
 
 _SUBAGENT_SELECT = """
-    SELECT s.*, m.name AS model_name, m.model, m.provider, m.base_url, m.api_key,
+    SELECT s.id, s.name, s.description, s.system_prompt,
+           s.model_id, s.mcp_server_id, s.confirm_tool_calls, s.confirm_tools,
+           s.parent, s.created_at,
+           CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
+           m.name AS model_name, m.model, m.provider, m.base_url, m.api_key,
            srv.name AS server_name, srv.transport, srv.connection,
            srv.headers, srv.env
     FROM subagents s
@@ -848,10 +863,23 @@ def list_subagents() -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def get_subagent_icon(subagent_id: int) -> tuple[bytes, str] | None:
+    """Return the stored icon without including its bytes in registry responses."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT icon_data, icon_mime FROM subagents WHERE id = ?",
+            (subagent_id,),
+        ).fetchone()
+        if not row or not row["icon_data"]:
+            return None
+        return bytes(row["icon_data"]), row["icon_mime"]
+
+
 def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     allowed = {
         "name", "description", "system_prompt", "model_id",
         "mcp_server_id", "confirm_tool_calls", "confirm_tools", "parent",
+        "icon_data", "icon_mime",
     }
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
@@ -860,6 +888,10 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
         fields["name"] = _required(fields["name"], "name")
     if "description" in fields:
         fields["description"] = _required(fields["description"], "description")
+    if "icon_data" in fields:
+        fields["icon_data"] = bytes(fields["icon_data"] or b"")
+    if "icon_mime" in fields:
+        fields["icon_mime"] = (fields["icon_mime"] or "").strip()
     if "confirm_tools" in fields:
         fields["confirm_tools"] = _json_string_list(
             fields["confirm_tools"], "confirmation tools"

@@ -29,7 +29,7 @@ from pathlib import Path
 
 import psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from mounir.agent import Agent
@@ -60,6 +60,7 @@ ALLOWED_ORIGINS = {
 GMAIL_AUTH_DIR = Path.home() / ".gmail-mcp"
 GMAIL_OAUTH_KEYS = GMAIL_AUTH_DIR / "gcp-oauth.keys.json"
 GMAIL_CREDENTIALS = GMAIL_AUTH_DIR / "credentials.json"
+SUBAGENT_ICON_MAX_BYTES = 512 * 1024
 
 
 def _secure_gmail_auth_files() -> None:
@@ -671,10 +672,55 @@ async def list_subagents():
     return db.list_subagents()
 
 
+def _decode_subagent_icon(value) -> dict:
+    """Validate a small browser data URL and return DB-ready image fields."""
+    if value in (None, ""):
+        return {"icon_data": b"", "icon_mime": ""}
+    if not isinstance(value, str) or not value.startswith("data:image/"):
+        raise ValueError("Choose a PNG, JPEG, WebP, or GIF image.")
+    header, separator, encoded = value.partition(",")
+    if not separator or not header.endswith(";base64"):
+        raise ValueError("The selected icon could not be read.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("The selected icon could not be read.") from exc
+    if not raw:
+        raise ValueError("The selected icon is empty.")
+    if len(raw) > SUBAGENT_ICON_MAX_BYTES:
+        raise ValueError("The icon must be smaller than 512 KB.")
+
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif raw.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    elif len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        mime = "image/webp"
+    elif raw.startswith((b"GIF87a", b"GIF89a")):
+        mime = "image/gif"
+    else:
+        raise ValueError("Choose a valid PNG, JPEG, WebP, or GIF image.")
+    return {"icon_data": raw, "icon_mime": mime}
+
+
+@app.get("/api/subagents/{subagent_id}/icon")
+async def get_subagent_icon(subagent_id: int):
+    icon = db.get_subagent_icon(subagent_id)
+    if icon is None:
+        return JSONResponse({"error": "Subagent icon not found."}, status_code=404)
+    data, mime = icon
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 @app.post("/api/subagents")
 async def create_subagent(req: dict):
     try:
         mcp_agents._validate_agent_name(req.get("name", ""))
+        icon = _decode_subagent_icon(req.get("icon_data")) if "icon_data" in req else {}
         return db.add_subagent(
             req.get("name", ""),
             req.get("description", ""),
@@ -684,6 +730,7 @@ async def create_subagent(req: dict):
             confirm_tool_calls=req.get("confirm_tool_calls", True),
             parent="supervisor",
             confirm_tools=req.get("confirm_tools"),
+            **icon,
         )
     except (ValueError, TypeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -692,9 +739,13 @@ async def create_subagent(req: dict):
 @app.put("/api/subagents/{subagent_id}")
 async def update_subagent(subagent_id: int, req: dict):
     try:
-        if "name" in req:
-            mcp_agents._validate_agent_name(req["name"], exclude_id=subagent_id)
-        s = db.update_subagent(subagent_id, **req)
+        fields = dict(req)
+        if "name" in fields:
+            mcp_agents._validate_agent_name(fields["name"], exclude_id=subagent_id)
+        fields.pop("icon_mime", None)
+        if "icon_data" in fields:
+            fields.update(_decode_subagent_icon(fields.pop("icon_data")))
+        s = db.update_subagent(subagent_id, **fields)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if not s:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sqlite3
@@ -76,7 +77,13 @@ class DatabaseTests(TemporaryDatabaseTest):
             {"description", "setup_type", "transport", "headers", "env"}
             <= server_columns
         )
-        self.assertTrue({"description", "confirm_tool_calls", "confirm_tools"} <= agent_columns)
+        self.assertTrue(
+            {
+                "description", "icon_data", "icon_mime",
+                "confirm_tool_calls", "confirm_tools",
+            }
+            <= agent_columns
+        )
         self.assertEqual(db.get_server(1)["transport"], "streamable_http")
         self.assertEqual(db.get_model(1)["model"], "qwen3:4b")
         self.assertEqual(db.get_model(1)["base_url"], "http://localhost:11434/v1")
@@ -486,10 +493,24 @@ class AdminApiTests(TemporaryDatabaseTest):
                         "model_id": model_response.json()["id"],
                         "mcp_server_id": server_response.json()["id"],
                         "confirm_tools": ["echo"],
+                        "icon_data": (
+                            "data:image/png;base64,"
+                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                            "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                        ),
                     },
                 )
                 self.assertEqual(agent_response.status_code, 200)
                 self.assertEqual(json.loads(agent_response.json()["confirm_tools"]), ["echo"])
+                self.assertEqual(agent_response.json()["has_icon"], 1)
+                icon_response = await client.get(
+                    f"/api/subagents/{agent_response.json()['id']}/icon"
+                )
+                self.assertEqual(icon_response.status_code, 200)
+                self.assertEqual(icon_response.headers["content-type"], "image/png")
+                self.assertTrue(
+                    icon_response.content.startswith(base64.b64decode("iVBORw0KGgo="))
+                )
                 test_response = await client.post(
                     f"/api/mcp-servers/{server_response.json()['id']}/test"
                 )
@@ -509,6 +530,17 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(overview["supervisor"]["name"], "Mounir")
                 self.assertEqual(len(overview["builtins"]), 3)
                 self.assertTrue(overview["supervisor"]["model"])
+
+                remove_icon = await client.put(
+                    f"/api/subagents/{agent_response.json()['id']}",
+                    json={"icon_data": ""},
+                )
+                self.assertEqual(remove_icon.status_code, 200)
+                self.assertEqual(remove_icon.json()["has_icon"], 0)
+                missing_icon = await client.get(
+                    f"/api/subagents/{agent_response.json()['id']}/icon"
+                )
+                self.assertEqual(missing_icon.status_code, 404)
 
                 web_server.agent.conversation.reset()
                 web_server.agent.conversation.add_user("Keep this conversation")

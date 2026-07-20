@@ -205,7 +205,10 @@
     background: var(--soft); border: 1px solid rgba(168,85,247,.25);
     font-size: 11px; font-weight: 700;
   }
+  .node-icon.has-image { padding: 0; overflow: visible; }
+  .node-icon.has-image img { width: 100%; height: 100%; display: block; object-fit: contain; }
   .dynamic .node-icon { color: #99c2ff; background: rgba(91,156,245,.12); border-color: rgba(91,156,245,.25); }
+  .dynamic .node-icon.has-image { background: transparent; border: 0; border-radius: 0; }
   .node-identity { min-width: 0; flex: 1; }
   .node-kind { color: var(--text-dim); font-size: 7px; text-transform: uppercase; letter-spacing: .1em; }
   .node-name { margin-top: 1px; color: var(--text); font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -258,6 +261,14 @@
   }
   .list-item:hover .del-btn { opacity: 0.6; }
   .list-item .del-btn:hover { opacity: 1; color: var(--danger); }
+  .list-agent-icon {
+    width: 32px; height: 32px; flex: 0 0 32px; display: block; object-fit: contain;
+  }
+  .list-agent-icon.fallback {
+    display: grid; place-items: center; border: 1px solid rgba(91,156,245,.25);
+    border-radius: 9px; color: #99c2ff; background: rgba(91,156,245,.10);
+    font-size: 11px; font-weight: 700;
+  }
 
   /* ---- form view ---- */
   .form-view { max-width: 640px; }
@@ -342,6 +353,24 @@
   .server-tools-state { padding: 28px 18px; color: var(--text-dim); font-size: 12px; line-height: 1.55; }
   .server-tools-state strong { display: block; margin-bottom: 5px; color: var(--text-mid); font-size: 13px; }
   .server-tools-state.loading { color: var(--text-mid); }
+
+  .agent-icon-field {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 14px;
+    padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg);
+  }
+  .agent-icon-preview {
+    width: 48px; height: 48px; flex: 0 0 48px; display: grid; place-items: center;
+    overflow: hidden; padding: 7px; border: 1px solid rgba(91,156,245,.28);
+    border-radius: 12px; background: rgba(91,156,245,.10); color: #99c2ff;
+    font-size: 15px; font-weight: 700;
+  }
+  .agent-icon-preview img { width: 100%; height: 100%; display: block; object-fit: contain; }
+  .agent-icon-copy { flex: 1; min-width: 0; }
+  .agent-icon-title { color: var(--text-mid); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .agent-icon-hint { margin-top: 4px; color: var(--text-dim); font-size: 10px; line-height: 1.4; }
+  .agent-icon-actions { margin-top: 9px; display: flex; flex-wrap: wrap; gap: 7px; }
+  .agent-icon-actions .btn { padding: 6px 10px; font-size: 11px; }
+  .agent-icon-input { display: none; }
 
   .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
 
@@ -496,6 +525,7 @@ const S = {
   agents: [],
 };
 let canvasZoom = 1;
+let pendingAgentIcon;
 
 const API = {
   overview: '/api/agent-overview',
@@ -692,12 +722,15 @@ function renderOverview() {
 function agentNodeHtml(item, kind, nodeId, agentId) {
   const initial = (item.name || '?').trim().charAt(0).toUpperCase();
   const dynamic = kind === 'dynamic';
+  const icon = dynamic && item.has_icon
+    ? `<img src="/api/subagents/${agentId}/icon" alt="">`
+    : esc(initial);
   return `
     <article class="agent-node ${dynamic ? 'dynamic' : ''}" id="node-${nodeId}"${dynamic ? ` data-agent-id="${agentId}" title="Open subagent settings" role="button" tabindex="0"` : ''}>
       <span class="node-port input"></span>
       ${dynamic ? '<svg class="node-open" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>' : ''}
       <div class="node-head">
-        <div class="node-icon">${esc(initial)}</div>
+        <div class="node-icon${dynamic && item.has_icon ? ' has-image' : ''}">${icon}</div>
         <div class="node-identity"><div class="node-name">${esc(item.name)}</div></div>
       </div>
       <div class="node-model" title="${esc(item.model || item.model_name || 'Not configured')}">
@@ -784,8 +817,13 @@ function renderListItem(item) {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>`;
+  const initial = (item.name || '?').trim().charAt(0).toUpperCase();
+  const icon = item.has_icon
+    ? `<img class="list-agent-icon" src="/api/subagents/${item.id}/icon" alt="">`
+    : `<div class="list-agent-icon fallback">${esc(initial)}</div>`;
   return `
     <div class="list-item" data-id="${item.id}">
+      ${icon}
       <div class="info">
         <div class="primary">${esc(item.name)}</div>
         <div class="secondary">${esc(item.description)}</div>
@@ -800,6 +838,7 @@ function renderListItem(item) {
 function renderForm() {
   const el = $('content');
   const editing = S.editing;
+  pendingAgentIcon = undefined;
   const formHtml = buildFormHtml(editing, S.formReadonly);
   if (S.tab === 'servers') {
     el.innerHTML = `
@@ -982,12 +1021,28 @@ function buildFormHtml(item, readonly) {
   const selectedConfirmationTools = confirmationMode === 'selected'
     ? confirmationTools.join(', ')
     : '';
+  const agentInitial = (item?.name || '?').trim().charAt(0).toUpperCase();
+  const iconPreview = item?.has_icon
+    ? `<img src="/api/subagents/${item.id}/icon" alt="">`
+    : esc(agentInitial);
   return `
     <form class="form-grid" id="formEl">
       <label class="full">Name
         <span class="hint">Becomes delegate_to_&lt;slug&gt;</span>
         <input type="text" name="name" value="${e('name')}" placeholder="e.g. Web Search" required${ro}>
       </label>
+      <div class="agent-icon-field">
+        <div class="agent-icon-preview" id="agentIconPreview">${iconPreview}</div>
+        <div class="agent-icon-copy">
+          <div class="agent-icon-title">Icon</div>
+          <div class="agent-icon-hint">Choose a square PNG, JPEG, WebP, or GIF smaller than 512 KB.</div>
+          <div class="agent-icon-actions">
+            <input class="agent-icon-input" type="file" id="agentIconInput" accept="image/png,image/jpeg,image/webp,image/gif"${dis}>
+            <button type="button" class="btn outline" id="agentIconChoose"${dis}>${item?.has_icon ? 'Replace image' : 'Choose image'}</button>
+            <button type="button" class="btn" id="agentIconRemove"${dis}>Remove</button>
+          </div>
+        </div>
+      </div>
       <label class="full">Description
         <span class="hint">Routing signal — when should the supervisor delegate here.</span>
         <textarea name="description" rows="2" placeholder="Search the web with Brave. Use for any lookup." required${ro}>${e('description')}</textarea>
@@ -1179,6 +1234,7 @@ function attachFormEvents() {
   f.addEventListener('submit', onFormSubmit);
   if (S.tab === 'agents') {
     $('confirmationMode').addEventListener('change', updateConfirmationVisibility);
+    attachAgentIconEvents();
     updateConfirmationVisibility();
     return;
   }
@@ -1199,6 +1255,57 @@ function attachFormEvents() {
   });
   updateServerFormVisibility();
   attachServerSetupEvents();
+}
+
+function showAgentIconFallback() {
+  const name = $('formEl')?.querySelector('input[name="name"]')?.value || '?';
+  $('agentIconPreview').textContent = name.trim().charAt(0).toUpperCase() || '?';
+}
+
+function attachAgentIconEvents() {
+  const input = $('agentIconInput');
+  const choose = $('agentIconChoose');
+  const remove = $('agentIconRemove');
+  const name = $('formEl')?.querySelector('input[name="name"]');
+  if (!input || !choose || !remove) return;
+  name?.addEventListener('input', () => {
+    if (pendingAgentIcon === '' || (pendingAgentIcon === undefined && !S.editing?.has_icon)) {
+      showAgentIconFallback();
+    }
+  });
+  choose.addEventListener('click', () => input.click());
+  remove.addEventListener('click', () => {
+    pendingAgentIcon = '';
+    input.value = '';
+    choose.textContent = 'Choose image';
+    showAgentIconFallback();
+  });
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const allowed = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+    if (!allowed.includes(file.type)) {
+      $('formError').textContent = 'Choose a PNG, JPEG, WebP, or GIF image.';
+      input.value = '';
+      return;
+    }
+    if (file.size > 512 * 1024) {
+      $('formError').textContent = 'The icon must be smaller than 512 KB.';
+      input.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      pendingAgentIcon = String(reader.result || '');
+      $('agentIconPreview').innerHTML = `<img src="${esc(pendingAgentIcon)}" alt="">`;
+      choose.textContent = 'Replace image';
+      $('formError').textContent = '';
+    };
+    reader.onerror = () => {
+      $('formError').textContent = 'The selected icon could not be read.';
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 /* ========== form submit ========== */
@@ -1230,6 +1337,7 @@ async function onFormSubmit(e) {
       body.confirm_tools = [];
     }
     body.confirm_tool_calls = body.confirm_tools.length > 0;
+    if (pendingAgentIcon !== undefined) body.icon_data = pendingAgentIcon;
   }
   try {
     if (S.tab === 'servers') {
@@ -1397,6 +1505,7 @@ $('modifyBtn').addEventListener('click', () => {
   if (S.formReadonly) {
     // Enable all fields
     f.querySelectorAll('input[readonly], textarea[readonly]').forEach(el => el.removeAttribute('readonly'));
+    f.querySelectorAll('input[type="file"][disabled]').forEach(el => el.removeAttribute('disabled'));
     f.querySelectorAll('select[disabled]').forEach(el => el.removeAttribute('disabled'));
     f.querySelectorAll('button[disabled]').forEach(el => el.removeAttribute('disabled'));
     S.formReadonly = false;

@@ -180,9 +180,10 @@ SQLite DB at `~/.mounir/mounir.db`:
    transport only when an older server requires it. The admin form provides
    ordinary fields for bearer tokens, API keys, and local-server credentials;
    users do not edit JSON or export environment variables.
-3. **Subagents** — the actual delegation targets: name, description (the
-   routing signal for the small supervisor model), system prompt, plus a chosen
-   model and MCP server.
+3. **Subagents** — the actual delegation targets: name, optional icon,
+   description (the routing signal for the small supervisor model), system
+   prompt, plus a chosen model and MCP server. Uploaded icons are validated and
+   stored directly in the local SQLite database.
 
 Each subagent becomes one `delegate_to_<slug>` tool and one graph node. Only
 its short report crosses back; the server's own tools never enter the
