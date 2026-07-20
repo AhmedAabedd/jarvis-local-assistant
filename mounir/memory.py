@@ -8,6 +8,7 @@ interface here is built so that can drop in without touching the agent.
 from __future__ import annotations
 
 import json
+import re
 import time
 import datetime
 from pathlib import Path
@@ -58,6 +59,23 @@ class Conversation:
 
     def __len__(self) -> int:
         return len(self._messages)
+
+    def display_messages(self) -> list[dict[str, str]]:
+        """Return user-visible turns without system context or tool internals."""
+        visible: list[dict[str, str]] = []
+        # Snapshot first so a web refresh can read safely while a worker appends.
+        for message in list(self._messages):
+            role = message.get("role")
+            content = message.get("content")
+            if role not in {"user", "assistant"} or not isinstance(content, str):
+                continue
+            content = content.strip()
+            if not content or (role == "assistant" and message.get("tool_calls")):
+                continue
+            if role == "user":
+                content = re.sub(r"^\[[^\n]+\]\n", "", content, count=1)
+            visible.append({"role": role, "content": content})
+        return visible
 
     # --- persistence --------------------------------------------------------
 

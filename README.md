@@ -164,12 +164,15 @@ On top of the built-ins, you can register **your own specialists backed by any
 MCP server** — no code changes. The setup is three-tier and persisted in a
 SQLite DB at `~/.mounir/mounir.db`:
 
-1. **Models** — reusable LLM presets: name, provider, base URL, API key. Use
-   `$VAR` or `${VAR}` in the key field to read from the environment instead of
-   storing a raw secret.
-2. **MCP servers** — reusable connections: either a stdio command
-   (e.g. `npx -y @modelcontextprotocol/server-brave-search`) or an `http(s)`
-   SSE URL.
+1. **Models** — reusable LLM presets: name, provider, base URL, and an optional
+   API key entered directly in the admin form. The endpoint must implement OpenAI-compatible
+   `/chat/completions` including function/tool calls; the provider field is a
+   display label, not a separate provider adapter.
+2. **MCP servers** — reusable connections. Use `stdio` for a local server
+   process, Streamable HTTP for a remote server, or the deprecated HTTP+SSE
+   transport only when an older server requires it. The admin form provides
+   ordinary fields for bearer tokens, API keys, and local-server credentials;
+   users do not edit JSON or export environment variables.
 3. **Subagents** — the actual delegation targets: name, description (the
    routing signal for the small supervisor model), system prompt, plus a chosen
    model and MCP server.
@@ -183,17 +186,33 @@ one is live from your next message.
 
 - `mounir/db.py` owns the SQLite schema and CRUD.
 - `mounir/mcp_agents.py` is the registry layer: slug helpers, schema building,
-  and a management CLI. It calls `db.init()` on import, which creates tables and
-  migrates any legacy `~/.mounir/mcp_agents.json`.
-- `mounir/specialists/mcp_agent.py` is the generic specialist. It accepts a
-  resolved spec, connects to the MCP server (stdio or SSE), adopts the tools it
-  advertises, loops with `llm.openai_chat`, and returns a short report.
+  and a management CLI. The server/CLI/runtime initialize the schema when used
+  and migrate any legacy `~/.mounir/mcp_agents.json` without import-time writes.
+- `mounir/specialists/mcp_agent.py` is the generic MCP client. It accepts a
+  resolved spec, connects over stdio, Streamable HTTP, or legacy SSE, adopts
+  all paginated tools the server advertises, loops with `llm.openai_chat`, and
+  returns a short report.
 - `mounir/langgraph_agent.py` adds one node per registered subagent at graph
   compile time and extends the delegate map so the supervisor can route to it.
 
 ### Management
 
-Manage them at **`http://localhost:8000/admin`** or via CLI:
+Manage everything at **`http://localhost:8000/admin`**:
+
+1. Create a model preset and paste its API key, if it needs one.
+2. Create an MCP server and choose **Local server**, **Remote HTTP**, or
+   **Legacy SSE**.
+3. Paste the command or endpoint provided by the MCP server.
+4. Choose the authentication method. Paste a bearer token/API key, or add the
+   named credentials listed by a local server's instructions.
+5. Save it and click **Test Connection** to see its advertised tools.
+6. Create a subagent that links the model and server.
+
+Credentials entered through the UI are stored in the local SQLite database,
+which Mounir restricts to the current operating-system user (`0600`). They are
+not sent anywhere except the configured model or MCP endpoint.
+
+The management CLI remains available for developers and automation:
 
 ```bash
 python -m mounir.mcp_agents models list
@@ -204,7 +223,13 @@ python -m mounir.mcp_agents models add --name "Ollama Cloud" --model qwen3:4b \
   --provider Ollama --base-url https://ollama.com/v1 --api-key '$OLLAMA_API_KEY'
 
 python -m mounir.mcp_agents servers add --name "Brave Search" \
-  --connection "npx -y @modelcontextprotocol/server-brave-search"
+  --transport stdio \
+  --connection "npx -y @modelcontextprotocol/server-brave-search" \
+  --env '{"BRAVE_API_KEY":"$BRAVE_API_KEY"}'
+
+python -m mounir.mcp_agents servers add --name "Remote tools" \
+  --transport streamable_http --connection "https://example.com/mcp" \
+  --headers '{"Authorization":"Bearer $REMOTE_MCP_TOKEN"}'
 
 python -m mounir.mcp_agents agents add --name "Web Search" \
   --description "Search the web with Brave. Use for any lookup." \
@@ -215,6 +240,17 @@ python -m mounir.mcp_agents agents add --name "Web Search" \
 The first time the new code runs, any existing `~/.mounir/mcp_agents.json` is
 migrated into the DB. Today every dynamic agent reports to the supervisor;
 nested parents (a subagent reporting to another subagent) are future work.
+New subagents ask for confirmation before every MCP tool call by default,
+because an arbitrary server may expose destructive or outward-facing actions.
+After saving a server, open it in the admin UI and use **Test Connection** to
+verify the handshake and see the tools it advertises.
+
+Mounir is the MCP **host** and contains MCP **clients** (the built-in Gmail
+client and the dynamic client). It does not expose an MCP server of its own.
+The dynamic layer currently consumes MCP **tools**; it does not yet surface a
+server's prompts/resources or implement the interactive MCP OAuth browser
+flow. Remote servers currently work with no authentication, a pasted bearer
+token, an API-key header, or advanced custom headers.
 
 ---
 
@@ -256,7 +292,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 3. Specialist API keys. Persist them in ~/.bashrc:
-export OLLAMA_API_KEY="..."        # researcher + email + MCP agents
+export OLLAMA_API_KEY="..."        # built-in researcher + email agents
 export NVIDIA_API_KEY="nvapi-..."  # media + system + coder
 export GEMINI_API_KEY="..."        # knowledge
 
@@ -377,9 +413,16 @@ Two separate pages, both served by `server.py`:
 
 ```bash
 sudo apt install ffmpeg
-pip install fastapi uvicorn psutil python-multipart
 python server.py            # http://localhost:8000  +  http://localhost:8000/admin
 ```
+
+The web app binds to `127.0.0.1` by default because it can execute local tools
+and its admin API manages credentials. Set `MOUNIR_WEB_HOST` only if you
+deliberately want network access, and put authentication in front of it before
+exposing it beyond your machine. `MOUNIR_WEB_PORT` changes the default port.
+If you deliberately use another hostname/origin, also set the comma-separated
+`MOUNIR_WEB_ALLOWED_HOSTS` and `MOUNIR_WEB_ALLOWED_ORIGINS`; browser WebSockets
+from other origins are rejected by default.
 
 ---
 
@@ -445,7 +488,8 @@ mounir/
 
 **Working:** local text chat with the supervisor, all built-in specialists
 (researcher, media, knowledge, system, email; coder is wired but delegation is
-off), dynamic MCP subagents registered at runtime, full-turn memory, voice
+off), dynamic MCP subagents registered at runtime (local stdio, remote
+Streamable HTTP, and legacy SSE), full-turn memory, voice
 (push-to-talk + hands-free), Telegram bridge, web dashboard, and admin UI.
 
 **Ongoing / future:**
@@ -470,9 +514,9 @@ off), dynamic MCP subagents registered at runtime, full-turn memory, voice
 - `tools.confirm_fn` gates outward-facing actions. The CLI uses a terminal
   prompt; `server.py` swaps in a WebSocket confirmation so the browser can
   approve.
-- API keys for built-in specialists come from env vars. For dynamic MCP
-  subagents, keys come from the model preset in the SQLite DB; use `$VAR` or
-  `${VAR}` there to avoid storing raw secrets.
+- API keys for built-in specialists come from environment variables. Dynamic
+  model and MCP credentials are entered through the admin UI and stored in the
+  user-only SQLite database.
 
 ### Adding a built-in specialist
 
@@ -490,7 +534,8 @@ No code changes. Use the admin UI at `/admin` or the CLI:
 
 1. Add a **model** preset. The **Model ID** is the actual identifier the API
    expects (e.g. `qwen3:4b`, `gpt-4o`); **Name** is just the display label.
-2. Add an **MCP server** connection (stdio command or SSE URL).
+2. Add an **MCP server** connection (stdio command or Streamable HTTP URL;
+   choose SSE only for a legacy server), save it, and test the connection.
 3. Add a **subagent** linking the two. The description field is the routing
    signal — write it so the small supervisor model knows when to delegate.
 

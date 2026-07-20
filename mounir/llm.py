@@ -115,10 +115,10 @@ def openai_chat(messages, tools=None, model=None, *, base_url, api_key,
     }
     if tools:
         payload["tools"] = tools
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-    }
+    headers = {"Accept": "application/json"}
+    # Local OpenAI-compatible endpoints often require no authentication.
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     resp = requests.post(
         f"{base_url.rstrip('/')}/chat/completions",
         headers=headers,

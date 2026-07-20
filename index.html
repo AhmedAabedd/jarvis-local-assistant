@@ -73,6 +73,13 @@
   .brand-name { font-size: 15px; letter-spacing: 0.34em; font-weight: 600; }
   .brand-sub { font-size: 11px; color: var(--text-dim); letter-spacing: 0.05em; }
   .header-right { display: flex; align-items: center; gap: 20px; }
+  .mobile-studio-entry {
+    display: none; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    color: var(--text-mid); border: 1px solid var(--line);
+    background: rgba(255,255,255,.02); transition: all .18s;
+  }
+  .mobile-studio-entry:hover { color: var(--lav); border-color: var(--purple-dim); background: var(--soft); }
   .pill {
     display: flex; align-items: center; gap: 7px;
     font-size: 11px; color: var(--text-mid); letter-spacing: 0.05em;
@@ -83,8 +90,34 @@
 
   /* ---------- side panels ---------- */
   .panel { padding: 22px 20px; overflow-y: auto; }
-  .panel.left  { border-right: 1px solid var(--line); }
+  .panel.left  { border-right: 1px solid var(--line); display: flex; flex-direction: column; }
   .panel.right { border-left: 1px solid var(--line); }
+
+  .studio-entry {
+    display: flex; align-items: center; gap: 11px;
+    margin-top: auto; padding: 12px; border-radius: 12px;
+    color: var(--text); text-decoration: none;
+    border: 1px solid var(--line);
+    background: linear-gradient(135deg, rgba(168,85,247,.10), rgba(255,255,255,.018));
+    transition: border-color .18s, background .18s;
+  }
+  .studio-entry:hover {
+    border-color: rgba(168,85,247,.46);
+    background: linear-gradient(135deg, rgba(168,85,247,.16), rgba(255,255,255,.03));
+  }
+  .studio-entry-icon {
+    width: 34px; height: 34px; flex: 0 0 34px; border-radius: 10px;
+    display: grid; place-items: center; color: var(--lav);
+    background: var(--soft); border: 1px solid rgba(168,85,247,.25);
+  }
+  .studio-entry-copy { min-width: 0; flex: 1; }
+  .studio-entry-copy small {
+    display: block; margin-bottom: 2px; color: var(--text-dim);
+    font-size: 9px; letter-spacing: .13em; text-transform: uppercase;
+  }
+  .studio-entry-copy strong { display: block; font-size: 12px; font-weight: 600; }
+  .studio-entry-arrow { color: var(--text-dim); transition: color .18s; }
+  .studio-entry:hover .studio-entry-arrow { color: var(--lav); }
 
   .panel-title {
     font-size: 10px; letter-spacing: 0.22em; color: var(--text-dim);
@@ -163,6 +196,7 @@
     max-height: 28vh; overflow-y: auto; border-top: 1px solid var(--line);
     padding: 14px 16px;
   }
+  .transcript.empty { display: none; }
   .transcript-inner { width: 100%; max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
   .row { display: flex; flex-direction: column; gap: 5px; }
   .row.user { align-items: flex-end; }
@@ -264,6 +298,9 @@
   @media (max-width: 920px) {
     .app { grid-template-columns: 1fr; grid-template-rows: 56px 1fr; }
     .panel { display: none; }
+    .mobile-studio-entry { display: flex; }
+    .header-right { gap: 12px; }
+    .clock { display: none; }
   }
 </style>
 </head>
@@ -280,7 +317,9 @@
       <div class="brand-sub mono">local assistant</div>
     </div>
     <div class="header-right">
-      <a href="/admin" style="color:var(--text-mid);text-decoration:none;font-size:12px;margin-right:8px;">Admin</a>
+      <a class="mobile-studio-entry" href="/admin" title="Open Agent Studio" aria-label="Open Agent Studio">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="8.5" y="14" width="7" height="7" rx="2"/><path d="M6.5 10v1.5a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V10M12 13.5V14"/></svg>
+      </a>
       <div class="pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
       <div class="clock mono" id="clock">—</div>
     </div>
@@ -308,6 +347,14 @@
     <div class="panel-title">Network</div>
     <div class="stat"><div class="stat-head"><span class="stat-label">↓ DOWN</span><span class="stat-value mono" id="netDown">0 KB/s</span></div></div>
     <div class="stat"><div class="stat-head"><span class="stat-label">↑ UP</span><span class="stat-value mono" id="netUp">0 KB/s</span></div></div>
+
+    <a class="studio-entry" href="/admin">
+      <span class="studio-entry-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="8.5" y="14" width="7" height="7" rx="2"/><path d="M6.5 10v1.5a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V10M12 13.5V14"/></svg>
+      </span>
+      <span class="studio-entry-copy"><small>Workspace</small><strong>Agent Studio</strong></span>
+      <svg class="studio-entry-arrow" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+    </a>
   </div>
 
   <!-- CENTER: the voice orb (primary) + transcript + small text fallback -->
@@ -320,13 +367,8 @@
       <div class="hint">Click the orb or press <kbd>Space</kbd> to talk</div>
     </div>
 
-    <div class="transcript">
-      <div class="transcript-inner" id="transcript">
-        <div class="row assistant">
-          <div class="cap">Mounir</div>
-          <div class="bubble">Online. No cloud, no fluff — say the word, Ahmed.</div>
-        </div>
-      </div>
+    <div class="transcript empty">
+      <div class="transcript-inner" id="transcript"></div>
     </div>
 
     <div class="composer">
@@ -421,8 +463,22 @@ function addMessage(role, text){
   row.className = 'row ' + role;
   row.innerHTML = `<div class="cap">${role==='user'?'You':'Mounir'}</div>
                    <div class="bubble">${render(text)}</div>`;
+  transcriptScroll.classList.remove('empty');
   transcript.appendChild(row); scrollDown();
   return row.querySelector('.bubble');
+}
+
+async function restoreConversation(){
+  transcript.replaceChildren();
+  try {
+    const response = await fetch('/api/conversation');
+    if(!response.ok) throw new Error('Could not restore conversation');
+    const data = await response.json();
+    for(const message of data.messages || []) addMessage(message.role, message.content);
+  } catch(e) {
+    // A history failure must not prevent a fresh conversation from starting.
+  }
+  transcriptScroll.classList.toggle('empty', transcript.children.length === 0);
 }
 function addLog(type, text){
   const list = document.getElementById('logList');
@@ -461,7 +517,7 @@ function connect(){
     }
   };
 }
-connect();
+restoreConversation().finally(connect);
 
 function sendText(){
   const input = document.getElementById('msgInput');

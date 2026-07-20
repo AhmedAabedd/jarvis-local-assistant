@@ -24,9 +24,6 @@ import re
 from . import config as cfg, db
 from .db import add_model, add_server, add_subagent  # exposed for callers
 
-# Ensure tables exist and the legacy JSON file is migrated on first import.
-db.init()
-
 
 # --- name handling ------------------------------------------------------------
 
@@ -50,18 +47,26 @@ def node_name(name: str) -> str:
 _RESERVED = {"supervisor", "coder", "researcher", "media", "knowledge", "system", "email"}
 
 
-def _validate_agent_name(name: str) -> None:
+def _validate_agent_name(name: str, *, exclude_id: int | None = None) -> None:
+    if not isinstance(name, str):
+        raise ValueError("name is required.")
     slug = _slug(name)
     if not slug:
         raise ValueError("name must contain at least one letter or digit.")
     if slug in _RESERVED:
         raise ValueError(f"'{name}' collides with the built-in '{slug}' agent — pick another name.")
+    for agent in db.list_subagents():
+        if agent["id"] != exclude_id and _slug(agent["name"]) == slug:
+            raise ValueError(
+                f"'{name}' produces the same delegate name as '{agent['name']}'."
+            )
 
 
 # --- runtime-facing API (used by the graph) ------------------------------------
 
 def load() -> list[dict]:
     """All active subagents, resolved into the flat spec the graph expects."""
+    db.init()
     return db.build_specs()
 
 
@@ -109,12 +114,18 @@ def _models_cmd(args):
     if args.action == "list":
         _print_table(db.list_models(), ["id", "name", "model", "provider", "base_url"])
     elif args.action == "add":
+        if not all((args.name, args.model, args.base_url)):
+            raise ValueError("--name, --model, and --base-url are required when adding a model.")
         m = db.add_model(args.name, args.model, args.provider, args.base_url, args.api_key or "")
         print(f"Added model {m['id']}: {m['name']}")
     elif args.action == "update":
+        if args.id is None:
+            raise ValueError("--id is required when updating a model.")
         m = db.update_model(args.id, name=args.name, model=args.model, provider=args.provider, base_url=args.base_url, api_key=args.api_key)
         print(f"Updated model {m['id']}: {m['name']}" if m else "Model not found.")
     elif args.action == "remove":
+        if args.id is None:
+            raise ValueError("--id is required when removing a model.")
         if db.delete_model(args.id):
             print("Removed model.")
         else:
@@ -123,14 +134,33 @@ def _models_cmd(args):
 
 def _servers_cmd(args):
     if args.action == "list":
-        _print_table(db.list_servers(), ["id", "name", "connection"])
+        _print_table(db.list_servers(), ["id", "name", "transport", "connection"])
     elif args.action == "add":
-        s = db.add_server(args.name, args.connection)
+        if not all((args.name, args.connection)):
+            raise ValueError("--name and --connection are required when adding a server.")
+        s = db.add_server(
+            args.name,
+            args.connection,
+            transport=args.transport,
+            headers=args.headers or "{}",
+            env=args.env or "{}",
+        )
         print(f"Added server {s['id']}: {s['name']}")
     elif args.action == "update":
-        s = db.update_server(args.id, name=args.name, connection=args.connection)
+        if args.id is None:
+            raise ValueError("--id is required when updating a server.")
+        s = db.update_server(
+            args.id,
+            name=args.name,
+            connection=args.connection,
+            transport=args.transport,
+            headers=args.headers,
+            env=args.env,
+        )
         print(f"Updated server {s['id']}: {s['name']}" if s else "Server not found.")
     elif args.action == "remove":
+        if args.id is None:
+            raise ValueError("--id is required when removing a server.")
         if db.delete_server(args.id):
             print("Removed server.")
         else:
@@ -142,6 +172,8 @@ def _agents_cmd(args):
         rows = db.list_subagents()
         _print_table(rows, ["id", "name", "model_name", "server_name", "parent"])
     elif args.action == "show":
+        if not args.name:
+            raise ValueError("--name is required when showing an agent.")
         a = db.get_subagent_by_name(args.name)
         if not a:
             print("Agent not found.")
@@ -156,12 +188,22 @@ def _agents_cmd(args):
             raise ValueError(f"model_id {args.model_id} does not exist.")
         if db.get_server(args.server_id) is None:
             raise ValueError(f"server_id {args.server_id} does not exist.")
-        a = db.add_subagent(args.name, args.description, args.prompt, args.model_id, args.server_id, parent="supervisor")
+        a = db.add_subagent(
+            args.name,
+            args.description,
+            args.prompt or "",
+            args.model_id,
+            args.server_id,
+            confirm_tool_calls=args.confirm_tool_calls is not False,
+            parent="supervisor",
+        )
         print(f"Added agent {a['id']}: {a['name']} ({delegate_tool_name(a['name'])})")
     elif args.action == "update":
+        if args.id is None:
+            raise ValueError("--id is required when updating an agent.")
         fields = {}
         if args.name is not None:
-            _validate_agent_name(args.name)
+            _validate_agent_name(args.name, exclude_id=args.id)
             fields["name"] = args.name
         if args.description is not None:
             fields["description"] = args.description
@@ -171,9 +213,13 @@ def _agents_cmd(args):
             fields["model_id"] = args.model_id
         if args.server_id is not None:
             fields["mcp_server_id"] = args.server_id
+        if args.confirm_tool_calls is not None:
+            fields["confirm_tool_calls"] = args.confirm_tool_calls
         a = db.update_subagent(args.id, **fields)
         print(f"Updated agent {a['id']}: {a['name']}" if a else "Agent not found.")
     elif args.action == "remove":
+        if args.id is None:
+            raise ValueError("--id is required when removing an agent.")
         if db.delete_subagent(args.id):
             print("Removed agent.")
         else:
@@ -182,6 +228,8 @@ def _agents_cmd(args):
 
 def _main() -> int:
     import argparse
+
+    db.init()
 
     parser = argparse.ArgumentParser(
         prog="python -m mounir.mcp_agents",
@@ -206,6 +254,17 @@ def _main() -> int:
     p_srv.add_argument("--id", type=int)
     p_srv.add_argument("--name")
     p_srv.add_argument("--connection")
+    p_srv.add_argument(
+        "--transport",
+        choices=[
+            "stdio",
+            "sse",
+            "streamable_http"
+        ],
+        default=None,
+    )
+    p_srv.add_argument("--headers")
+    p_srv.add_argument("--env")
     p_srv.set_defaults(func=_servers_cmd)
 
     # agents
@@ -217,6 +276,12 @@ def _main() -> int:
     p_ag.add_argument("--prompt")
     p_ag.add_argument("--model-id", type=int)
     p_ag.add_argument("--server-id", type=int)
+    p_ag.add_argument(
+        "--confirm-tool-calls",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Require confirmation before every MCP tool call (default on add).",
+    )
     p_ag.set_defaults(func=_agents_cmd)
 
     args = parser.parse_args()

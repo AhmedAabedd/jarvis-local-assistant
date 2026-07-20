@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MOUNIR — Admin</title>
+<title>MOUNIR — Agent Studio</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
@@ -71,15 +71,24 @@
     color: var(--text-mid); font-family: inherit; font-size: 13px; font-weight: 500;
     cursor: pointer; transition: all .15s; text-align: left;
   }
+  .nav-item .ico { width: 17px; height: 17px; flex: 0 0 17px; }
   .nav-item:hover { color: var(--text); background: var(--bg-elev); }
   .nav-item.active { background: var(--soft); color: var(--lav); }
   .sidebar-footer { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line); }
   .sidebar-footer a {
-    color: var(--text-dim); text-decoration: none; font-size: 12px;
-    display: flex; align-items: center; gap: 8px; padding: 6px 14px;
-    transition: color .15s;
+    color: var(--text-mid); text-decoration: none;
+    display: flex; align-items: center; gap: 10px; padding: 10px;
+    border: 1px solid transparent; border-radius: 11px;
+    transition: color .15s, background .15s, border-color .15s;
   }
-  .sidebar-footer a:hover { color: var(--lav); }
+  .sidebar-footer a:hover { color: var(--lav); background: var(--bg-elev); border-color: var(--line); }
+  .sidebar-footer .back-icon {
+    width: 30px; height: 30px; flex: 0 0 30px; display: grid; place-items: center;
+    border-radius: 9px; background: var(--soft); color: var(--lav);
+  }
+  .sidebar-footer .back-copy { min-width: 0; }
+  .sidebar-footer strong { display: block; font-size: 11px; font-weight: 600; color: var(--text); }
+  .sidebar-footer small { display: block; margin-top: 2px; font-size: 9px; color: var(--text-dim); }
 
   /* ---- main ---- */
   .main {
@@ -101,6 +110,7 @@
     font-size: 20px;
     font-weight: 600;
   }
+  .view-subtitle { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
   .header-actions { display: flex; gap: 8px; }
   .header-actions .btn { white-space: nowrap; }
 
@@ -110,6 +120,107 @@
     overflow-y: auto;
     padding: 20px 32px 32px;
   }
+
+  /* ---- agent topology overview ---- */
+  .overview { width: 100%; height: 100%; margin: 0; display: flex; flex-direction: column; }
+  .overview-stats {
+    display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr));
+    gap: 10px; margin-bottom: 16px;
+  }
+  .overview-stat {
+    padding: 13px 15px; border: 1px solid var(--line); border-radius: 12px;
+    background: rgba(17,15,24,.76);
+  }
+  .overview-stat strong { display: block; font: 600 18px 'JetBrains Mono', monospace; color: var(--text); }
+  .overview-stat span { display: block; color: var(--text-dim); font-size: 10px; margin-top: 3px; text-transform: uppercase; letter-spacing: .08em; }
+  .workflow-shell {
+    flex: 1; min-height: 0; display: flex; flex-direction: column;
+    border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
+    background: var(--bg-panel); box-shadow: 0 18px 60px rgba(0,0,0,.18);
+  }
+  .workflow-toolbar {
+    min-height: 48px; padding: 0 16px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    background: rgba(22,19,31,.72);
+  }
+  .workflow-title { display: flex; align-items: center; gap: 9px; font-size: 12px; font-weight: 600; }
+  .workflow-title .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 9px rgba(95,180,135,.48); }
+  .workflow-tools { display: flex; align-items: center; gap: 14px; }
+  .workflow-legend { display: flex; gap: 14px; color: var(--text-dim); font-size: 10px; }
+  .workflow-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 7px; height: 7px; border-radius: 2px; background: var(--purple); }
+  .legend-dot.dynamic { background: #5b9cf5; }
+  .zoom-controls {
+    display: flex; align-items: center; overflow: hidden;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+  }
+  .zoom-control {
+    height: 28px; min-width: 30px; padding: 0 8px; border: 0;
+    border-right: 1px solid var(--line); background: transparent;
+    color: var(--text-mid); font-family: inherit; cursor: pointer;
+  }
+  .zoom-control:last-child { border-right: 0; }
+  .zoom-control:hover { color: var(--lav); background: var(--soft); }
+  .zoom-control.value { min-width: 52px; font: 9px 'JetBrains Mono', monospace; }
+  .workflow-canvas {
+    position: relative; flex: 1; min-height: 330px; overflow: auto;
+    display: flex; align-items: center; align-items: safe center; cursor: grab;
+    background-color: #0e0c14;
+    background-image: radial-gradient(rgba(155,149,173,.18) .8px, transparent .8px);
+    background-size: 22px 22px;
+  }
+  .workflow-canvas.is-panning { cursor: grabbing; user-select: none; }
+  .workflow-stage {
+    position: relative; flex: 0 0 auto; width: max-content; min-width: 100%; height: 100%; min-height: 330px;
+    padding: 32px 28px 38px; display: flex; flex-direction: column; justify-content: center;
+  }
+  .workflow-links { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; overflow: visible; }
+  .workflow-links path { fill: none; stroke: #403752; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .workflow-links circle { fill: #6b5a82; }
+  .supervisor-wrap { position: relative; z-index: 2; display: flex; justify-content: center; margin-bottom: 76px; }
+  .agent-grid {
+    position: relative; z-index: 2; display: flex; justify-content: center; gap: 14px;
+  }
+  .agent-node {
+    position: relative; width: 158px; min-width: 158px; padding: 11px; border: 1px solid #302a3d; border-radius: 11px;
+    background: rgba(22,19,31,.96); box-shadow: 0 8px 25px rgba(0,0,0,.22);
+    transition: border-color .16s, box-shadow .16s;
+  }
+  .agent-node.dynamic { cursor: pointer; border-color: rgba(91,156,245,.30); }
+  .agent-node.dynamic:hover { border-color: rgba(91,156,245,.72); box-shadow: 0 10px 28px rgba(0,0,0,.28); }
+  .node-open {
+    position: absolute; top: 9px; right: 9px; color: #78aef8;
+    opacity: .55; transition: opacity .15s;
+  }
+  .agent-node.dynamic:hover .node-open { opacity: 1; }
+  .agent-node.supervisor {
+    width: 210px; min-width: 210px; border-color: rgba(168,85,247,.58);
+    background: linear-gradient(145deg, rgba(168,85,247,.15), rgba(22,19,31,.98));
+    box-shadow: 0 10px 36px rgba(89,42,132,.2);
+  }
+  .node-head { display: flex; align-items: center; gap: 9px; }
+  .node-icon {
+    width: 30px; height: 30px; flex: 0 0 30px; border-radius: 9px;
+    display: grid; place-items: center; color: var(--lav);
+    background: var(--soft); border: 1px solid rgba(168,85,247,.25);
+    font-size: 11px; font-weight: 700;
+  }
+  .dynamic .node-icon { color: #99c2ff; background: rgba(91,156,245,.12); border-color: rgba(91,156,245,.25); }
+  .node-identity { min-width: 0; flex: 1; }
+  .node-kind { color: var(--text-dim); font-size: 7px; text-transform: uppercase; letter-spacing: .1em; }
+  .node-name { margin-top: 1px; color: var(--text); font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node-model {
+    display: flex; align-items: center; gap: 5px; margin-top: 9px;
+    color: var(--text-dim); font: 9px 'JetBrains Mono', monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .node-model svg { flex: 0 0 11px; }
+  .node-port {
+    position: absolute; left: 50%; width: 9px; height: 9px; border-radius: 50%;
+    background: #18141f; border: 2px solid #6b5a82; transform: translateX(-50%);
+  }
+  .node-port.output { bottom: -5px; }
+  .node-port.input { top: -5px; }
 
   /* ---- list view ---- */
   .list-view { display: flex; flex-direction: column; gap: 0; }
@@ -175,6 +286,22 @@
   }
   .form-view .form-grid .api-key-wrap { position: relative; }
   .form-view .form-grid .api-key-wrap input { width: 100%; }
+  .credential-box {
+    grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 9px;
+    padding: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 9px;
+  }
+  .credential-title {
+    font-size: 11px; color: var(--text-mid); text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .credential-row { display: grid; grid-template-columns: 1fr 1.5fr auto; gap: 8px; }
+  .credential-row input { min-width: 0; }
+  .credential-remove {
+    width: 38px; border: 1px solid var(--line); border-radius: 8px;
+    color: var(--danger); background: transparent; cursor: pointer; font-size: 18px;
+  }
+  .credential-add { align-self: flex-start; padding: 7px 12px; }
+  .credential-empty { color: var(--text-dim); font-size: 11px; }
 
   .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
 
@@ -235,13 +362,18 @@
     .sidebar { width: 56px; min-width: 56px; padding: 16px 8px; }
     .sidebar-brand .name, .sidebar-brand .sub,
     .nav-item span:not(.ico),
-    .sidebar-footer a span:not(.arrow) { display: none; }
+    .sidebar-footer .back-copy { display: none; }
     .nav-item { justify-content: center; padding: 10px; }
     .sidebar-footer a { justify-content: center; }
     .main-header { padding: 20px 16px 0; flex-direction: column; align-items: stretch; gap: 10px; }
     .content { padding: 16px; }
     .form-view .form-grid { grid-template-columns: 1fr; }
+    .credential-row { grid-template-columns: 1fr; }
+    .credential-remove { width: 100%; }
     .header-actions { justify-content: flex-end; }
+    .overview-stats { grid-template-columns: 1fr 1fr; }
+    .workflow-stage { padding-left: 18px; padding-right: 18px; }
+    .workflow-legend { display: none; }
   }
 </style>
 </head>
@@ -254,28 +386,50 @@
       <div class="dot"></div>
       <div>
         <div class="name">MOUNIR</div>
-        <div class="sub">Admin</div>
+        <div class="sub">Agent Studio</div>
       </div>
     </div>
     <nav class="nav">
-      <button class="nav-item active" data-tab="models">Models</button>
-      <button class="nav-item" data-tab="servers">MCP Servers</button>
-      <button class="nav-item" data-tab="agents">Subagents</button>
+      <button class="nav-item active" data-tab="overview">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="8.5" y="14" width="7" height="7" rx="2"/><path d="M6.5 10v1.5a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V10M12 13.5V14"/></svg>
+        <span>Overview</span>
+      </button>
+      <button class="nav-item" data-tab="models">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
+        <span>Models</span>
+      </button>
+      <button class="nav-item" data-tab="servers">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg>
+        <span>MCP Servers</span>
+      </button>
+      <button class="nav-item" data-tab="agents">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="4"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 7h5M18.5 4.5v5"/></svg>
+        <span>Subagents</span>
+      </button>
     </nav>
     <div class="sidebar-footer">
-      <a href="/"><span class="arrow">←</span><span> Dashboard</span></a>
+      <a href="/" title="Back to Mounir">
+        <span class="back-icon">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+        </span>
+        <span class="back-copy"><strong>Back to Assistant</strong><small>Return to Mounir</small></span>
+      </a>
     </div>
   </aside>
 
   <!-- MAIN -->
   <main class="main">
     <div class="main-header">
-      <h2 id="viewTitle">Models</h2>
+      <div>
+        <h2 id="viewTitle">Agent Overview</h2>
+        <p class="view-subtitle" id="viewSubtitle">How your assistant is connected</p>
+      </div>
       <div class="header-actions">
+        <button class="btn outline" id="testBtn" style="display:none">Test Connection</button>
         <button class="btn outline" id="modifyBtn" style="display:none">Modify</button>
         <button class="btn danger" id="deleteBtn" style="display:none">Delete</button>
         <button class="btn" id="cancelBtn" style="display:none">Cancel</button>
-        <button class="btn primary" id="createBtn">+ Create New</button>
+        <button class="btn primary" id="createBtn" style="display:none">+ Create New</button>
       </div>
     </div>
     <div class="content" id="content">
@@ -287,25 +441,29 @@
 <script>
 /* ========== state ========== */
 const S = {
-  tab: 'models',       // 'models' | 'servers' | 'agents'
-  view: 'list',        // 'list' | 'form'
+  tab: 'overview',     // 'overview' | 'models' | 'servers' | 'agents'
+  view: 'overview',    // 'overview' | 'list' | 'form'
   editing: null,       // null | item object (null = create mode)
-  formReadonly: true,  // true when viewing an instance (readonly), false when creating or after clicking Modify
+  formReadonly: true,  // true when viewing an instance, false when creating/modifying
+  overview: { supervisor: {}, builtins: [] },
   models: [],
   servers: [],
   agents: [],
 };
+let canvasZoom = 1;
 
 const API = {
+  overview: '/api/agent-overview',
   models:  { list: '/api/models',  create: '/api/models',  update: id => `/api/models/${id}`,  del: id => `/api/models/${id}` },
   servers: { list: '/api/mcp-servers', create: '/api/mcp-servers', update: id => `/api/mcp-servers/${id}`, del: id => `/api/mcp-servers/${id}` },
   agents:  { list: '/api/subagents',   create: '/api/subagents',   update: id => `/api/subagents/${id}`,   del: id => `/api/subagents/${id}` },
 };
 
 const TAB_META = {
-  models:  { title: 'Models',        labelSingular: 'Model' },
-  servers: { title: 'MCP Servers',   labelSingular: 'Server' },
-  agents:  { title: 'Subagents',     labelSingular: 'Subagent' },
+  overview: { title: 'Agent Overview', labelSingular: '', subtitle: 'How your assistant is connected' },
+  models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Language models available to dynamic subagents' },
+  servers: { title: 'MCP Servers',   labelSingular: 'Server', subtitle: 'External capabilities connected through MCP' },
+  agents:  { title: 'Subagents',     labelSingular: 'Subagent', subtitle: 'Dynamic specialists available to the supervisor' },
 };
 
 /* ========== helpers ========== */
@@ -313,6 +471,39 @@ function esc(s) { return String(s).replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 function slug(name) { return name.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/_+/g,'_').replace(/^_+|_+$/g,''); }
 function $(id) { return document.getElementById(id); }
+
+function parseObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) { return {}; }
+}
+
+function credentialRowsHtml(entries, readonly) {
+  if (!entries.length) return '<div class="credential-empty">No credentials added.</div>';
+  const disabled = readonly ? ' disabled' : '';
+  return entries.map(([key, value]) => `
+    <div class="credential-row" data-credential-row>
+      <input type="text" data-credential-key value="${esc(key)}" placeholder="Credential name"${readonly ? ' readonly' : ''}>
+      <input type="password" data-credential-value value="${esc(value)}" placeholder="Secret value"${readonly ? ' readonly' : ''}>
+      <button type="button" class="credential-remove" data-credential-remove title="Remove credential"${disabled}>×</button>
+    </div>`).join('');
+}
+
+function remoteAuthFromHeaders(headers) {
+  const entries = Object.entries(headers);
+  if (!entries.length) return { mode: 'none', token: '', header: 'X-API-Key', value: '' };
+  if (entries.length === 1 && entries[0][0].toLowerCase() === 'authorization') {
+    const match = String(entries[0][1]).match(/^Bearer\s+(.+)$/i);
+    if (match) return { mode: 'bearer', token: match[1], header: '', value: '' };
+  }
+  if (entries.length === 1) {
+    return { mode: 'api_key', token: '', header: entries[0][0], value: entries[0][1] };
+  }
+  return { mode: 'custom', token: '', header: '', value: '' };
+}
 
 function items() {
   if (S.tab === 'models') return S.models;
@@ -331,11 +522,13 @@ async function api(method, url, body) {
 }
 
 async function loadAll() {
-  const [m, s, a] = await Promise.all([
+  const [o, m, s, a] = await Promise.all([
+    api('GET', API.overview),
     api('GET', API.models.list),
     api('GET', API.servers.list),
     api('GET', API.agents.list),
   ]);
+  S.overview = o;
   S.models = m;
   S.servers = s;
   S.agents = a;
@@ -343,26 +536,34 @@ async function loadAll() {
 
 /* ========== rendering ========== */
 function render() {
-  if (S.view === 'list') renderList();
+  if (S.tab === 'overview') renderOverview();
+  else if (S.view === 'list') renderList();
   else renderForm();
   updateHeader();
 }
 
 function updateHeader() {
   const meta = TAB_META[S.tab];
+  const inOverview = S.tab === 'overview';
   const inForm = S.view === 'form';
   const editing = inForm && S.editing;
   $('viewTitle').textContent = editing
     ? meta.labelSingular + ' — ' + S.editing.name
     : meta.title;
+  $('viewSubtitle').textContent = meta.subtitle;
   // Create New: only in list view
-  $('createBtn').style.display = inForm ? 'none' : '';
+  $('createBtn').style.display = (inOverview || inForm) ? 'none' : '';
   // Delete: only in readonly form view
-  $('deleteBtn').style.display = (editing && S.formReadonly) ? '' : 'none';
+  $('deleteBtn').style.display = (!inOverview && editing && S.formReadonly) ? '' : 'none';
+  $('testBtn').style.display = (S.tab === 'servers' && editing && S.formReadonly) ? '' : 'none';
   // Cancel: in form view but NOT in readonly edit mode
   $('cancelBtn').style.display = (inForm && !(editing && S.formReadonly)) ? '' : 'none';
   // Modify / Save / Create button
-  if (editing && S.formReadonly) {
+  if (inOverview) {
+    $('modifyBtn').style.display = 'none';
+    $('cancelBtn').style.display = 'none';
+    $('testBtn').style.display = 'none';
+  } else if (editing && S.formReadonly) {
     $('modifyBtn').style.display = '';
     $('modifyBtn').className = 'btn outline';
     $('modifyBtn').textContent = 'Modify';
@@ -373,6 +574,125 @@ function updateHeader() {
   } else {
     $('modifyBtn').style.display = 'none';
   }
+}
+
+function renderOverview() {
+  const supervisor = S.overview.supervisor || {};
+  const builtins = S.overview.builtins || [];
+  const dynamic = S.agents || [];
+  const total = builtins.length + dynamic.length;
+  const supervisorInitial = (supervisor.name || 'M').trim().charAt(0).toUpperCase();
+  const builtinCards = builtins.map((item, index) => agentNodeHtml(item, 'builtin', `builtin-${index}`)).join('');
+  const dynamicCards = dynamic.map(item => agentNodeHtml({
+    ...item,
+    model: item.model || item.model_name,
+  }, 'dynamic', `dynamic-${item.id}`, item.id)).join('');
+
+  $('content').innerHTML = `
+    <div class="overview">
+      <div class="overview-stats">
+        <div class="overview-stat"><strong>1</strong><span>Supervisor</span></div>
+        <div class="overview-stat"><strong>${total}</strong><span>Specialists</span></div>
+        <div class="overview-stat"><strong>${dynamic.length}</strong><span>Dynamic agents</span></div>
+        <div class="overview-stat"><strong>${S.servers.length}</strong><span>MCP servers</span></div>
+      </div>
+      <section class="workflow-shell" aria-label="Agent component topology">
+        <div class="workflow-toolbar">
+          <div class="workflow-title"><span class="live-dot"></span><span>Configured topology</span></div>
+          <div class="workflow-tools">
+            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>Dynamic MCP</span></div>
+            <div class="zoom-controls" aria-label="Graph zoom controls">
+              <button class="zoom-control" type="button" data-zoom="out" aria-label="Zoom out">−</button>
+              <button class="zoom-control value" type="button" data-zoom="reset" id="zoomValue" aria-label="Reset zoom">100%</button>
+              <button class="zoom-control" type="button" data-zoom="in" aria-label="Zoom in">+</button>
+            </div>
+          </div>
+        </div>
+        <div class="workflow-canvas" id="workflowCanvas">
+          <div class="workflow-stage" id="workflowStage">
+            <svg class="workflow-links" id="workflowLinks" aria-hidden="true"></svg>
+            <div class="supervisor-wrap">
+              <article class="agent-node supervisor" id="node-supervisor">
+                <span class="node-port output"></span>
+                <div class="node-head">
+                  <div class="node-icon">${esc(supervisorInitial)}</div>
+                  <div class="node-identity"><div class="node-kind">Supervisor</div><div class="node-name">${esc(supervisor.name || 'Mounir')}</div></div>
+                </div>
+                <div class="node-model" title="${esc(supervisor.model || 'Not configured')}">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+                  ${esc(supervisor.model || 'Not configured')}
+                </div>
+              </article>
+            </div>
+            <div class="agent-grid">${builtinCards}${dynamicCards}</div>
+          </div>
+        </div>
+      </section>
+    </div>`;
+  $('workflowStage').style.zoom = String(canvasZoom);
+  $('zoomValue').textContent = `${Math.round(canvasZoom * 100)}%`;
+  S.view = 'overview';
+  requestAnimationFrame(drawWorkflowLinks);
+}
+
+function agentNodeHtml(item, kind, nodeId, agentId) {
+  const initial = (item.name || '?').trim().charAt(0).toUpperCase();
+  const dynamic = kind === 'dynamic';
+  return `
+    <article class="agent-node ${dynamic ? 'dynamic' : ''}" id="node-${nodeId}"${dynamic ? ` data-agent-id="${agentId}" title="Open subagent settings" role="button" tabindex="0"` : ''}>
+      <span class="node-port input"></span>
+      ${dynamic ? '<svg class="node-open" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>' : ''}
+      <div class="node-head">
+        <div class="node-icon">${esc(initial)}</div>
+        <div class="node-identity"><div class="node-kind">${dynamic ? 'Dynamic MCP' : 'Built-in specialist'}</div><div class="node-name">${esc(item.name)}</div></div>
+      </div>
+      <div class="node-model" title="${esc(item.model || item.model_name || 'Not configured')}">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+        ${esc(item.model || item.model_name || 'Not configured')}
+      </div>
+    </article>`;
+}
+
+function drawWorkflowLinks() {
+  const canvas = $('workflowStage');
+  const svg = $('workflowLinks');
+  const source = $('node-supervisor');
+  if (!canvas || !svg || !source) return;
+  const canvasRect = canvas.getBoundingClientRect();
+  const sourceRect = source.getBoundingClientRect();
+  const sx = (sourceRect.left + sourceRect.width / 2 - canvasRect.left) / canvasZoom;
+  const sy = (sourceRect.bottom - canvasRect.top) / canvasZoom;
+  const targets = canvas.querySelectorAll('.agent-grid .agent-node');
+  const paths = [];
+  targets.forEach(target => {
+    const rect = target.getBoundingClientRect();
+    const tx = (rect.left + rect.width / 2 - canvasRect.left) / canvasZoom;
+    const ty = (rect.top - canvasRect.top) / canvasZoom;
+    const bend = sy + Math.max(28, (ty - sy) * .54);
+    paths.push(`<path d="M ${sx} ${sy} C ${sx} ${bend}, ${tx} ${bend}, ${tx} ${ty}"/><circle cx="${tx}" cy="${ty}" r="2.5"/>`);
+  });
+  svg.setAttribute('viewBox', `0 0 ${canvasRect.width / canvasZoom} ${canvasRect.height / canvasZoom}`);
+  svg.innerHTML = paths.join('');
+}
+
+function setCanvasZoom(value, anchorX, anchorY) {
+  const viewport = $('workflowCanvas');
+  const stage = $('workflowStage');
+  if (!viewport || !stage) return;
+  const next = Math.min(1.5, Math.max(.6, Math.round(value * 10) / 10));
+  if (next === canvasZoom) return;
+  const x = anchorX ?? viewport.clientWidth / 2;
+  const y = anchorY ?? viewport.clientHeight / 2;
+  const graphX = (viewport.scrollLeft + x) / canvasZoom;
+  const graphY = (viewport.scrollTop + y) / canvasZoom;
+  canvasZoom = next;
+  stage.style.zoom = String(canvasZoom);
+  $('zoomValue').textContent = `${Math.round(canvasZoom * 100)}%`;
+  requestAnimationFrame(() => {
+    viewport.scrollLeft = graphX * canvasZoom - x;
+    viewport.scrollTop = graphY * canvasZoom - y;
+    drawWorkflowLinks();
+  });
 }
 
 function renderList() {
@@ -405,6 +725,7 @@ function renderListItem(item) {
         <div class="primary">${esc(item.name)}</div>
         <div class="secondary mono">${esc(item.connection)}</div>
       </div>
+      <span class="badge">${esc(item.transport || 'stdio')}</span>
       <button class="del-btn" data-action="delete" title="Remove">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
@@ -425,8 +746,8 @@ function renderListItem(item) {
 function renderForm() {
   const el = $('content');
   const editing = S.editing;
-  S.formReadonly = !!editing; // readonly when viewing existing, editable when creating
   el.innerHTML = '<div class="form-view">' + buildFormHtml(editing, S.formReadonly) + '</div>';
+
   S.view = 'form';
   updateHeader();
   populateSelects();
@@ -441,26 +762,72 @@ function buildFormHtml(item, readonly) {
     <form class="form-grid" id="formEl">
       <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="e.g. Ollama Cloud" required${ro}></label>
       <label class="full">Model ID
-        <span class="hint">The actual model identifier sent to the API (e.g. qwen3:4b, gpt-4o). Falls back to Name if empty.</span>
-        <input type="text" name="model" value="${e('model')}" placeholder="qwen3:4b"${ro}>
+        <span class="hint">The actual model identifier sent to the API (e.g. qwen3:4b, gpt-4o).</span>
+        <input type="text" name="model" value="${e('model')}" placeholder="qwen3:4b" required${ro}>
       </label>
       <label class="full">Provider <input type="text" name="provider" value="${e('provider')}" placeholder="e.g. Ollama / OpenAI / Groq"${ro}></label>
       <label class="full">Base URL <input type="text" name="base_url" value="${e('base_url')}" placeholder="https://ollama.com/v1" required${ro}></label>
       <label class="full">API key
-        <span class="hint">Use $VAR or \${VAR} to read from env instead of a raw key.</span>
-        <input type="text" name="api_key" value="${e('api_key')}" placeholder="$${esc('OLLAMA_API_KEY')}"${ro}>
+        <span class="hint">Paste the key here. Leave it empty for local models that do not require one.</span>
+        <input type="password" name="api_key" value="${e('api_key')}" placeholder="Paste API key"${ro}>
       </label>
       <div class="full error" id="formError"></div>
     </form>`;
-  if (S.tab === 'servers') return `
+  if (S.tab === 'servers') {
+    const transport = item?.transport || 'stdio';
+    const headers = parseObject(item?.headers);
+    const environment = parseObject(item?.env);
+    const auth = remoteAuthFromHeaders(headers);
+    const disabled = readonly ? ' disabled' : '';
+    return `
     <form class="form-grid" id="formEl">
-      <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="e.g. Brave Search" required${ro}></label>
-      <label class="full">Connection
-        <span class="hint">stdio command (e.g. npx -y ...) or http(s) SSE URL.</span>
-        <input type="text" name="connection" value="${e('connection')}" placeholder="npx -y ... or https://..." required${ro}>
+      <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="e.g. Company Search" required${ro}></label>
+      <label class="full">Server type
+        <span class="hint">Choose the type specified by the MCP provider.</span>
+        <select name="transport" id="serverTransport" required${dis}>
+          <option value="stdio"${transport === 'stdio' ? ' selected' : ''}>Local server — runs on this computer</option>
+          <option value="streamable_http"${transport === 'streamable_http' ? ' selected' : ''}>Remote server — recommended HTTP connection</option>
+          <option value="sse"${transport === 'sse' ? ' selected' : ''}>Remote server — legacy SSE connection</option>
+        </select>
       </label>
+      <label class="full">Connection
+        <span class="hint" id="connectionHint"></span>
+        <input type="text" name="connection" id="serverConnection" value="${e('connection')}" required${ro}>
+      </label>
+
+      <div class="credential-box" id="localCredentials">
+        <div class="credential-title">Local server credentials</div>
+        <div class="hint">Add the credential names listed in the MCP server's setup instructions.</div>
+        <div id="environmentRows">${credentialRowsHtml(Object.entries(environment), readonly)}</div>
+        <button type="button" class="btn outline credential-add" data-add-credential="environment"${disabled}>+ Add credential</button>
+      </div>
+
+      <div class="credential-box" id="remoteCredentials">
+        <label>Authentication
+          <select id="remoteAuthMode"${dis}>
+            <option value="none"${auth.mode === 'none' ? ' selected' : ''}>No authentication</option>
+            <option value="bearer"${auth.mode === 'bearer' ? ' selected' : ''}>Bearer token</option>
+            <option value="api_key"${auth.mode === 'api_key' ? ' selected' : ''}>API key header</option>
+            <option value="custom"${auth.mode === 'custom' ? ' selected' : ''}>Advanced custom headers</option>
+          </select>
+        </label>
+        <label id="bearerFields">Access token
+          <input type="password" id="bearerToken" value="${esc(auth.token)}" placeholder="Paste access token"${ro}>
+        </label>
+        <div id="apiKeyFields" class="credential-row">
+          <label>Header name <input type="text" id="apiKeyHeader" value="${esc(auth.header)}" placeholder="X-API-Key"${ro}></label>
+          <label>API key <input type="password" id="apiKeyValue" value="${esc(auth.value)}" placeholder="Paste API key"${ro}></label>
+        </div>
+        <div id="customHeaderFields">
+          <div class="hint">Only use this when the provider requires multiple custom headers.</div>
+          <div id="headerRows">${credentialRowsHtml(Object.entries(headers), readonly)}</div>
+          <button type="button" class="btn outline credential-add" data-add-credential="headers"${disabled}>+ Add header</button>
+        </div>
+      </div>
+      <div class="full success" id="testResult"></div>
       <div class="full error" id="formError"></div>
     </form>`;
+  }
   return `
     <form class="form-grid" id="formEl">
       <label class="full">Name
@@ -476,6 +843,13 @@ function buildFormHtml(item, readonly) {
       </label>
       <label>Model <select name="model_id" required${dis}></select></label>
       <label>MCP server <select name="mcp_server_id" required${dis}></select></label>
+      <label class="full">Tool confirmation
+        <span class="hint">Unknown MCP servers can perform real actions. Confirmation is safest and is the default.</span>
+        <select name="confirm_tool_calls"${dis}>
+          <option value="true"${!item || item.confirm_tool_calls ? ' selected' : ''}>Ask before every MCP tool call</option>
+          <option value="false"${item && !item.confirm_tool_calls ? ' selected' : ''}>Allow tool calls without asking</option>
+        </select>
+      </label>
       <div class="full error" id="formError"></div>
     </form>`;
 }
@@ -497,10 +871,70 @@ function populateSelects() {
   }
 }
 
+function updateServerFormVisibility() {
+  const transport = $('serverTransport');
+  if (!transport) return;
+  const local = transport.value === 'stdio';
+  $('localCredentials').style.display = local ? '' : 'none';
+  $('remoteCredentials').style.display = local ? 'none' : '';
+  $('connectionHint').textContent = local
+    ? 'Copy the launch command from the MCP server instructions.'
+    : 'Paste the complete MCP endpoint URL supplied by the provider.';
+  $('serverConnection').placeholder = local
+    ? 'Example: npx -y package-name'
+    : 'Example: https://provider.example/mcp';
+  if (!local) updateRemoteAuthVisibility();
+}
+
+function updateRemoteAuthVisibility() {
+  const mode = $('remoteAuthMode')?.value;
+  if (!mode) return;
+  $('bearerFields').style.display = mode === 'bearer' ? '' : 'none';
+  $('apiKeyFields').style.display = mode === 'api_key' ? '' : 'none';
+  $('customHeaderFields').style.display = mode === 'custom' ? '' : 'none';
+}
+
+function addCredentialRow(kind) {
+  const container = kind === 'headers' ? $('headerRows') : $('environmentRows');
+  container.querySelector('.credential-empty')?.remove();
+  container.insertAdjacentHTML('beforeend', credentialRowsHtml([['', '']], false));
+  container.lastElementChild?.querySelector('[data-credential-key]')?.focus();
+}
+
+function collectCredentialRows(containerId, label) {
+  const result = {};
+  for (const row of $(containerId).querySelectorAll('[data-credential-row]')) {
+    const key = row.querySelector('[data-credential-key]').value.trim();
+    const value = row.querySelector('[data-credential-value]').value;
+    if (!key && !value) continue;
+    if (!key) throw new Error(`${label} name is required.`);
+    if (!value) throw new Error(`${label} value is required for “${key}”.`);
+    if (Object.hasOwn(result, key)) throw new Error(`${label} “${key}” is duplicated.`);
+    result[key] = value;
+  }
+  return result;
+}
+
 function attachFormEvents() {
   const f = $('formEl');
   if (!f) return;
   f.addEventListener('submit', onFormSubmit);
+  if (S.tab !== 'servers') return;
+  $('serverTransport').addEventListener('change', updateServerFormVisibility);
+  $('remoteAuthMode').addEventListener('change', updateRemoteAuthVisibility);
+  f.addEventListener('click', event => {
+    const add = event.target.closest('[data-add-credential]');
+    if (add) addCredentialRow(add.dataset.addCredential);
+    const remove = event.target.closest('[data-credential-remove]');
+    if (remove) {
+      const container = remove.closest('[id$="Rows"]');
+      remove.closest('[data-credential-row]').remove();
+      if (!container.querySelector('[data-credential-row]')) {
+        container.innerHTML = '<div class="credential-empty">No credentials added.</div>';
+      }
+    }
+  });
+  updateServerFormVisibility();
 }
 
 /* ========== form submit ========== */
@@ -515,8 +949,35 @@ async function onFormSubmit(e) {
   if (S.tab === 'agents') {
     body.model_id = +body.model_id;
     body.mcp_server_id = +body.mcp_server_id;
+    body.confirm_tool_calls = body.confirm_tool_calls === 'true';
   }
   try {
+    if (S.tab === 'servers') {
+      if (body.transport === 'stdio') {
+        body.headers = '{}';
+        body.env = JSON.stringify(
+          collectCredentialRows('environmentRows', 'Credential')
+        );
+      } else {
+        body.env = '{}';
+        const mode = $('remoteAuthMode').value;
+        let headers = {};
+        if (mode === 'bearer') {
+          const token = $('bearerToken').value.trim();
+          if (!token) throw new Error('Access token is required.');
+          headers.Authorization = `Bearer ${token}`;
+        } else if (mode === 'api_key') {
+          const header = $('apiKeyHeader').value.trim();
+          const value = $('apiKeyValue').value;
+          if (!header) throw new Error('API key header name is required.');
+          if (!value) throw new Error('API key is required.');
+          headers[header] = value;
+        } else if (mode === 'custom') {
+          headers = collectCredentialRows('headerRows', 'Header');
+        }
+        body.headers = JSON.stringify(headers);
+      }
+    }
     if (S.editing) {
       await api('PUT', API[S.tab].update(S.editing.id), body);
     } else {
@@ -524,6 +985,7 @@ async function onFormSubmit(e) {
     }
     await loadAll();
     S.editing = null;
+    S.formReadonly = true;
     S.view = 'list';
     render();
   } catch (ex) {
@@ -533,6 +995,27 @@ async function onFormSubmit(e) {
 
 /* ========== list events (click item / delete) ========== */
 $('content').addEventListener('click', async e => {
+  const zoomControl = e.target.closest('[data-zoom]');
+  if (zoomControl) {
+    const action = zoomControl.dataset.zoom;
+    setCanvasZoom(action === 'reset' ? 1 : canvasZoom + (action === 'in' ? .1 : -.1));
+    return;
+  }
+  // Dynamic nodes in the topology open their real subagent configuration.
+  const agentNode = e.target.closest('[data-agent-id]');
+  if (agentNode) {
+    const item = S.agents.find(agent => agent.id === +agentNode.dataset.agentId);
+    if (!item) return;
+    S.tab = 'agents';
+    S.view = 'form';
+    S.editing = item;
+    S.formReadonly = true;
+    document.querySelectorAll('.nav-item').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tab === 'agents');
+    });
+    renderForm();
+    return;
+  }
   // Delete button
   const delBtn = e.target.closest('[data-action="delete"]');
   if (delBtn) {
@@ -557,13 +1040,89 @@ $('content').addEventListener('click', async e => {
   const item = list.find(x => x.id === id);
   if (!item) return;
   S.editing = item;
+  S.formReadonly = true;
   renderForm();
 });
+
+$('content').addEventListener('keydown', e => {
+  const agentNode = e.target.closest('[data-agent-id]');
+  if (!agentNode || (e.key !== 'Enter' && e.key !== ' ')) return;
+  e.preventDefault();
+  agentNode.click();
+});
+
+$('content').addEventListener('wheel', e => {
+  const viewport = e.target.closest('#workflowCanvas');
+  if (!viewport || (!e.ctrlKey && !e.metaKey)) return;
+  e.preventDefault();
+  const rect = viewport.getBoundingClientRect();
+  setCanvasZoom(
+    canvasZoom + (e.deltaY < 0 ? .1 : -.1),
+    e.clientX - rect.left,
+    e.clientY - rect.top
+  );
+}, { passive: false });
+
+let canvasPan = null;
+$('content').addEventListener('pointerdown', e => {
+  const viewport = e.target.closest('#workflowCanvas');
+  if (!viewport || e.button !== 0 || e.target.closest('.agent-node, .zoom-controls')) return;
+  canvasPan = {
+    viewport,
+    pointerId: e.pointerId,
+    x: e.clientX,
+    y: e.clientY,
+    left: viewport.scrollLeft,
+    top: viewport.scrollTop,
+  };
+  viewport.classList.add('is-panning');
+  viewport.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+
+$('content').addEventListener('pointermove', e => {
+  if (!canvasPan || e.pointerId !== canvasPan.pointerId) return;
+  canvasPan.viewport.scrollLeft = canvasPan.left - (e.clientX - canvasPan.x);
+  canvasPan.viewport.scrollTop = canvasPan.top - (e.clientY - canvasPan.y);
+});
+
+function stopCanvasPan(e) {
+  if (!canvasPan || e.pointerId !== canvasPan.pointerId) return;
+  canvasPan.viewport.classList.remove('is-panning');
+  if (canvasPan.viewport.hasPointerCapture(e.pointerId)) {
+    canvasPan.viewport.releasePointerCapture(e.pointerId);
+  }
+  canvasPan = null;
+}
+$('content').addEventListener('pointerup', stopCanvasPan);
+$('content').addEventListener('pointercancel', stopCanvasPan);
 
 /* ========== header buttons ========== */
 $('createBtn').addEventListener('click', () => {
   S.editing = null;
+  S.formReadonly = false;
   renderForm();
+});
+
+$('testBtn').addEventListener('click', async () => {
+  if (S.tab !== 'servers' || !S.editing) return;
+  const out = $('testResult');
+  const err = $('formError');
+  out.textContent = 'Connecting…';
+  err.textContent = '';
+  $('testBtn').disabled = true;
+  try {
+    const result = await api('POST', `/api/mcp-servers/${S.editing.id}/test`);
+    const names = result.tools.map(t => t.name);
+    out.textContent = names.length
+      ? `Connected. ${names.length} tool(s): ${names.join(', ')}`
+      : 'Connected. The server advertised no tools.';
+  } catch (ex) {
+    out.textContent = '';
+    err.textContent = ex.message;
+  } finally {
+    $('testBtn').disabled = false;
+  }
 });
 
 $('modifyBtn').addEventListener('click', () => {
@@ -573,6 +1132,7 @@ $('modifyBtn').addEventListener('click', () => {
     // Enable all fields
     f.querySelectorAll('input[readonly], textarea[readonly]').forEach(el => el.removeAttribute('readonly'));
     f.querySelectorAll('select[disabled]').forEach(el => el.removeAttribute('disabled'));
+    f.querySelectorAll('button[disabled]').forEach(el => el.removeAttribute('disabled'));
     S.formReadonly = false;
     updateHeader();
   } else {
@@ -588,16 +1148,22 @@ document.querySelectorAll('.nav-item').forEach(btn => {
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     S.tab = btn.dataset.tab;
-    S.view = 'list';
+    S.view = S.tab === 'overview' ? 'overview' : 'list';
     S.editing = null;
+    S.formReadonly = true;
     render();
   });
+});
+
+window.addEventListener('resize', () => {
+  if (S.tab === 'overview') requestAnimationFrame(drawWorkflowLinks);
 });
 
 /* ========== cancel button ========== */
 $('cancelBtn').addEventListener('click', () => {
   S.editing = null;
   S.view = 'list';
+  S.formReadonly = true;
   render();
 });
 
@@ -609,6 +1175,7 @@ $('deleteBtn').addEventListener('click', async () => {
     await api('DELETE', API[S.tab].del(S.editing.id));
     S.editing = null;
     S.view = 'list';
+    S.formReadonly = true;
     await loadAll();
     render();
   } catch (ex) { alert(ex.message); }
@@ -618,6 +1185,11 @@ $('deleteBtn').addEventListener('click', async () => {
 async function init() {
   await loadAll();
   render();
+  if (document.fonts?.ready) {
+    document.fonts.ready.then(() => {
+      if (S.tab === 'overview') drawWorkflowLinks();
+    });
+  }
 }
 init();
 </script>

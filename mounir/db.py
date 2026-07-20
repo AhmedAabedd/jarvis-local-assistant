@@ -3,7 +3,7 @@
 Three tables:
 
 - ``models``       reusable LLM presets (name, provider, base_url, api_key)
-- ``mcp_servers``  reusable MCP server connections (name, connection)
+- ``mcp_servers``  reusable MCP server connections (transport + command/URL)
 - ``subagents``    the actual agents the supervisor can delegate to
                    (name, system_prompt, model_id, mcp_server_id, parent)
 
@@ -28,6 +28,7 @@ from . import config as cfg
 
 DB_PATH: Path = cfg.DATA_DIR / "mounir.db"
 LEGACY_REGISTRY: Path = cfg.DATA_DIR / "mcp_agents.json"
+MCP_TRANSPORTS = {"stdio", "streamable_http", "sse"}
 
 
 def _now() -> str:
@@ -36,9 +37,17 @@ def _now() -> str:
 
 @contextmanager
 def _connect():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # UI-entered credentials are stored locally in this DB. Restrict it to the
+    # current OS user even when the process was started with a permissive umask.
+    try:
+        DB_PATH.chmod(0o600)
+    except OSError:
+        pass
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
     try:
         yield conn
     finally:
@@ -61,7 +70,25 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS mcp_servers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
+
+            -- stdio | sse | streamable_http
+            transport TEXT NOT NULL DEFAULT 'stdio',
+
+            -- command for stdio OR URL for remote transports
             connection TEXT NOT NULL,
+
+            -- JSON object:
+            -- {
+            --   "Authorization": "Bearer xxx"
+            -- }
+            headers TEXT NOT NULL DEFAULT '{}',
+
+            -- JSON object:
+            -- {
+            --   "API_KEY": "xxx"
+            -- }
+            env TEXT NOT NULL DEFAULT '{}',
+
             created_at TEXT
         );
 
@@ -72,22 +99,133 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             system_prompt TEXT NOT NULL,
             model_id INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
             mcp_server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT,
+            confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
             parent TEXT DEFAULT 'supervisor',
             created_at TEXT
         );
         """
     )
-    # Older DBs from earlier iterations may be missing the description column.
-    try:
-        conn.execute("ALTER TABLE subagents ADD COLUMN description TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-    # Newer columns added after the initial release.
-    try:
-        conn.execute("ALTER TABLE models ADD COLUMN model TEXT")
-    except sqlite3.OperationalError:
-        pass
+    # CREATE TABLE does not add columns to an existing SQLite table. Keep the
+    # migrations explicit so upgrading an earlier feature-branch DB works.
+    migrations = {
+        "models": {"model": "TEXT"},
+        "mcp_servers": {
+            "transport": "TEXT NOT NULL DEFAULT 'stdio'",
+            "headers": "TEXT NOT NULL DEFAULT '{}'",
+            "env": "TEXT NOT NULL DEFAULT '{}'",
+        },
+        "subagents": {
+            "description": "TEXT NOT NULL DEFAULT ''",
+            "confirm_tool_calls": "INTEGER NOT NULL DEFAULT 1",
+        },
+    }
+    for table, columns in migrations.items():
+        existing = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        for column, definition in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    # Earlier versions inferred every URL as legacy SSE and had no transport
+    # column. A URL cannot be a valid stdio command, so migrate it to the
+    # current remote default; users can explicitly switch old servers to SSE.
+    conn.execute(
+        """
+        UPDATE mcp_servers
+        SET transport = 'streamable_http'
+        WHERE transport = 'stdio'
+          AND (connection LIKE 'http://%' OR connection LIKE 'https://%')
+        """
+    )
+    conn.execute(
+        "UPDATE models SET model = name WHERE model IS NULL OR trim(model) = ''"
+    )
+    # Normalize values accepted by the earlier UI: a full completions URL and
+    # Ollama's native /api/chat URL were commonly pasted into "Base URL".
+    for row in conn.execute("SELECT id, base_url FROM models"):
+        try:
+            normalized = _normalize_model_base_url(row["base_url"])
+        except ValueError:
+            continue  # Keep the DB readable so the invalid preset can be edited.
+        if normalized != row["base_url"]:
+            conn.execute(
+                "UPDATE models SET base_url = ? WHERE id = ?",
+                (normalized, row["id"]),
+            )
     conn.commit()
+
+
+def _required(value, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} is required.")
+    return text
+
+
+def _normalize_model_base_url(value) -> str:
+    base_url = _required(value, "base URL").rstrip("/")
+    if not base_url.startswith(("http://", "https://")):
+        raise ValueError("base URL must start with http:// or https://.")
+    if base_url.endswith("/chat/completions"):
+        base_url = base_url.removesuffix("/chat/completions")
+    if base_url.endswith("/api/chat") and (
+        "//localhost:" in base_url or "//127.0.0.1:" in base_url
+    ):
+        base_url = base_url.removesuffix("/api/chat") + "/v1"
+    return base_url
+
+
+def _json_object(value, field: str) -> str:
+    """Validate and canonicalize a JSON object stored in SQLite."""
+    if value in (None, ""):
+        parsed = {}
+    elif isinstance(value, dict):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{field} must be a valid JSON object: {exc.msg}.") from exc
+    else:
+        raise ValueError(f"{field} must be a JSON object.")
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field} must be a JSON object.")
+    normalized = {str(k): str(v) for k, v in parsed.items()}
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+
+def _bool(value, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.lower() in {"true", "false", "1", "0"}:
+        return value.lower() in {"true", "1"}
+    raise ValueError(f"{field} must be true or false.")
+
+
+def _validate_transport(transport, connection) -> tuple[str, str]:
+    transport = str(transport or "stdio").strip().lower()
+    connection = _required(connection, "connection")
+    if transport not in MCP_TRANSPORTS:
+        raise ValueError(
+            "transport must be stdio, streamable_http, or sse."
+        )
+    is_url = connection.startswith(("http://", "https://"))
+    if transport == "stdio" and is_url:
+        raise ValueError("stdio needs a local command, not a URL.")
+    if transport != "stdio" and not is_url:
+        raise ValueError(f"{transport} needs an http:// or https:// URL.")
+    return transport, connection
+
+
+def _friendly_integrity_error(exc: sqlite3.IntegrityError) -> ValueError:
+    message = str(exc)
+    if "UNIQUE constraint failed" in message:
+        return ValueError("An item with that name already exists.")
+    if "FOREIGN KEY constraint failed" in message:
+        return ValueError("The selected model or MCP server does not exist.")
+    return ValueError(message)
 
 
 def _migrate_legacy(conn: sqlite3.Connection) -> None:
@@ -111,18 +249,27 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
             api_key = ""
             if a.get("api_key_env"):
                 api_key = f"${{{a['api_key_env']}}}"
-            model_id = _add_model(conn, model_name, model_name, "Imported", a.get("base_url", ""), api_key)
+            model_id = _add_model(
+                conn,
+                model_name,
+                model_name,
+                "Imported",
+                a.get("base_url") or "http://localhost:11434/v1",
+                api_key,
+            )
         else:
             model_id = model["id"]
 
         cmd = (a.get("command") or "").strip()
         server_name = f"Imported: {cmd[:50]}" if cmd else "Imported server"
+        if not cmd:
+            continue
         server_id = _add_server(conn, server_name, cmd)
 
         _add_subagent(
             conn,
             name=a.get("name", "Imported agent"),
-            description=a.get("description", ""),
+            description=a.get("description") or f"Uses the {server_name} MCP server.",
             system_prompt=a.get("prompt", ""),
             model_id=model_id,
             mcp_server_id=server_id,
@@ -150,17 +297,20 @@ def _add_model(
     base_url: str,
     api_key: str,
 ) -> int:
-    cur = conn.execute(
-        "INSERT INTO models (name, model, provider, base_url, api_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            name.strip(),
-            (model or "").strip(),
-            (provider or "").strip(),
-            base_url.strip(),
-            api_key,
-            _now(),
-        ),
-    )
+    try:
+        cur = conn.execute(
+            "INSERT INTO models (name, model, provider, base_url, api_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                _required(name, "name"),
+                _required(model, "model ID"),
+                (provider or "").strip(),
+                _normalize_model_base_url(base_url),
+                api_key or "",
+                _now(),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise _friendly_integrity_error(exc) from exc
     conn.commit()
     return cur.lastrowid
 
@@ -197,12 +347,24 @@ def list_models() -> list[dict]:
 
 def update_model(model_id: int, **kwargs) -> dict | None:
     allowed = {"name", "model", "provider", "base_url", "api_key"}
-    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
         return get_model(model_id)
+    if "name" in fields:
+        fields["name"] = _required(fields["name"], "name")
+    if "model" in fields:
+        fields["model"] = _required(fields["model"], "model ID")
+    if "base_url" in fields:
+        fields["base_url"] = _normalize_model_base_url(fields["base_url"])
     with _connect() as conn:
         sets = ", ".join(f"{k} = ?" for k in fields)
-        conn.execute(f"UPDATE models SET {sets} WHERE id = ?", (*fields.values(), model_id))
+        try:
+            conn.execute(
+                f"UPDATE models SET {sets} WHERE id = ?",
+                (*fields.values(), model_id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
         conn.commit()
         return get_model(model_id)
 
@@ -221,18 +383,53 @@ def delete_model(model_id: int) -> bool:
 # MCP servers
 # -----------------------------------------------------------------------------
 
-def _add_server(conn: sqlite3.Connection, name: str, connection: str) -> int:
-    cur = conn.execute(
-        "INSERT INTO mcp_servers (name, connection, created_at) VALUES (?, ?, ?)",
-        (name.strip(), connection.strip(), _now()),
-    )
+def _add_server(
+    conn: sqlite3.Connection,
+    name: str,
+    connection: str,
+    transport: str = "stdio",
+    headers="{}",
+    env="{}",
+) -> int:
+    transport, connection = _validate_transport(transport, connection)
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO mcp_servers
+                (name, transport, connection, headers, env, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _required(name, "name"),
+                transport,
+                connection,
+                _json_object(headers, "headers"),
+                _json_object(env, "environment"),
+                _now(),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise _friendly_integrity_error(exc) from exc
     conn.commit()
     return cur.lastrowid
 
 
-def add_server(name: str, connection: str) -> dict:
+def add_server(
+    name: str,
+    connection: str,
+    transport="stdio",
+    headers="{}",
+    env="{}",
+) -> dict:
     with _connect() as conn:
-        sid = _add_server(conn, name, connection)
+        sid = _add_server(
+            conn,
+            name,
+            connection,
+            transport,
+            headers,
+            env,
+        )
         return get_server(sid)
 
 
@@ -250,13 +447,41 @@ def list_servers() -> list[dict]:
 
 
 def update_server(server_id: int, **kwargs) -> dict | None:
-    allowed = {"name", "connection"}
-    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    allowed = {
+        "name",
+        "connection",
+        "transport",
+        "headers",
+        "env"
+    }
+    fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
         return get_server(server_id)
+    current = get_server(server_id)
+    if current is None:
+        return None
+    transport, connection = _validate_transport(
+        fields.get("transport", current["transport"]),
+        fields.get("connection", current["connection"]),
+    )
+    if "transport" in fields or "connection" in fields:
+        fields["transport"] = transport
+        fields["connection"] = connection
+    if "name" in fields:
+        fields["name"] = _required(fields["name"], "name")
+    if "headers" in fields:
+        fields["headers"] = _json_object(fields["headers"], "headers")
+    if "env" in fields:
+        fields["env"] = _json_object(fields["env"], "environment")
     with _connect() as conn:
         sets = ", ".join(f"{k} = ?" for k in fields)
-        conn.execute(f"UPDATE mcp_servers SET {sets} WHERE id = ?", (*fields.values(), server_id))
+        try:
+            conn.execute(
+                f"UPDATE mcp_servers SET {sets} WHERE id = ?",
+                (*fields.values(), server_id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
         conn.commit()
         return get_server(server_id)
 
@@ -282,12 +507,30 @@ def _add_subagent(
     system_prompt: str,
     model_id: int,
     mcp_server_id: int,
+    confirm_tool_calls: bool = True,
     parent: str = "supervisor",
 ) -> int:
-    cur = conn.execute(
-        "INSERT INTO subagents (name, description, system_prompt, model_id, mcp_server_id, parent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (name.strip(), description.strip(), system_prompt.strip(), model_id, mcp_server_id, parent.strip() or "supervisor", _now()),
-    )
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO subagents
+                (name, description, system_prompt, model_id, mcp_server_id,
+                 confirm_tool_calls, parent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _required(name, "name"),
+                _required(description, "description"),
+                (system_prompt or "").strip(),
+                int(model_id),
+                int(mcp_server_id),
+                int(_bool(confirm_tool_calls, "confirm_tool_calls")),
+                (parent or "supervisor").strip() or "supervisor",
+                _now(),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise _friendly_integrity_error(exc) from exc
     conn.commit()
     return cur.lastrowid
 
@@ -298,24 +541,31 @@ def add_subagent(
     system_prompt: str,
     model_id: int,
     mcp_server_id: int,
+    confirm_tool_calls: bool = True,
     parent: str = "supervisor",
 ) -> dict:
     with _connect() as conn:
-        aid = _add_subagent(conn, name, description, system_prompt, model_id, mcp_server_id, parent)
+        aid = _add_subagent(
+            conn, name, description, system_prompt, model_id, mcp_server_id,
+            confirm_tool_calls, parent,
+        )
         return get_subagent(aid)
+
+
+_SUBAGENT_SELECT = """
+    SELECT s.*, m.name AS model_name, m.model, m.provider, m.base_url, m.api_key,
+           srv.name AS server_name, srv.transport, srv.connection,
+           srv.headers, srv.env
+    FROM subagents s
+    JOIN models m ON s.model_id = m.id
+    JOIN mcp_servers srv ON s.mcp_server_id = srv.id
+"""
 
 
 def get_subagent(subagent_id: int) -> dict | None:
     with _connect() as conn:
         cur = conn.execute(
-            """
-            SELECT s.*, m.name AS model_name, m.provider, m.base_url, m.api_key,
-                   srv.name AS server_name, srv.connection
-            FROM subagents s
-            JOIN models m ON s.model_id = m.id
-            JOIN mcp_servers srv ON s.mcp_server_id = srv.id
-            WHERE s.id = ?
-            """,
+            f"{_SUBAGENT_SELECT} WHERE s.id = ?",
             (subagent_id,),
         )
         row = cur.fetchone()
@@ -325,14 +575,7 @@ def get_subagent(subagent_id: int) -> dict | None:
 def get_subagent_by_name(name: str) -> dict | None:
     with _connect() as conn:
         cur = conn.execute(
-            """
-            SELECT s.*, m.name AS model_name, m.provider, m.base_url, m.api_key,
-                   srv.name AS server_name, srv.connection
-            FROM subagents s
-            JOIN models m ON s.model_id = m.id
-            JOIN mcp_servers srv ON s.mcp_server_id = srv.id
-            WHERE s.name = ?
-            """,
+            f"{_SUBAGENT_SELECT} WHERE s.name = ?",
             (name.strip(),),
         )
         row = cur.fetchone()
@@ -341,27 +584,35 @@ def get_subagent_by_name(name: str) -> dict | None:
 
 def list_subagents() -> list[dict]:
     with _connect() as conn:
-        cur = conn.execute(
-            """
-            SELECT s.*, m.name AS model_name, m.provider, m.base_url, m.api_key,
-                   srv.name AS server_name, srv.connection
-            FROM subagents s
-            JOIN models m ON s.model_id = m.id
-            JOIN mcp_servers srv ON s.mcp_server_id = srv.id
-            ORDER BY s.name
-            """
-        )
+        cur = conn.execute(f"{_SUBAGENT_SELECT} ORDER BY s.name")
         return [dict(r) for r in cur.fetchall()]
 
 
 def update_subagent(subagent_id: int, **kwargs) -> dict | None:
-    allowed = {"name", "description", "system_prompt", "model_id", "mcp_server_id", "parent"}
-    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    allowed = {
+        "name", "description", "system_prompt", "model_id",
+        "mcp_server_id", "confirm_tool_calls", "parent",
+    }
+    fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
         return get_subagent(subagent_id)
+    if "name" in fields:
+        fields["name"] = _required(fields["name"], "name")
+    if "description" in fields:
+        fields["description"] = _required(fields["description"], "description")
+    if "confirm_tool_calls" in fields:
+        fields["confirm_tool_calls"] = int(
+            _bool(fields["confirm_tool_calls"], "confirm_tool_calls")
+        )
     with _connect() as conn:
         sets = ", ".join(f"{k} = ?" for k in fields)
-        conn.execute(f"UPDATE subagents SET {sets} WHERE id = ?", (*fields.values(), subagent_id))
+        try:
+            conn.execute(
+                f"UPDATE subagents SET {sets} WHERE id = ?",
+                (*fields.values(), subagent_id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
         conn.commit()
         return get_subagent(subagent_id)
 
@@ -384,6 +635,27 @@ def _resolve_key(key: str) -> str:
     return os.path.expandvars(key)
 
 
+def _resolved_json_object(value: str) -> dict[str, str]:
+    parsed = json.loads(value or "{}")
+    if not isinstance(parsed, dict):
+        raise ValueError("Stored MCP headers/environment must be JSON objects.")
+    return {str(k): os.path.expandvars(str(v)) for k, v in parsed.items()}
+
+
+def build_server_spec(server_id: int) -> dict | None:
+    """Resolve one saved server into the shape the MCP client expects."""
+    server = get_server(server_id)
+    if server is None:
+        return None
+    return {
+        "name": server["name"],
+        "transport": server.get("transport") or "stdio",
+        "connection": server["connection"],
+        "headers": _resolved_json_object(server.get("headers") or "{}"),
+        "env": _resolved_json_object(server.get("env") or "{}"),
+    }
+
+
 def build_specs() -> list[dict]:
     """Return the list of subagent specs the graph uses at compile time.
 
@@ -398,13 +670,20 @@ def build_specs() -> list[dict]:
                 "name": s["name"],
                 "description": s.get("description") or f"Uses the {s['server_name']} MCP server.",
                 "prompt": s["system_prompt"],
-                "command": s["connection"],
+
+                "transport": s.get("transport") or "stdio",
+                "connection": s["connection"],
+
+                "headers": _resolved_json_object(s.get("headers") or "{}"),
+                "env": _resolved_json_object(s.get("env") or "{}"),
+
                 "parent": s.get("parent") or "supervisor",
+
                 "model": (s.get("model") or "").strip() or s["model_name"],
                 "base_url": s["base_url"],
                 "api_key": _resolve_key(s.get("api_key") or ""),
-                "env": {},
-                "confirm_tools": [],
+
+                "confirm_tools": ["*"] if s.get("confirm_tool_calls", 1) else [],
             }
         )
     return specs

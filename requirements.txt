@@ -21,5 +21,12 @@ pyTelegramBotAPI>=4.14
 # play_on_youtube: resolve a search to the top video, no API key
 yt-dlp>=2024.1.1
 
-# Email specialist — MCP client SDK; the Gmail MCP server itself runs via npx
-mcp>=1.0
+# MCP clients. Streamable HTTP support uses the current SDK client API.
+mcp>=1.27,<2
+httpx>=0.27
+
+# Web dashboard + admin API
+fastapi>=0.110
+uvicorn>=0.29
+psutil>=5.9
+python-multipart>=0.0.9

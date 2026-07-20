@@ -1,7 +1,7 @@
 """Generic MCP specialist — one dynamic subagent instance per registry entry.
 
-Same shape as the email agent (Mounir's hand-tuned MCP specialist): spawn the
-server over stdio for the task, adopt whatever tools it advertises as OpenAI
+Same shape as the email agent (Mounir's hand-tuned MCP specialist): connect to
+the configured server for the task, adopt whatever tools it advertises as OpenAI
 schemas, loop with the LLM until it reports, and return ONLY the short report.
 The server's tool schemas and raw results never leave this module — the parent
 just sees its delegate tool and the report.
@@ -28,6 +28,12 @@ MAX_TOOL_ROUNDS = 8
 # One tool result can be a whole page or listing — cap it so a huge result
 # can't flood the loop's context.
 MAX_RESULT_CHARS = 8000
+DEFAULT_SYSTEM_PROMPT = """\
+You are a focused MCP tool specialist. Use the available tools to complete the
+task, report only outcomes supported by tool results, and stop when the task is
+done. If a tool is declined or fails, say so and do not pretend it succeeded.
+Your final response is a short report for the supervisor, with no heading.
+"""
 
 
 def _openai_tools(mcp_tools) -> list[dict]:
@@ -46,8 +52,20 @@ def _openai_tools(mcp_tools) -> list[dict]:
 
 
 def _result_text(result) -> str:
-    """Flatten an MCP call result to plain text for the tool message."""
+    """Flatten text and structured MCP results for a text-only model."""
     parts = [c.text for c in result.content if getattr(c, "type", "") == "text"]
+    structured = getattr(result, "structuredContent", None)
+    if structured:
+        rendered = json.dumps(structured, ensure_ascii=False, default=str)
+        if rendered not in parts:
+            parts.append(rendered)
+    non_text = [
+        getattr(c, "type", type(c).__name__)
+        for c in result.content
+        if getattr(c, "type", "") != "text"
+    ]
+    if non_text:
+        parts.append(f"[non-text MCP content omitted: {', '.join(non_text)}]")
     text = "\n".join(parts).strip() or "(empty result)"
     if getattr(result, "isError", False):
         text = f"Tool failed: {text}"
@@ -58,10 +76,11 @@ def _result_text(result) -> str:
 
 def _exc_detail(exc: BaseException) -> str:
     """Pull a human-readable message out of an ExceptionGroup / BaseExceptionGroup."""
-    if isinstance(exc, BaseExceptionGroup):
-        if len(exc.exceptions) == 1:
-            return _exc_detail(exc.exceptions[0])
-        return "; ".join(_exc_detail(e) for e in exc.exceptions)
+    nested = getattr(exc, "exceptions", None)
+    if nested and type(exc).__name__.endswith("ExceptionGroup"):
+        if len(nested) == 1:
+            return _exc_detail(nested[0])
+        return "; ".join(_exc_detail(error) for error in nested)
     msg = str(exc).strip()
     if not msg:
         return type(exc).__name__
@@ -70,7 +89,7 @@ def _exc_detail(exc: BaseException) -> str:
 
 async def _call(session, name: str, args: dict, confirm_tools: set[str]) -> str:
     """One tool call via the MCP server, confirmation gate included."""
-    if name in confirm_tools:
+    if "*" in confirm_tools or name in confirm_tools:
         from .. import tools as _tools
 
         summary = f"{name} {json.dumps(args, ensure_ascii=False)[:400]}"
@@ -86,32 +105,92 @@ async def _call(session, name: str, args: dict, confirm_tools: set[str]) -> str:
 
 @asynccontextmanager
 async def _mcp_session(spec: dict):
-    """Yield an initialized MCP ClientSession, using stdio or SSE depending on
-    whether the connection string looks like a URL."""
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import get_default_environment, stdio_client
-    from mcp.client.sse import sse_client
+    """Yield one initialized MCP session using the selected standard transport."""
 
-    connection = (spec.get("command") or "").strip()
-    if connection.startswith(("http://", "https://")):
-        async with sse_client(connection) as (read, write):
+    from mcp import ClientSession, StdioServerParameters
+
+    transport = (spec.get("transport") or "stdio").strip().lower()
+    connection = (spec.get("connection") or "").strip()
+
+    if not connection:
+        raise ValueError("MCP server connection is empty")
+
+    if transport == "streamable_http":
+        import httpx
+        from mcp.client.streamable_http import streamable_http_client
+
+        timeout = httpx.Timeout(30.0, read=300.0)
+        async with httpx.AsyncClient(
+            headers=spec.get("headers") or None,
+            follow_redirects=True,
+            timeout=timeout,
+        ) as http_client:
+            async with streamable_http_client(
+                connection,
+                http_client=http_client,
+            ) as streams:
+                # SDK 1.x returns (read, write, get_session_id). Accept extra
+                # fields so this remains compatible with minor SDK changes.
+                read, write = streams[:2]
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+
+    elif transport == "sse":
+        from mcp.client.sse import sse_client
+
+        async with sse_client(
+            connection,
+            headers=spec.get("headers") or None,
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 yield session
-    else:
+
+    elif transport == "stdio":
+        from mcp.client.stdio import get_default_environment, stdio_client
+
         argv = shlex.split(connection)
-        # None = the SDK's default minimal env. When the spec asks for extra
-        # vars, merge them on top, expanding "$VAR" references.
-        env = None
+
+        if not argv:
+            raise ValueError("Invalid stdio MCP command")
+
+        env = get_default_environment()
+
         if spec.get("env"):
-            env = get_default_environment() | {
-                k: os.path.expandvars(str(v)) for k, v in spec["env"].items()
-            }
+            env.update({
+                str(k): os.path.expandvars(str(v))
+                for k, v in spec["env"].items()
+            })
+
         params = StdioServerParameters(command=argv[0], args=argv[1:], env=env)
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 yield session
+    else:
+        raise ValueError(f"Unsupported MCP transport: {transport}")
+
+
+async def _list_tools(session) -> list:
+    """Read every page of tools advertised by the server."""
+    tools = []
+    cursor = None
+    while True:
+        page = await session.list_tools(cursor=cursor)
+        tools.extend(page.tools)
+        cursor = getattr(page, "nextCursor", None)
+        if not cursor:
+            return tools
+
+
+async def discover_tools(spec: dict) -> list[dict]:
+    """Connect once and return a small, JSON-safe server capability summary."""
+    async with _mcp_session(spec) as session:
+        return [
+            {"name": tool.name, "description": tool.description or ""}
+            for tool in await _list_tools(session)
+        ]
 
 
 async def _run_async(task: str, spec: dict, api_key: str) -> str:
@@ -121,10 +200,14 @@ async def _run_async(task: str, spec: dict, api_key: str) -> str:
 
     try:
         async with _mcp_session(spec) as session:
-            tools = _openai_tools((await session.list_tools()).tools)
+            tools = _openai_tools(await _list_tools(session))
 
             messages = [
-                {"role": "system", "content": spec["prompt"]},
+                {
+                    "role": "system",
+                    "content": (spec.get("prompt") or "").strip()
+                    or DEFAULT_SYSTEM_PROMPT,
+                },
                 {"role": "user", "content": task},
             ]
 
@@ -172,8 +255,19 @@ async def _run_async(task: str, spec: dict, api_key: str) -> str:
                     name = tc["function"]["name"]
                     try:
                         args = json.loads(tc["function"].get("arguments") or "{}")
-                    except Exception:
-                        args = {}
+                        if not isinstance(args, dict):
+                            raise ValueError("tool arguments must be a JSON object")
+                    except Exception as exc:
+                        result = f"Tool {name} was not called: invalid arguments ({exc})."
+                        trace.tool(name, {}, result)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", "call_0"),
+                                "content": result,
+                            }
+                        )
+                        continue
                     result = await _call(session, name, args, confirm_tools)
                     trace.tool(name, args, result)
                     executed.append(f"{name} -> {result[:200]}")
@@ -197,14 +291,9 @@ def run(task: str, spec: dict) -> str:
     """Run one dynamic MCP subagent on a task. Returns its plain-text report."""
     name = spec.get("name", "MCP")
     api_key = spec.get("api_key") or ""
-    if not api_key:
+    if not (spec.get("connection") or "").strip():
         return (
-            f"{name} agent failed: no API key configured for its model. "
-            "Set one in the model preset (Admin page or `python -m mounir.mcp_agents`)."
-        )
-    if not (spec.get("command") or "").strip():
-        return (
-            f"{name} agent failed: no MCP server command configured. "
+            f"{name} agent failed: no MCP server connection configured. "
             "Set one in the server preset (Admin page or `python -m mounir.mcp_agents`)."
         )
     try:
