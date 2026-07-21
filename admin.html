@@ -124,7 +124,7 @@
   }
   .heartbeat-config h3 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
   .heartbeat-config p { margin: 0; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
-  .heartbeat-fields { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 14px; }
+  .heartbeat-fields { display: flex; flex-direction: column; gap: 16px; }
   .heartbeat-field { display: flex; flex-direction: column; gap: 7px; }
   .heartbeat-field span { color: var(--text-mid); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
   .heartbeat-field select, .heartbeat-field textarea {
@@ -133,6 +133,11 @@
   }
   .heartbeat-field textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
   .heartbeat-field select:focus, .heartbeat-field textarea:focus { border-color: var(--purple); }
+  .heartbeat-enable-setting {
+    display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  }
+  .heartbeat-section-divider { height: 1px; background: var(--line); }
+  .heartbeat-agent-picker { max-width: 100%; }
   .heartbeat-capabilities { display: flex; flex-direction: column; gap: 10px; }
   .heartbeat-agent {
     border: 1px solid var(--line); border-radius: 10px; background: var(--bg); overflow: hidden;
@@ -398,6 +403,59 @@
   }
   .form-view .form-grid .api-key-wrap { position: relative; }
   .form-view .form-grid .api-key-wrap input { width: 100%; }
+
+  /* ---- record details (read mode) ---- */
+  .record-view { max-width: 760px; display: flex; flex-direction: column; gap: 16px; }
+  .record-view.server-record-view {
+    max-width: none; display: grid; grid-template-columns: minmax(0, 760px) minmax(280px, 1fr);
+    gap: 18px; align-items: start;
+  }
+  .record-main { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+  .record-card {
+    border: 1px solid var(--line); border-radius: 12px; padding: 20px;
+    background: var(--bg-panel);
+  }
+  .record-card-title {
+    margin-bottom: 16px; color: var(--text); font-size: 13px; font-weight: 600;
+  }
+  .record-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 24px; }
+  .record-field { min-width: 0; }
+  .record-field.full { grid-column: 1 / -1; }
+  .record-label {
+    margin-bottom: 6px; color: var(--text-dim); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .07em;
+  }
+  .record-value {
+    color: var(--text); font-size: 13px; line-height: 1.6;
+    overflow-wrap: anywhere; white-space: pre-wrap;
+  }
+  .record-value.muted { color: var(--text-dim); font-style: italic; }
+  .record-value.mono { font-size: 12px; }
+  .record-long-text {
+    padding: 14px 15px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--bg); color: var(--text-mid); font-size: 12px;
+    line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap;
+  }
+  .record-long-text.muted { color: var(--text-dim); font-style: italic; }
+  .record-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .record-chip {
+    padding: 5px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg); color: var(--text-mid); font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+  .record-agent-heading { display: flex; align-items: center; gap: 14px; }
+  .record-agent-icon {
+    width: 48px; height: 48px; flex: 0 0 48px; display: grid; place-items: center;
+    border: 1px solid rgba(91,156,245,.28); border-radius: 12px;
+    background: rgba(91,156,245,.10); color: #99c2ff; font-size: 15px; font-weight: 700;
+  }
+  .record-agent-icon.has-image { border: 0; border-radius: 0; background: transparent; }
+  .record-agent-icon img { width: 100%; height: 100%; display: block; object-fit: contain; }
+  .record-agent-name { color: var(--text); font-size: 16px; font-weight: 600; }
+  .record-secret-status { display: inline-flex; align-items: center; gap: 7px; }
+  .record-secret-status::before {
+    content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
+  }
   .credential-box {
     grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 9px;
     padding: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 9px;
@@ -583,6 +641,8 @@
     .main-header { padding: 20px 16px 0; flex-direction: column; align-items: stretch; gap: 10px; }
     .content { padding: 16px; }
     .form-view .form-grid { grid-template-columns: 1fr; }
+    .record-grid { grid-template-columns: 1fr; }
+    .record-field.full { grid-column: 1; }
     .credential-row { grid-template-columns: 1fr; }
     .credential-remove { width: 100%; }
     .header-actions { justify-content: flex-end; }
@@ -592,10 +652,12 @@
     .heartbeat-card { grid-template-columns: 1fr; align-items: flex-start; }
     .heartbeat-control { align-self: stretch; justify-content: space-between; }
     .heartbeat-toggle-feedback { grid-column: 1; width: 100%; }
-    .heartbeat-fields { grid-template-columns: 1fr; }
+    .heartbeat-enable-setting { align-items: flex-start; flex-direction: column; }
+    .heartbeat-enable-setting .heartbeat-control { width: 100%; }
   }
   @media (max-width: 1080px) {
     .form-view.server-form-view { grid-template-columns: 1fr; }
+    .record-view.server-record-view { grid-template-columns: 1fr; }
     .server-tools-panel { position: static; max-height: none; margin-top: 0; }
     .server-tools-list { max-height: 440px; }
   }
@@ -688,6 +750,9 @@ const S = {
 let canvasZoom = 1;
 let pendingAgentIcon;
 let pendingConfirmationTools = new Set();
+let pendingDedupeTools = new Set();
+let heartbeatSelectedAgentId = null;
+let heartbeatToolSelections = new Set();
 
 const API = {
   overview: '/api/agent-overview',
@@ -908,9 +973,51 @@ function renderOverview() {
   requestAnimationFrame(drawWorkflowLinks);
 }
 
+function heartbeatToolKey(subagentId, toolName) {
+  return JSON.stringify([Number(subagentId), String(toolName)]);
+}
+
+function heartbeatAgentToolsHtml(agent) {
+  if (!agent) return '<div class="heartbeat-empty">No dynamic MCP subagents are available yet.</div>';
+  const tools = Array.isArray(agent.tools) ? agent.tools : [];
+  return `
+    <section class="heartbeat-agent">
+      <div class="heartbeat-agent-head">
+        <span>${esc(agent.name)}</span>
+        <span class="connection-status ${esc(agent.connection_status || 'untested')}" title="MCP connection status">${tools.length} tools</span>
+      </div>
+      <div class="heartbeat-agent-tools">
+        ${tools.length ? tools.map(tool => {
+          const locked = Boolean(tool.requires_confirmation);
+          const selected = heartbeatToolSelections.has(heartbeatToolKey(agent.id, tool.name));
+          return `
+            <label class="heartbeat-tool${locked ? ' locked' : ''}">
+              <input type="checkbox" data-heartbeat-tool data-subagent-id="${agent.id}" data-tool-name="${esc(tool.name)}"${selected && !locked ? ' checked' : ''}${locked ? ' disabled' : ''}>
+              <span>
+                <span class="heartbeat-tool-name mono">${esc(tool.name)}</span>
+                <span class="heartbeat-tool-description">${esc(tool.description || 'No description provided.')}</span>
+              </span>
+              ${locked ? '<span class="heartbeat-tool-lock">Needs confirmation</span>' : ''}
+            </label>`;
+        }).join('') : '<div class="heartbeat-empty">No saved tools. Open this MCP server and test its connection first.</div>'}
+      </div>
+    </section>`;
+}
+
 function renderHeartbeat() {
   const enabled = Boolean(S.heartbeat.enabled);
   const capabilities = Array.isArray(S.heartbeat.capabilities) ? S.heartbeat.capabilities : [];
+  heartbeatToolSelections = new Set(
+    capabilities.flatMap(agent => (Array.isArray(agent.tools) ? agent.tools : [])
+      .filter(tool => tool.selected && !tool.requires_confirmation)
+      .map(tool => heartbeatToolKey(agent.id, tool.name)))
+  );
+  const currentAgentExists = capabilities.some(agent => +agent.id === +heartbeatSelectedAgentId);
+  if (!currentAgentExists) {
+    const selectedAgent = capabilities.find(agent => (agent.tools || []).some(tool => tool.selected));
+    heartbeatSelectedAgentId = selectedAgent?.id ?? capabilities[0]?.id ?? null;
+  }
+  const selectedAgent = capabilities.find(agent => +agent.id === +heartbeatSelectedAgentId) || null;
   const interval = Number(S.heartbeat.interval_minutes || 30);
   const intervalOptions = [5, 15, 30, 60, 180, 360, 720, 1440];
   if (!intervalOptions.includes(interval)) intervalOptions.push(interval);
@@ -922,60 +1029,32 @@ function renderHeartbeat() {
     : minutes < 1440
     ? `${minutes / 60} hours`
     : '1 day';
-  const capabilityHtml = capabilities.map(agent => {
-    const tools = Array.isArray(agent.tools) ? agent.tools : [];
-    return `
-      <section class="heartbeat-agent">
-        <div class="heartbeat-agent-head">
-          <span>${esc(agent.name)}</span>
-          <span class="connection-status ${esc(agent.connection_status || 'untested')}" title="MCP connection status">${tools.length} tools</span>
-        </div>
-        <div class="heartbeat-agent-tools">
-          ${tools.length ? tools.map(tool => {
-            const locked = Boolean(tool.requires_confirmation);
-            return `
-              <label class="heartbeat-tool${locked ? ' locked' : ''}">
-                <input type="checkbox" data-heartbeat-tool data-subagent-id="${agent.id}" data-tool-name="${esc(tool.name)}"${tool.selected && !locked ? ' checked' : ''}${locked ? ' disabled' : ''}>
-                <span>
-                  <span class="heartbeat-tool-name mono">${esc(tool.name)}</span>
-                  <span class="heartbeat-tool-description">${esc(tool.description || 'No description provided.')}</span>
-                </span>
-                ${locked ? '<span class="heartbeat-tool-lock">Needs confirmation</span>' : ''}
-              </label>`;
-          }).join('') : '<div class="heartbeat-empty">No saved tools. Open this MCP server and test its connection first.</div>'}
-        </div>
-      </section>`;
-  }).join('');
   const status = S.heartbeat.last_status || 'never';
   const detail = S.heartbeat.last_error || S.heartbeat.last_message || (
     status === 'quiet' ? 'Nothing needed your attention.' : 'No heartbeat check has run yet.'
   );
   $('content').innerHTML = `
     <div class="heartbeat-view">
-      <section class="heartbeat-card" aria-labelledby="heartbeatTitle">
-        <div class="heartbeat-info">
-          <div class="heartbeat-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.2-6 4.2 12 2.2-6H21"/></svg>
+      <section class="heartbeat-config" aria-labelledby="heartbeatConfigTitle">
+        <div class="heartbeat-enable-setting">
+          <div class="heartbeat-info">
+            <div class="heartbeat-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.2-6 4.2 12 2.2-6H21"/></svg>
+            </div>
+            <div>
+              <h3 id="heartbeatConfigTitle">Enable heartbeat</h3>
+              <p>Quiet checks stay silent; important updates appear in your conversation.</p>
+            </div>
           </div>
-          <div>
-            <h3 id="heartbeatTitle">Enable heartbeat</h3>
-            <p>Periodically checks only the MCP capabilities you allow below. Quiet checks stay silent; important updates appear in your conversation.</p>
+          <div class="heartbeat-control">
+            <span class="heartbeat-state${enabled ? ' enabled' : ''}" id="heartbeatState">${enabled ? 'Enabled' : 'Disabled'}</span>
+            <label class="switch" title="Enable or disable heartbeat">
+              <input type="checkbox" id="heartbeatToggle" role="switch" aria-label="Enable heartbeat"${enabled ? ' checked' : ''}>
+              <span class="switch-track"></span>
+            </label>
           </div>
-        </div>
-        <div class="heartbeat-control">
-          <span class="heartbeat-state${enabled ? ' enabled' : ''}" id="heartbeatState">${enabled ? 'Enabled' : 'Disabled'}</span>
-          <label class="switch" title="Enable or disable heartbeat">
-            <input type="checkbox" id="heartbeatToggle" role="switch" aria-label="Enable heartbeat"${enabled ? ' checked' : ''}>
-            <span class="switch-track"></span>
-          </label>
         </div>
         <div class="heartbeat-toggle-feedback" id="heartbeatToggleFeedback" role="alert"></div>
-      </section>
-      <section class="heartbeat-config" aria-labelledby="heartbeatConfigTitle">
-        <div>
-          <h3 id="heartbeatConfigTitle">Background check</h3>
-          <p>Tools that require confirmation cannot be selected because nobody may be present when a scheduled check runs.</p>
-        </div>
         <div class="heartbeat-fields">
           <label class="heartbeat-field">
             <span>Check every</span>
@@ -988,12 +1067,21 @@ function renderHeartbeat() {
             <textarea id="heartbeatInstructions" maxlength="2000" placeholder="For example: Tell me about urgent unread email or failed GitHub checks.">${esc(S.heartbeat.instructions || '')}</textarea>
           </label>
         </div>
+        <div class="heartbeat-section-divider"></div>
         <div>
           <h3>Allowed checks</h3>
-          <p>Select the read-only capabilities heartbeat may use automatically.</p>
+          <p>Choose a subagent, then select the tools heartbeat may use automatically. Tools that require confirmation remain unavailable.</p>
         </div>
-        <div class="heartbeat-capabilities">
-          ${capabilityHtml || '<div class="heartbeat-empty">No dynamic MCP subagents are available yet.</div>'}
+        <label class="heartbeat-field heartbeat-agent-picker">
+          <span>Subagent</span>
+          <select id="heartbeatAgentSelect"${capabilities.length ? '' : ' disabled'}>
+            ${capabilities.length
+              ? capabilities.map(agent => `<option value="${agent.id}"${+agent.id === +heartbeatSelectedAgentId ? ' selected' : ''}>${esc(agent.name)}</option>`).join('')
+              : '<option value="">No subagents available</option>'}
+          </select>
+        </label>
+        <div class="heartbeat-capabilities" id="heartbeatAgentTools">
+          ${heartbeatAgentToolsHtml(selectedAgent)}
         </div>
         <div class="heartbeat-actions">
           <button class="btn primary" type="button" id="heartbeatSave">Save settings</button>
@@ -1030,6 +1118,18 @@ function renderHeartbeat() {
     }
   });
 
+  $('heartbeatAgentSelect').addEventListener('change', event => {
+    heartbeatSelectedAgentId = Number(event.target.value);
+    const agent = capabilities.find(item => +item.id === +heartbeatSelectedAgentId) || null;
+    $('heartbeatAgentTools').innerHTML = heartbeatAgentToolsHtml(agent);
+  });
+  $('heartbeatAgentTools').addEventListener('change', event => {
+    const input = event.target.closest('[data-heartbeat-tool]');
+    if (!input) return;
+    const key = heartbeatToolKey(input.dataset.subagentId, input.dataset.toolName);
+    if (input.checked) heartbeatToolSelections.add(key);
+    else heartbeatToolSelections.delete(key);
+  });
   $('heartbeatSave').addEventListener('click', () => saveHeartbeatSettings(false));
   $('heartbeatRun').addEventListener('click', () => saveHeartbeatSettings(true));
 }
@@ -1041,11 +1141,10 @@ function heartbeatTime(value) {
 }
 
 function heartbeatFormPayload(enabled = Boolean(S.heartbeat.enabled)) {
-  const selected_tools = [...document.querySelectorAll('[data-heartbeat-tool]:checked:not(:disabled)')]
-    .map(input => ({
-      subagent_id: Number(input.dataset.subagentId),
-      tool_name: input.dataset.toolName,
-    }));
+  const selected_tools = [...heartbeatToolSelections].map(key => {
+    const [subagent_id, tool_name] = JSON.parse(key);
+    return { subagent_id, tool_name };
+  });
   return {
     enabled,
     interval_minutes: Number($('heartbeatInterval').value),
@@ -1200,18 +1299,210 @@ function renderListItem(item) {
     </div>`;
 }
 
+function recordFieldHtml(label, value, options = {}) {
+  const present = value !== undefined && value !== null && String(value).trim() !== '';
+  const fieldClass = options.full ? 'record-field full' : 'record-field';
+  const valueClass = [
+    options.long ? 'record-long-text' : 'record-value',
+    options.mono ? 'mono' : '',
+    present ? '' : 'muted',
+  ].filter(Boolean).join(' ');
+  const content = present ? esc(value) : esc(options.empty || 'Not provided');
+  return `
+    <div class="${fieldClass}">
+      <div class="record-label">${esc(label)}</div>
+      <div class="${valueClass}">${content}</div>
+    </div>`;
+}
+
+function recordHtmlField(label, html, options = {}) {
+  return `
+    <div class="record-field${options.full ? ' full' : ''}">
+      <div class="record-label">${esc(label)}</div>
+      ${html}
+    </div>`;
+}
+
+function recordChipsHtml(values, empty = 'None') {
+  const cleaned = values.map(String).filter(Boolean);
+  if (!cleaned.length) return `<div class="record-value muted">${esc(empty)}</div>`;
+  return `<div class="record-chips">${cleaned.map(value => `<span class="record-chip mono">${esc(value)}</span>`).join('')}</div>`;
+}
+
+function buildRecordDetailsHtml(item) {
+  if (S.tab === 'profile') {
+    const languages = { auto: 'Automatic', en: 'English', fr: 'French', ar: 'Arabic' };
+    return `
+      <section class="record-card">
+        <div class="record-card-title">Profile information</div>
+        <div class="record-grid">
+          ${recordFieldHtml('User name', item.user_name)}
+          ${recordFieldHtml('Assistant name', item.assistant_name)}
+          ${recordFieldHtml('Location', item.location, { full: true })}
+          ${recordFieldHtml('Preferred response language', languages[item.preferred_language] || item.preferred_language, { full: true })}
+        </div>
+      </section>`;
+  }
+
+  if (S.tab === 'models') {
+    const keyStatus = item.api_key
+      ? '<div class="record-value record-secret-status">Configured</div>'
+      : '<div class="record-value muted">No API key</div>';
+    return `
+      <section class="record-card">
+        <div class="record-card-title">Model information</div>
+        <div class="record-grid">
+          ${recordFieldHtml('Name', item.name, { full: true })}
+          ${recordFieldHtml('Model ID', item.model, { full: true, mono: true })}
+          ${recordFieldHtml('Provider', item.provider)}
+          ${recordHtmlField('API key', keyStatus)}
+          ${recordFieldHtml('Base URL', item.base_url, { full: true, mono: true })}
+        </div>
+      </section>`;
+  }
+
+  if (S.tab === 'servers') {
+    const transportNames = {
+      stdio: 'Local server (stdio)',
+      streamable_http: 'Remote server (HTTP)',
+      sse: 'Remote server (legacy SSE)',
+    };
+    const headers = parseObject(item.headers);
+    const environment = parseObject(item.env);
+    const auth = remoteAuthFromHeaders(headers, item.auth_scheme || '');
+    let credentialDetails;
+    if ((item.transport || 'stdio') === 'stdio') {
+      credentialDetails = recordHtmlField(
+        'Configured credentials',
+        recordChipsHtml(Object.keys(environment), 'No credentials configured'),
+        { full: true }
+      );
+    } else if (auth.mode === 'none') {
+      credentialDetails = recordFieldHtml('Authentication', 'No authentication', { full: true });
+    } else if (auth.mode === 'credential' && auth.method === 'bearer') {
+      credentialDetails = recordHtmlField(
+        'Authentication',
+        '<div class="record-value record-secret-status">Bearer token configured</div>',
+        { full: true }
+      );
+    } else if (auth.mode === 'credential') {
+      credentialDetails = recordHtmlField(
+        'Authentication',
+        `<div class="record-value record-secret-status">API key configured in <span class="mono">${esc(auth.header)}</span></div>`,
+        { full: true }
+      );
+    } else {
+      credentialDetails = recordHtmlField(
+        'Custom headers',
+        recordChipsHtml(Object.keys(headers), 'No custom headers configured'),
+        { full: true }
+      );
+    }
+    const setup = item.setup_type ? `
+      <div class="credential-box server-setup record-card" id="serverSetup" data-server-id="${item.id}">
+        <div class="server-setup-head">
+          <div>
+            <div class="credential-title">Additional setup</div>
+            <div class="hint">Loading setup information…</div>
+          </div>
+          <div class="server-setup-status">Checking…</div>
+        </div>
+      </div>` : '';
+    return `
+      <section class="record-card">
+        <div class="record-card-title">Server information</div>
+        <div class="record-grid">
+          ${recordFieldHtml('Name', item.name)}
+          ${recordFieldHtml('Server type', transportNames[item.transport] || item.transport)}
+          ${recordFieldHtml('Connection', item.connection, { full: true, mono: true })}
+          ${recordFieldHtml('Description', item.description, { full: true, long: true, empty: 'No description provided' })}
+          ${credentialDetails}
+        </div>
+      </section>
+      ${setup}`;
+  }
+
+  const model = S.models.find(entry => entry.id === +item.model_id);
+  const server = S.servers.find(entry => entry.id === +item.mcp_server_id);
+  const modelLabel = model
+    ? `${model.name}${model.model ? ` — ${model.model}` : ''}`
+    : item.model_name || 'Unknown model';
+  const confirmationTools = parseStringList(
+    item.confirm_tools,
+    item.confirm_tool_calls ? ['*'] : []
+  );
+  let confirmation;
+  if (confirmationTools.includes('*')) {
+    confirmation = '<div class="record-value">Ask before every MCP tool call</div>';
+  } else if (confirmationTools.length) {
+    confirmation = `
+      <div class="record-value" style="margin-bottom:8px">Ask only for selected tools</div>
+      ${recordChipsHtml(confirmationTools)}`;
+  } else {
+    confirmation = '<div class="record-value">Tool calls run without confirmation</div>';
+  }
+  const dedupeTools = parseStringList(item.dedupe_tools);
+  const initial = (item.name || '?').trim().charAt(0).toUpperCase();
+  const icon = item.has_icon
+    ? `<div class="record-agent-icon has-image"><img src="/api/subagents/${item.id}/icon" alt=""></div>`
+    : `<div class="record-agent-icon">${esc(initial)}</div>`;
+  return `
+    <section class="record-card">
+      <div class="record-agent-heading">
+        ${icon}
+        <div class="record-agent-name">${esc(item.name)}</div>
+      </div>
+    </section>
+    <section class="record-card">
+      <div class="record-card-title">Agent configuration</div>
+      <div class="record-grid">
+        ${recordFieldHtml('Model', modelLabel)}
+        ${recordFieldHtml('MCP server', server?.name || item.mcp_server_name || 'Unknown server')}
+        ${recordFieldHtml('Description', item.description, { full: true, long: true })}
+        ${recordFieldHtml('System prompt', item.system_prompt, { full: true, long: true, empty: 'Uses the standard subagent prompt' })}
+      </div>
+    </section>
+    <section class="record-card">
+      <div class="record-card-title">Tool safety</div>
+      <div class="record-grid">
+        ${recordHtmlField('Confirmation', confirmation, { full: true })}
+        ${recordHtmlField('Duplicate action protection', recordChipsHtml(dedupeTools, 'No tools selected'), { full: true })}
+      </div>
+    </section>`;
+}
+
 function renderForm() {
   const el = $('content');
   const editing = S.editing;
   pendingAgentIcon = undefined;
+  if (S.formReadonly && editing) {
+    const detailsHtml = buildRecordDetailsHtml(editing);
+    if (S.tab === 'servers') {
+      el.innerHTML = `
+        <div class="record-view server-record-view">
+          <div class="record-main">${detailsHtml}</div>
+          ${serverToolsPanelHtml(editing)}
+        </div>`;
+    } else {
+      el.innerHTML = `<div class="record-view">${detailsHtml}</div>`;
+    }
+    S.view = 'form';
+    updateHeader();
+    if (S.tab === 'servers') {
+      attachServerSetupEvents();
+      loadServerTools();
+    }
+    return;
+  }
   if (S.tab === 'agents') {
     const configured = parseStringList(
       editing?.confirm_tools,
       !editing || editing.confirm_tool_calls ? ['*'] : []
     );
     pendingConfirmationTools = new Set(configured.filter(name => name !== '*'));
+    pendingDedupeTools = new Set(parseStringList(editing?.dedupe_tools));
   }
-  const formHtml = buildFormHtml(editing, S.formReadonly);
+  const formHtml = buildFormHtml(editing, false);
   if (S.tab === 'servers') {
     el.innerHTML = `
       <div class="form-view server-form-view">
@@ -1488,7 +1779,6 @@ function buildFormHtml(item, readonly) {
   const confirmationMode = confirmationTools.includes('*')
     ? 'all'
     : confirmationTools.length ? 'selected' : 'none';
-  const duplicateProtectionTools = parseStringList(item?.dedupe_tools).join(', ');
   const agentInitial = (item?.name || '?').trim().charAt(0).toUpperCase();
   const iconPreview = item?.has_icon
     ? `<img src="/api/subagents/${item.id}/icon" alt="">`
@@ -1535,10 +1825,13 @@ function buildFormHtml(item, readonly) {
           <div class="tool-choice-empty">Choose an MCP server to see its saved tools.</div>
         </div>
       </div>
-      <label class="full">Prevent exact duplicate actions
-        <span class="hint">Tool names separated by commas. Use for irreversible actions such as send_email, not repeatable navigation actions such as browser_click.</span>
-        <textarea id="dedupeTools" rows="2" placeholder="send_email, create_payment"${ro}>${esc(duplicateProtectionTools)}</textarea>
-      </label>
+      <div class="full">
+        <div class="credential-title">Prevent exact duplicate actions</div>
+        <span class="hint">Select actions that must not run twice with the same information during one request. Best for actions such as sending email or creating a payment.</span>
+        <div class="tool-choice-list" id="dedupeToolChoices">
+          <div class="tool-choice-empty">Choose an MCP server to see its saved tools.</div>
+        </div>
+      </div>
       <div class="full error" id="formError"></div>
     </form>`;
 }
@@ -1630,12 +1923,51 @@ function renderConfirmationToolChoices(state) {
   container.innerHTML = `<div class="tool-choice-empty">${esc(message)}</div>`;
 }
 
+function renderDedupeToolChoices(state) {
+  const container = $('dedupeToolChoices');
+  if (!container) return;
+  const tools = Array.isArray(state?.tools) ? state.tools : [];
+  const advertised = new Set(tools.map(tool => tool.name));
+  const missing = [...pendingDedupeTools].filter(name => !advertised.has(name));
+  const choices = tools.map(tool => `
+    <label class="tool-choice">
+      <input type="checkbox" data-dedupe-tool="${esc(tool.name)}"${pendingDedupeTools.has(tool.name) ? ' checked' : ''}>
+      <span>
+        <span class="tool-choice-name mono">${esc(tool.name)}</span>
+        <span class="tool-choice-description">${esc(tool.description || tool.name)}</span>
+      </span>
+    </label>`).join('');
+  const missingChoices = missing.map(name => `
+    <label class="tool-choice missing">
+      <input type="checkbox" data-dedupe-tool="${esc(name)}" checked>
+      <span>
+        <span class="tool-choice-name mono">${esc(name)}</span>
+        <span class="tool-choice-description">No longer advertised by the server's saved tool list.</span>
+      </span>
+    </label>`).join('');
+  if (choices || missingChoices) {
+    container.innerHTML = choices + missingChoices;
+    return;
+  }
+  const status = state?.status || 'untested';
+  const message = status === 'untested'
+    ? 'Test this MCP server once to discover and save its tools.'
+    : status === 'failed'
+    ? 'The server has no saved tools. Fix it and run Test Connection.'
+    : 'This server did not advertise any tools.';
+  container.innerHTML = `<div class="tool-choice-empty">${esc(message)}</div>`;
+}
+
 async function loadAgentToolChoices(resetSelection = false) {
   const select = $('formEl')?.querySelector('select[name="mcp_server_id"]');
   const serverId = +(select?.value || 0);
-  if (resetSelection) pendingConfirmationTools.clear();
+  if (resetSelection) {
+    pendingConfirmationTools.clear();
+    pendingDedupeTools.clear();
+  }
   if (!serverId) {
     renderConfirmationToolChoices(null);
+    renderDedupeToolChoices(null);
     return;
   }
   try {
@@ -1643,9 +1975,12 @@ async function loadAgentToolChoices(resetSelection = false) {
       || await api('GET', `/api/mcp-servers/${serverId}/tools`);
     S.serverToolCache[serverId] = state;
     renderConfirmationToolChoices(state);
+    renderDedupeToolChoices(state);
   } catch (error) {
-    const container = $('confirmationToolChoices');
-    if (container) container.innerHTML = `<div class="tool-choice-empty">${esc(error.message)}</div>`;
+    for (const id of ['confirmationToolChoices', 'dedupeToolChoices']) {
+      const container = $(id);
+      if (container) container.innerHTML = `<div class="tool-choice-empty">${esc(error.message)}</div>`;
+    }
   }
 }
 
@@ -1777,6 +2112,12 @@ function attachFormEvents() {
       if (checkbox.checked) pendingConfirmationTools.add(checkbox.dataset.confirmationTool);
       else pendingConfirmationTools.delete(checkbox.dataset.confirmationTool);
     });
+    $('dedupeToolChoices').addEventListener('change', event => {
+      const checkbox = event.target.closest('[data-dedupe-tool]');
+      if (!checkbox) return;
+      if (checkbox.checked) pendingDedupeTools.add(checkbox.dataset.dedupeTool);
+      else pendingDedupeTools.delete(checkbox.dataset.dedupeTool);
+    });
     attachAgentIconEvents();
     updateConfirmationVisibility();
     loadAgentToolChoices();
@@ -1879,10 +2220,7 @@ async function onFormSubmit(e) {
       body.confirm_tools = [];
     }
     body.confirm_tool_calls = body.confirm_tools.length > 0;
-    body.dedupe_tools = $('dedupeTools').value
-      .split(/[\n,]/)
-      .map(name => name.trim())
-      .filter(Boolean);
+    body.dedupe_tools = [...pendingDedupeTools];
     if (pendingAgentIcon !== undefined) body.icon_data = pendingAgentIcon;
   }
   try {
@@ -2052,26 +2390,20 @@ $('createBtn').addEventListener('click', () => {
 $('testBtn').addEventListener('click', async () => {
   if (S.tab !== 'servers' || !S.editing) return;
   const err = $('formError');
-  err.textContent = '';
+  if (err) err.textContent = '';
   await loadServerTools(true);
 });
 
 $('modifyBtn').addEventListener('click', () => {
-  const f = $('formEl');
-  if (!f) return;
   if (S.formReadonly) {
-    // Enable all fields
-    f.querySelectorAll('input[readonly], textarea[readonly]').forEach(el => el.removeAttribute('readonly'));
-    f.querySelectorAll('input[disabled]').forEach(el => el.removeAttribute('disabled'));
-    f.querySelectorAll('select[disabled]').forEach(el => el.removeAttribute('disabled'));
-    f.querySelectorAll('button[disabled]').forEach(el => el.removeAttribute('disabled'));
     S.formReadonly = false;
-    updateHeader();
-  } else {
-    if (!f.reportValidity()) return;
-    const fakeEvent = { target: f, preventDefault: () => {} };
-    onFormSubmit(fakeEvent);
+    renderForm();
+    return;
   }
+  const f = $('formEl');
+  if (!f || !f.reportValidity()) return;
+  const fakeEvent = { target: f, preventDefault: () => {} };
+  onFormSubmit(fakeEvent);
 });
 
 /* ========== sidebar navigation ========== */
