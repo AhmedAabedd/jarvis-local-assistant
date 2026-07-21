@@ -34,6 +34,7 @@ from pathlib import Path
 import psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from mounir.agent import Agent
@@ -213,6 +214,7 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="Mounir", lifespan=_lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+app.mount("/images", StaticFiles(directory=ROOT_DIR / "images"), name="images")
 
 # --- network rate tracking ---------------------------------------------------
 _last_net = psutil.net_io_counters()

@@ -206,6 +206,7 @@
     border-radius: 13px; color: #8bc7ff; background: rgba(51,144,236,.12);
     border: 1px solid rgba(51,144,236,.24);
   }
+  .telegram-logo img { width: 27px; height: 27px; display: block; }
   .telegram-identity h3 { margin: 0 0 5px; color: var(--text); font-size: 14px; font-weight: 600; }
   .telegram-identity p { margin: 0; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
   .telegram-status {
@@ -335,6 +336,7 @@
   .workflow-legend span { display: inline-flex; align-items: center; gap: 6px; }
   .legend-dot { width: 7px; height: 7px; border-radius: 2px; background: var(--purple); }
   .legend-dot.dynamic { background: #5b9cf5; }
+  .legend-dot.input { border-radius: 50%; background: #5fb487; }
   .zoom-controls {
     display: flex; align-items: center; overflow: hidden;
     border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
@@ -361,8 +363,11 @@
   }
   .workflow-links { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; overflow: visible; }
   .workflow-links path { fill: none; stroke: #403752; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .workflow-links .specialist-link { stroke-dasharray: 6 6; }
+  .workflow-links .input-link { stroke: #4c7d66; stroke-width: 1.5; opacity: .72; }
+  .workflow-links marker path { fill: #4c7d66; stroke: none; opacity: .78; }
   .workflow-links circle { fill: #6b5a82; }
-  .supervisor-wrap { position: relative; z-index: 2; display: flex; justify-content: center; margin-bottom: 76px; }
+  .supervisor-wrap { position: relative; z-index: 2; display: flex; justify-content: center; margin-bottom: 112px; }
   .agent-grid {
     position: relative; z-index: 2; display: flex; justify-content: center; gap: 14px;
   }
@@ -382,6 +387,21 @@
     width: 210px; min-width: 210px; border-color: rgba(168,85,247,.58);
     background: linear-gradient(145deg, rgba(168,85,247,.15), rgba(22,19,31,.98));
     box-shadow: 0 10px 36px rgba(89,42,132,.2);
+  }
+  .agent-node.telegram-node {
+    position: absolute; left: calc(50% - 342px); top: 50%; z-index: 2;
+    width: 66px; min-width: 66px; height: 66px; padding: 8px;
+    transform: translate(-50%, -50%); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 4px; cursor: pointer;
+    border-color: rgba(95,180,135,.48); background: rgba(22,19,31,.96);
+  }
+  .agent-node.telegram-node:hover {
+    border-color: rgba(95,180,135,.9); box-shadow: 0 10px 30px rgba(95,180,135,.13);
+  }
+  .telegram-node img { width: 34px; height: 34px; display: block; }
+  .telegram-node-label {
+    position: absolute; top: calc(100% + 7px); left: 50%; transform: translateX(-50%);
+    color: #7fcca4; font-size: 9px; font-weight: 600; white-space: nowrap;
   }
   .node-head { display: flex; align-items: center; gap: 9px; }
   .node-icon {
@@ -409,6 +429,8 @@
   }
   .node-port.output { bottom: -5px; }
   .node-port.input { top: -5px; }
+  .node-port.input-left { left: -5px; top: 50%; transform: translateY(-50%); border-color: #6b5a82; }
+  .node-port.output-right { left: auto; right: -5px; top: 50%; transform: translateY(-50%); border-color: #4c7d66; }
 
   /* ---- list view ---- */
   .list-view { display: flex; flex-direction: column; gap: 0; }
@@ -1016,6 +1038,7 @@ function renderOverview() {
   const supervisor = S.overview.supervisor || {};
   const builtins = S.overview.builtins || [];
   const dynamic = S.agents || [];
+  const telegramEnabled = Boolean(S.telegram?.enabled);
   const total = builtins.length + dynamic.length;
   const supervisorInitial = (supervisor.name || 'M').trim().charAt(0).toUpperCase();
   const builtinCards = builtins.map((item, index) => agentNodeHtml(item, 'builtin', `builtin-${index}`)).join('');
@@ -1036,7 +1059,7 @@ function renderOverview() {
         <div class="workflow-toolbar">
           <div class="workflow-title"><span class="live-dot"></span><span>Configured topology</span></div>
           <div class="workflow-tools">
-            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>Dynamic MCP</span></div>
+            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>Dynamic MCP</span>${telegramEnabled ? '<span><i class="legend-dot input"></i>Input channel</span>' : ''}</div>
             <div class="zoom-controls" aria-label="Graph zoom controls">
               <button class="zoom-control" type="button" data-zoom="out" aria-label="Zoom out">−</button>
               <button class="zoom-control value" type="button" data-zoom="reset" id="zoomValue" aria-label="Reset zoom">100%</button>
@@ -1048,7 +1071,13 @@ function renderOverview() {
           <div class="workflow-stage" id="workflowStage">
             <svg class="workflow-links" id="workflowLinks" aria-hidden="true"></svg>
             <div class="supervisor-wrap">
+              ${telegramEnabled ? `<article class="agent-node telegram-node" id="node-telegram" data-open-telegram title="Open Telegram settings" role="button" tabindex="0">
+                <span class="node-port output-right"></span>
+                <img src="/images/telegram.svg" alt="">
+                <span class="telegram-node-label">Telegram</span>
+              </article>` : ''}
               <article class="agent-node supervisor" id="node-supervisor">
+                ${telegramEnabled ? '<span class="node-port input-left"></span>' : ''}
                 <span class="node-port output"></span>
                 <div class="node-head">
                   <div class="node-icon">${esc(supervisorInitial)}</div>
@@ -1155,7 +1184,7 @@ function renderTelegram() {
       <section class="telegram-card telegram-status-card">
         <div class="telegram-identity">
           <div class="telegram-logo">
-            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21 3-7.2 18-4.1-7.4L3 9.7 21 3Z"/><path d="m9.7 13.6 4.1-3.8"/></svg>
+            <img src="/images/telegram.svg" alt="">
           </div>
           <div>
             <h3>${esc(botName)}</h3>
@@ -1571,13 +1600,25 @@ function drawWorkflowLinks() {
   const sx = (sourceRect.left + sourceRect.width / 2 - canvasRect.left) / canvasZoom;
   const sy = (sourceRect.bottom - canvasRect.top) / canvasZoom;
   const targets = canvas.querySelectorAll('.agent-grid .agent-node');
-  const paths = [];
+  const paths = [`<defs><marker id="input-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4c7d66" stroke="none"/></marker></defs>`];
+  const telegram = $('node-telegram');
+  if (telegram) {
+    const inputRect = telegram.getBoundingClientRect();
+    const inputX = (inputRect.right - canvasRect.left) / canvasZoom;
+    const inputY = (inputRect.top + inputRect.height / 2 - canvasRect.top) / canvasZoom;
+    const supervisorPort = source.querySelector('.input-left');
+    const portRect = supervisorPort.getBoundingClientRect();
+    const supervisorX = (portRect.left - canvasRect.left) / canvasZoom;
+    const supervisorY = (portRect.top + portRect.height / 2 - canvasRect.top) / canvasZoom;
+    const bend = inputX + Math.max(14, (supervisorX - inputX) * .5);
+    paths.push(`<path class="input-link" marker-end="url(#input-arrow)" d="M ${inputX} ${inputY} C ${bend} ${inputY}, ${bend} ${supervisorY}, ${supervisorX} ${supervisorY}"/>`);
+  }
   targets.forEach(target => {
     const rect = target.getBoundingClientRect();
     const tx = (rect.left + rect.width / 2 - canvasRect.left) / canvasZoom;
     const ty = (rect.top - canvasRect.top) / canvasZoom;
     const bend = sy + Math.max(28, (ty - sy) * .54);
-    paths.push(`<path d="M ${sx} ${sy} C ${sx} ${bend}, ${tx} ${bend}, ${tx} ${ty}"/><circle cx="${tx}" cy="${ty}" r="2.5"/>`);
+    paths.push(`<path class="specialist-link" d="M ${sx} ${sy} C ${sx} ${bend}, ${tx} ${bend}, ${tx} ${ty}"/><circle cx="${tx}" cy="${ty}" r="2.5"/>`);
   });
   svg.setAttribute('viewBox', `0 0 ${canvasRect.width / canvasZoom} ${canvasRect.height / canvasZoom}`);
   svg.innerHTML = paths.join('');
@@ -2645,6 +2686,15 @@ $('content').addEventListener('click', async e => {
     setCanvasZoom(action === 'reset' ? 1 : canvasZoom + (action === 'in' ? .1 : -.1));
     return;
   }
+  const telegramNode = e.target.closest('[data-open-telegram]');
+  if (telegramNode) {
+    S.tab = 'telegram';
+    document.querySelectorAll('.nav-item').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tab === 'telegram');
+    });
+    renderTelegram();
+    return;
+  }
   // Dynamic nodes in the topology open their real subagent configuration.
   const agentNode = e.target.closest('[data-agent-id]');
   if (agentNode) {
@@ -2689,6 +2739,12 @@ $('content').addEventListener('click', async e => {
 });
 
 $('content').addEventListener('keydown', e => {
+  const telegramNode = e.target.closest('[data-open-telegram]');
+  if (telegramNode && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault();
+    telegramNode.click();
+    return;
+  }
   const agentNode = e.target.closest('[data-agent-id]');
   if (!agentNode || (e.key !== 'Enter' && e.key !== ' ')) return;
   e.preventDefault();
