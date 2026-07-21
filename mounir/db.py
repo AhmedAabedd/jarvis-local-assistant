@@ -1939,6 +1939,23 @@ def list_heartbeat_runs(limit: int = 10) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def list_heartbeat_notifications(limit: int = 25) -> list[dict]:
+    """Return recent heartbeat alerts suitable for user notifications."""
+    limit = max(1, min(int(limit), 100))
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, trigger, started_at, finished_at, message
+            FROM heartbeat_runs
+            WHERE status = 'alert' AND TRIM(message) != ''
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 # -----------------------------------------------------------------------------
 # Models
 # -----------------------------------------------------------------------------

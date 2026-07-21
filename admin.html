@@ -398,9 +398,6 @@
   .workflow-links .inactive-link {
     stroke: rgba(198,75,82,.62); opacity: .58;
   }
-  .workflow-links .inactive-end {
-    stroke: rgba(218,82,89,.78); stroke-width: 1.4; opacity: .72;
-  }
   .node-open {
     position: absolute; top: 9px; right: 9px; color: #78aef8;
     opacity: .55; transition: opacity .15s;
@@ -841,6 +838,12 @@
     font: inherit; font-weight: 600; cursor: pointer;
   }
   .setup-link:hover { text-decoration: underline; }
+  .form-guidance {
+    grid-column: 1 / -1; padding: 12px 14px; border: 1px solid rgba(91,156,245,.24);
+    border-radius: 10px; background: rgba(91,156,245,.06); color: var(--text-mid);
+    font-size: 10px; line-height: 1.55;
+  }
+  .form-guidance strong { color: var(--text); }
 
   ::-webkit-scrollbar { width: 7px; height: 7px; }
   ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
@@ -926,11 +929,11 @@
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/></svg>
         <span>Profile</span>
       </button>
-      <a href="/" title="Back to Assistant">
+      <a href="/" title="Return to assistant">
         <span class="back-icon">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
         </span>
-        <span class="back-copy"><strong>Back to Assistant</strong><small id="backAssistantName">Return to Mounir</small></span>
+        <span class="back-copy"><strong>Return to chat</strong><small id="backAssistantName">Open Mounir</small></span>
       </a>
     </div>
   </aside>
@@ -940,14 +943,14 @@
     <div class="main-header">
       <div>
         <h2 id="viewTitle">Agent Overview</h2>
-        <p class="view-subtitle" id="viewSubtitle">How your assistant is connected</p>
+        <p class="view-subtitle" id="viewSubtitle">See how your assistant and subagents work together</p>
       </div>
       <div class="header-actions">
-        <button class="btn outline" id="testBtn" style="display:none">Test Connection</button>
-        <button class="btn outline" id="modifyBtn" style="display:none">Modify</button>
+        <button class="btn outline" id="testBtn" style="display:none">Test connection</button>
+        <button class="btn outline" id="modifyBtn" style="display:none">Edit</button>
         <button class="btn danger" id="deleteBtn" style="display:none">Delete</button>
         <button class="btn" id="cancelBtn" style="display:none">Cancel</button>
-        <button class="btn primary" id="createBtn" style="display:none">+ Create New</button>
+        <button class="btn primary" id="createBtn" style="display:none">+ Add new</button>
       </div>
     </div>
     <div class="content" id="content">
@@ -994,14 +997,14 @@ const API = {
 };
 
 const TAB_META = {
-  overview: { title: 'Agent Overview', labelSingular: '', subtitle: 'How your assistant is connected' },
-  heartbeat: { title: 'Heartbeat', labelSingular: '', subtitle: 'Run safe background checks and surface important updates' },
-  telegram: { title: 'Telegram', labelSingular: '', subtitle: 'Use your assistant securely from Telegram' },
-  voice: { title: 'Voice', labelSingular: '', subtitle: 'Choose how Mounir listens and speaks' },
-  profile: { title: 'Profile', labelSingular: 'Profile', subtitle: 'Who the assistant is and who it works for' },
-  models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Language models used by built-in and dynamic subagents' },
-  servers: { title: 'MCP Servers',   labelSingular: 'Server', subtitle: 'External capabilities connected through MCP' },
-  agents:  { title: 'Subagents',     labelSingular: 'Subagent', subtitle: 'Dynamic specialists available to the supervisor' },
+  overview: { title: 'Agent Overview', labelSingular: '', subtitle: 'See how your assistant and subagents work together' },
+  heartbeat: { title: 'Heartbeat', labelSingular: '', subtitle: 'Schedule automatic checks using approved tools' },
+  telegram: { title: 'Telegram', labelSingular: '', subtitle: 'Connect to your assistant from Telegram' },
+  voice: { title: 'Voice', labelSingular: '', subtitle: 'Configure speech recognition and voice output' },
+  profile: { title: 'Profile', labelSingular: 'Profile', subtitle: 'Personalize names, location, and language' },
+  models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Manage the cloud and local models used by your agents' },
+  servers: { title: 'MCP Servers',   labelSingular: 'Server', subtitle: 'Manage services and tools connected through MCP' },
+  agents:  { title: 'Subagents',     labelSingular: 'Subagent', subtitle: 'Manage the specialists Mounir can delegate work to' },
 };
 
 /* ========== helpers ========== */
@@ -1009,6 +1012,7 @@ function esc(s) { return String(s).replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 function slug(name) { return name.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/_+/g,'_').replace(/^_+|_+$/g,''); }
 function $(id) { return document.getElementById(id); }
+function assistantLabel() { return S.profile?.assistant_name || 'Mounir'; }
 
 function parseObject(value) {
   if (!value) return {};
@@ -1033,7 +1037,7 @@ function credentialRowsHtml(entries, readonly) {
   const disabled = readonly ? ' disabled' : '';
   return entries.map(([key, value]) => `
     <div class="credential-row" data-credential-row>
-      <input type="text" data-credential-key value="${esc(key)}" placeholder="Credential name"${readonly ? ' readonly' : ''}>
+      <input type="text" data-credential-key value="${esc(key)}" placeholder="Name from setup guide"${readonly ? ' readonly' : ''}>
       <input type="password" data-credential-value value="${esc(value)}" placeholder="Secret value"${readonly ? ' readonly' : ''}>
       <button type="button" class="credential-remove" data-credential-remove title="Remove credential"${disabled}>×</button>
     </div>`).join('');
@@ -1074,7 +1078,7 @@ async function api(method, url, body) {
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(url, opts);
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || `${method} ${url} failed`);
+  if (!r.ok) throw new Error(data.error || 'The request could not be completed. Please try again.');
   return data;
 }
 
@@ -1098,8 +1102,9 @@ async function loadAll() {
   S.servers = s;
   S.agents = a;
   const assistantName = p.assistant_name || 'Mounir';
+  TAB_META.agents.subtitle = `Manage the specialists ${assistantName} can delegate work to`;
   document.title = `${assistantName} Agent Studio`;
-  $('backAssistantName').textContent = `Return to ${assistantName}`;
+  $('backAssistantName').textContent = `Open ${assistantName}`;
 }
 
 function openCreateRecord(tab) {
@@ -1147,14 +1152,16 @@ function updateHeader() {
     ? meta.labelSingular + ' — ' + S.editing.name
     : meta.title;
   $('viewSubtitle').textContent = meta.subtitle;
-  // Create New: only in list view
+  const createLabels = { models: '+ Add model', servers: '+ Add MCP server', agents: '+ Add subagent' };
+  $('createBtn').textContent = createLabels[S.tab] || '+ Add new';
+  // Add button: only in list view
   $('createBtn').style.display = (inOverview || inHeartbeat || inTelegram || inVoice || inProfile || inForm) ? 'none' : '';
   // Delete: only in readonly form view
   $('deleteBtn').style.display = (!inOverview && !inProfile && editing && S.formReadonly) ? '' : 'none';
   $('testBtn').style.display = (S.tab === 'servers' && editing && S.formReadonly) ? '' : 'none';
   // Cancel: in form view but NOT in readonly edit mode
   $('cancelBtn').style.display = (inForm && !(editing && S.formReadonly)) ? '' : 'none';
-  // Modify / Save / Create button
+  // Edit / Save / Create button
   if (inOverview || inHeartbeat || inTelegram || inVoice) {
     $('modifyBtn').style.display = 'none';
     $('cancelBtn').style.display = 'none';
@@ -1162,7 +1169,7 @@ function updateHeader() {
   } else if (editing && S.formReadonly) {
     $('modifyBtn').style.display = '';
     $('modifyBtn').className = 'btn outline';
-    $('modifyBtn').textContent = 'Modify';
+    $('modifyBtn').textContent = 'Edit';
   } else if (inForm) {
     $('modifyBtn').style.display = '';  // editable edit → Save, create → Create
     $('modifyBtn').className = 'btn primary';
@@ -1174,6 +1181,7 @@ function updateHeader() {
 
 function renderOverview() {
   const supervisor = S.overview.supervisor || {};
+  const assistantName = supervisor.name || assistantLabel();
   const builtins = S.overview.builtins || [];
   const dynamic = S.agents || [];
   const telegramEnabled = Boolean(S.telegram?.enabled);
@@ -1190,14 +1198,14 @@ function renderOverview() {
       <div class="overview-stats">
         <div class="overview-stat"><strong>1</strong><span>Supervisor</span></div>
         <div class="overview-stat"><strong>${total}</strong><span>Specialists</span></div>
-        <div class="overview-stat"><strong>${dynamic.length}</strong><span>Dynamic agents</span></div>
+        <div class="overview-stat"><strong>${dynamic.length}</strong><span>Custom subagents</span></div>
         <div class="overview-stat"><strong>${S.servers.length}</strong><span>MCP servers</span></div>
       </div>
-      <section class="workflow-shell" aria-label="Agent component topology">
+      <section class="workflow-shell" aria-label="Assistant workflow">
         <div class="workflow-toolbar">
-          <div class="workflow-title"><span class="live-dot"></span><span>Configured topology</span></div>
+          <div class="workflow-title"><span class="live-dot"></span><span>Agent workflow</span></div>
           <div class="workflow-tools">
-            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>Dynamic MCP</span><span><i class="legend-dot" style="background:var(--danger)"></i>Inactive</span>${telegramEnabled ? '<span><i class="legend-dot input"></i>Input channel</span>' : ''}</div>
+            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>MCP subagent</span><span><i class="legend-dot" style="background:var(--danger)"></i>Inactive</span>${telegramEnabled ? '<span><i class="legend-dot input"></i>Input channel</span>' : ''}</div>
             <div class="zoom-controls" aria-label="Graph zoom controls">
               <button class="zoom-control" type="button" data-zoom="out" aria-label="Zoom out">−</button>
               <button class="zoom-control value" type="button" data-zoom="reset" id="zoomValue" aria-label="Reset zoom">100%</button>
@@ -1214,16 +1222,16 @@ function renderOverview() {
                 <img src="/images/telegram.svg" alt="">
                 <span class="telegram-node-label">Telegram</span>
               </article>` : ''}
-              <article class="agent-node supervisor" id="node-supervisor" data-open-supervisor title="View Mounir configuration" role="button" tabindex="0">
+              <article class="agent-node supervisor" id="node-supervisor" data-open-supervisor title="Open ${esc(assistantName)} settings" role="button" tabindex="0">
                 ${telegramEnabled ? '<span class="node-port input-left"></span>' : ''}
                 <span class="node-port output"></span>
                 <div class="node-head">
                   <div class="node-icon">${esc(supervisorInitial)}</div>
-                  <div class="node-identity"><div class="node-kind">Supervisor</div><div class="node-name">${esc(supervisor.name || 'Mounir')}</div></div>
+                  <div class="node-identity"><div class="node-kind">Supervisor</div><div class="node-name">${esc(assistantName)}</div></div>
                 </div>
-                <div class="node-model" title="${esc(supervisor.model || 'Not configured')}">
+                <div class="node-model" title="${esc(supervisor.model || 'No model selected')}">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
-                  ${esc(supervisor.model || 'Not configured')}
+                  ${esc(supervisor.model || 'No model selected')}
                 </div>
               </article>
             </div>
@@ -1284,33 +1292,35 @@ function renderVoice() {
   const stt = S.voice.stt || {};
   const tts = S.voice.tts || {};
   const keyHint = item => item.api_key_configured
-    ? 'A credential is configured. Leave this empty to keep it.'
-    : 'No credential configured.';
+    ? 'API key saved. Leave blank to keep it.'
+    : 'No API key saved.';
   $('content').innerHTML = `
     <form class="voice-config" id="voiceForm">
       <section class="voice-card">
         <div class="voice-card-head">
-          <h3>Speech to text</h3>
-          <p>Controls how recorded speech is converted into the message Mounir receives.</p>
+          <h3>Speech-to-text</h3>
+          <p>Choose how voice messages are transcribed.</p>
         </div>
         <div class="voice-grid">
           <label>Provider
             <select id="sttProvider">
-              <option value="local_whisper"${stt.provider === 'local_whisper' ? ' selected' : ''}>Faster Whisper — local</option>
-              <option value="groq"${stt.provider === 'groq' ? ' selected' : ''}>Groq Whisper — cloud</option>
+              <option value="local_whisper"${stt.provider === 'local_whisper' ? ' selected' : ''}>Faster Whisper (local)</option>
+              <option value="groq"${stt.provider === 'groq' ? ' selected' : ''}>Groq Whisper (cloud)</option>
             </select>
           </label>
-          <label>Model
-            <input id="sttModel" value="${esc(stt.model || '')}" placeholder="small or whisper-large-v3-turbo" required>
+          <label><span id="sttModelLabel">Model name or path</span>
+            <input id="sttModel" value="${esc(stt.model || '')}" required>
+            <div class="voice-key-state" id="sttModelHint"></div>
           </label>
           <label>Language
             <input id="sttLanguage" value="${esc(stt.language || 'auto')}" placeholder="auto, en, fr, ar">
+            <div class="voice-key-state">Use “auto” to detect the language, or enter a language code.</div>
           </label>
           <label data-stt-cloud>Base URL
             <input id="sttBaseUrl" value="${esc(stt.base_url || 'https://api.groq.com/openai/v1')}" placeholder="https://api.groq.com/openai/v1">
           </label>
           <label class="full" data-stt-cloud>API key
-            <input type="password" id="sttApiKey" autocomplete="new-password" placeholder="Paste a replacement key">
+            <input type="password" id="sttApiKey" autocomplete="new-password" placeholder="Enter a new key to replace the saved one">
             <div class="voice-key-state">${esc(keyHint(stt))}</div>
           </label>
         </div>
@@ -1318,27 +1328,29 @@ function renderVoice() {
 
       <section class="voice-card">
         <div class="voice-card-head">
-          <h3>Text to speech</h3>
-          <p>Controls how Mounir turns its reply into the audio played by the web interface and voice modes.</p>
+          <h3>Text-to-speech</h3>
+          <p>Choose how text replies are converted to speech.</p>
         </div>
         <div class="voice-grid">
           <label>Provider
             <select id="ttsProvider">
-              <option value="piper"${tts.provider === 'piper' ? ' selected' : ''}>Piper — local</option>
+              <option value="piper"${tts.provider === 'piper' ? ' selected' : ''}>Piper (local)</option>
               <option value="google"${tts.provider === 'google' ? ' selected' : ''}>Google Cloud Text-to-Speech</option>
             </select>
           </label>
-          <label>Model or voice
-            <input id="ttsModel" value="${esc(tts.model || '')}" placeholder="Voice file path or cloud voice name" required>
+          <label><span id="ttsModelLabel">Voice model path</span>
+            <input id="ttsModel" value="${esc(tts.model || '')}" required>
+            <div class="voice-key-state" id="ttsModelHint"></div>
           </label>
-          <label>Language
-            <input id="ttsLanguage" value="${esc(tts.language || 'en-US')}" placeholder="en-US, fr-FR, ar-XA">
+          <label data-tts-language>Language code
+            <input id="ttsLanguage" value="${esc(tts.language || 'en-US')}" placeholder="en-US">
+            <div class="voice-key-state">Use the language code configured for the selected Google voice.</div>
           </label>
           <label data-tts-cloud>Base URL
             <input id="ttsBaseUrl" value="${esc(tts.base_url || 'https://texttospeech.googleapis.com/v1')}" placeholder="https://texttospeech.googleapis.com/v1">
           </label>
           <label class="full" data-tts-cloud>API key
-            <input type="password" id="ttsApiKey" autocomplete="new-password" placeholder="Paste a replacement key">
+            <input type="password" id="ttsApiKey" autocomplete="new-password" placeholder="Enter a new key to replace the saved one">
             <div class="voice-key-state">${esc(keyHint(tts))}</div>
           </label>
         </div>
@@ -1346,7 +1358,7 @@ function renderVoice() {
 
       <div class="voice-actions">
         <div class="voice-feedback" id="voiceFeedback"></div>
-        <button class="btn primary" type="submit" id="voiceSave">Save voice configuration</button>
+        <button class="btn primary" type="submit" id="voiceSave">Save voice settings</button>
       </div>
     </form>`;
   S.view = 'voice';
@@ -1356,6 +1368,17 @@ function renderVoice() {
     const ttsCloud = $('ttsProvider').value === 'google';
     document.querySelectorAll('[data-stt-cloud]').forEach(field => field.hidden = !sttCloud);
     document.querySelectorAll('[data-tts-cloud]').forEach(field => field.hidden = !ttsCloud);
+    document.querySelectorAll('[data-tts-language]').forEach(field => field.hidden = !ttsCloud);
+    $('sttModelLabel').textContent = sttCloud ? 'Model ID' : 'Model name or path';
+    $('sttModel').placeholder = sttCloud ? 'Groq Whisper model ID' : 'Model size, Hugging Face ID, or local folder';
+    $('sttModelHint').textContent = sttCloud
+      ? 'Use a Whisper model supported by your Groq account.'
+      : 'Uses Faster Whisper models or a compatible local model folder.';
+    $('ttsModelLabel').textContent = ttsCloud ? 'Voice name' : 'Voice model path';
+    $('ttsModel').placeholder = ttsCloud ? 'Google Cloud voice name' : 'Path to a Piper .onnx voice file';
+    $('ttsModelHint').textContent = ttsCloud
+      ? 'Use a voice available for the selected language in Google Cloud.'
+      : 'The matching .onnx.json file must be in the same folder.';
   };
   $('sttProvider').addEventListener('change', syncProviders);
   $('ttsProvider').addEventListener('change', syncProviders);
@@ -1386,7 +1409,7 @@ function renderVoice() {
         },
       });
       renderVoice();
-      $('voiceFeedback').textContent = 'Voice configuration saved.';
+      $('voiceFeedback').textContent = 'Voice settings saved.';
       $('voiceFeedback').className = 'voice-feedback ok';
     } catch (error) {
       feedback.textContent = error.message;
@@ -1405,18 +1428,19 @@ function renderTelegram() {
   const paired = Boolean(state.paired);
   const status = telegramStatusInfo(state.connection_status);
   const botName = state.bot_username ? `@${state.bot_username}` : 'Telegram bot';
+  const assistantName = assistantLabel();
   const accountName = state.chat_name || (state.chat_username ? `@${state.chat_username}` : 'Paired account');
   const statusDetail = state.last_error
     ? state.last_error
     : status.kind === 'connected'
     ? `${botName} is ready to receive your messages.`
     : status.kind === 'waiting_pairing'
-    ? `${botName} is online and waiting for you to pair an account.`
+    ? `${botName} is running and waiting for you to pair an account.`
     : !configured
     ? 'Add the token supplied by BotFather to connect your bot.'
     : !enabled
     ? 'Your bot is configured. Enable Telegram whenever you want to use it.'
-    : 'Mounir is connecting to Telegram.';
+    : `${assistantName} is connecting to Telegram.`;
   const pairingHtml = paired ? `
     <div class="telegram-account">
       <div>
@@ -1425,7 +1449,7 @@ function renderTelegram() {
       </div>
       <button class="btn danger" type="button" id="telegramDisconnect">Disconnect account</button>
     </div>` : !configured ? `
-    <div class="telegram-pair-empty">Save your BotFather token first. Pairing will then connect your personal Telegram account without asking you for a chat ID.</div>` : !enabled ? `
+    <div class="telegram-pair-empty">Add your bot token before pairing a Telegram chat.</div>` : !enabled ? `
     <div class="telegram-pair-empty">Enable Telegram to start the bot before pairing your account.</div>` : `
     <div class="telegram-pair-empty">
       Generate a temporary code, then send the displayed command to ${esc(botName)} in Telegram.
@@ -1452,7 +1476,7 @@ function renderTelegram() {
         <div class="telegram-enable-row">
           <div class="telegram-enable-copy">
             <strong>Enable Telegram</strong>
-            <span>Run the bot automatically with the Mounir server.</span>
+            <span>Keep the bot available whenever ${esc(assistantName)} is running.</span>
           </div>
           <div class="heartbeat-control">
             <label class="switch" title="Enable or disable Telegram">
@@ -1463,16 +1487,16 @@ function renderTelegram() {
         </div>
         <div class="telegram-section-head">
           <h3>Bot connection</h3>
-          <p>Create a bot with BotFather, then paste the token it gives you. The saved token is never displayed again.</p>
+          <p>Create a bot in BotFather and paste its token here. Saved tokens are never displayed.</p>
         </div>
         <div class="telegram-token-state${configured ? ' configured' : ''}">
-          ${configured ? 'Token configured and stored securely' : 'No token configured yet'}
+          ${configured ? 'Bot token saved' : 'No bot token saved'}
         </div>
         <div class="telegram-fields" id="telegramTokenEditor" hidden>
           <label class="telegram-field" style="margin-top:15px">
             <span>Bot token</span>
             <input type="password" id="telegramToken" autocomplete="new-password" placeholder="${configured ? 'Paste the new token from BotFather' : 'Paste the token from BotFather'}">
-            <span class="hint">It usually looks like numbers, a colon, and a secret value.</span>
+            <span class="hint">Copy the complete token from BotFather.</span>
           </label>
         </div>
         <div class="telegram-actions">
@@ -1486,8 +1510,8 @@ function renderTelegram() {
 
       <section class="telegram-card">
         <div class="telegram-section-head">
-          <h3>Personal account</h3>
-          <p>Only the paired Telegram chat can talk to your assistant.</p>
+          <h3>Authorized chat</h3>
+          <p>Only the paired chat can send requests to ${esc(assistantName)}.</p>
         </div>
         <div class="telegram-pair-state" id="telegramPairState">${pairingHtml}</div>
       </section>
@@ -1561,7 +1585,7 @@ function renderTelegram() {
     }
   });
   $('telegramRemoveToken')?.addEventListener('click', async () => {
-    if (!await showConfirm('Remove the Telegram bot token and disconnect the paired account?')) return;
+    if (!await showConfirm('Remove the Telegram bot token and disconnect the paired account?', 'Remove')) return;
     try {
       S.telegram = await api('DELETE', '/api/telegram/token');
       renderTelegram();
@@ -1570,7 +1594,7 @@ function renderTelegram() {
     }
   });
   $('telegramDisconnect')?.addEventListener('click', async () => {
-    if (!await showConfirm('Disconnect this Telegram account?')) return;
+    if (!await showConfirm('Disconnect this Telegram account?', 'Disconnect')) return;
     try {
       S.telegram = await api('DELETE', '/api/telegram/pairing');
       renderTelegram();
@@ -1586,12 +1610,12 @@ function renderTelegram() {
         <div class="telegram-pair-code">
           <div class="telegram-pair-code-label">Send this command to ${esc(botName)}</div>
           <div class="telegram-pair-command mono">${esc(pairing.command)}</div>
-          <div class="telegram-pair-help">Waiting for your Telegram message… This page will update automatically.</div>
+          <div class="telegram-pair-help">Waiting for the command in Telegram. This page updates automatically.</div>
           <div class="telegram-actions" style="justify-content:center"><button class="btn outline" type="button" id="telegramCopyPair">Copy command</button></div>
         </div>`;
       $('telegramCopyPair').addEventListener('click', async copyEvent => {
         await navigator.clipboard.writeText(pairing.command);
-        copyEvent.target.textContent = 'Copied';
+        copyEvent.target.textContent = 'Command copied';
       });
       const expiresAt = Date.parse(pairing.expires_at);
       telegramPairPoll = setInterval(async () => {
@@ -1639,9 +1663,9 @@ function heartbeatAgentToolsHtml(agent) {
         <div class="heartbeat-agent-head-actions">
           <label class="heartbeat-select-all">
             <input type="checkbox" data-heartbeat-select-all data-agent-key="${esc(agentKey)}"${allSafeSelected ? ' checked' : ''}${safeTools.length ? '' : ' disabled'}>
-            <span>Select all safe</span>
+            <span>Select all available</span>
           </label>
-          <span class="connection-status ${esc(agent.connection_status || 'untested')}">${tools.length} tools</span>
+          <span class="connection-status ${esc(agent.connection_status || 'untested')}">${tools.length} ${tools.length === 1 ? 'tool' : 'tools'}</span>
         </div>
       </div>
       <div class="heartbeat-agent-tools">
@@ -1653,11 +1677,11 @@ function heartbeatAgentToolsHtml(agent) {
               <input type="checkbox" data-heartbeat-tool data-agent-key="${esc(agentKey)}" data-tool-name="${esc(tool.name)}"${selected && !locked ? ' checked' : ''}${locked ? ' disabled' : ''}>
               <span>
                 <span class="heartbeat-tool-name">${esc(readableToolName(tool.name))}</span>
-                <span class="heartbeat-tool-description">${esc(tool.description || 'No description provided.')}</span>
+                <span class="heartbeat-tool-description">${esc(tool.description || 'No description available.')}</span>
               </span>
-              ${locked ? '<span class="heartbeat-tool-lock">Needs confirmation</span>' : ''}
+              ${locked ? '<span class="heartbeat-tool-lock">Approval required</span>' : ''}
             </label>`;
-        }).join('') : '<div class="heartbeat-empty">No saved tools. Open this MCP server and test its connection first.</div>'}
+        }).join('') : '<div class="heartbeat-empty">No tools are available for this subagent.</div>'}
       </div>
     </section>`;
 }
@@ -1676,6 +1700,7 @@ function syncHeartbeatSelectAll(agent) {
 
 function renderHeartbeat() {
   const enabled = Boolean(S.heartbeat.enabled);
+  const assistantName = assistantLabel();
   const capabilities = Array.isArray(S.heartbeat.capabilities) ? S.heartbeat.capabilities : [];
   heartbeatToolSelections = new Set(
     capabilities.flatMap(agent => (Array.isArray(agent.tools) ? agent.tools : [])
@@ -1700,8 +1725,17 @@ function renderHeartbeat() {
     ? `${minutes / 60} hours`
     : '1 day';
   const status = S.heartbeat.last_status || 'never';
+  const statusLabels = {
+    never: 'Not run',
+    quiet: 'No updates',
+    alert: 'Update found',
+    error: 'Error',
+    skipped: 'Skipped',
+    running: 'Running',
+  };
+  const statusLabel = statusLabels[status] || status;
   const detail = S.heartbeat.last_error || S.heartbeat.last_message || (
-    status === 'quiet' ? 'Nothing needed your attention.' : 'No heartbeat check has run yet.'
+    status === 'quiet' ? 'No relevant changes were found.' : 'No check has run yet.'
   );
   $('content').innerHTML = `
     <div class="heartbeat-view">
@@ -1713,7 +1747,7 @@ function renderHeartbeat() {
             </div>
             <div>
               <h3 id="heartbeatConfigTitle">Enable heartbeat</h3>
-              <p>Quiet checks stay silent; important updates appear in your conversation.</p>
+              <p>${esc(assistantName)} notifies you only when a check finds something relevant.</p>
             </div>
           </div>
           <div class="heartbeat-control">
@@ -1733,14 +1767,14 @@ function renderHeartbeat() {
             </select>
           </label>
           <label class="heartbeat-field">
-            <span>What should Mounir watch for?</span>
-            <textarea id="heartbeatInstructions" maxlength="2000" placeholder="For example: Tell me about urgent unread email or failed GitHub checks.">${esc(S.heartbeat.instructions || '')}</textarea>
+            <span>What should ${esc(assistantName)} watch for?</span>
+            <textarea id="heartbeatInstructions" maxlength="2000" placeholder="Describe what should trigger an update.">${esc(S.heartbeat.instructions || '')}</textarea>
           </label>
         </div>
         <div class="heartbeat-section-divider"></div>
         <div>
-          <h3>Allowed checks</h3>
-          <p>Choose a subagent, then select the tools heartbeat may use automatically. Tools that require confirmation remain unavailable.</p>
+          <h3>Tools heartbeat can use</h3>
+          <p>Select the tools heartbeat may run automatically. Tools requiring approval cannot be selected.</p>
         </div>
         <label class="heartbeat-field heartbeat-agent-picker">
           <span>Subagent</span>
@@ -1763,7 +1797,7 @@ function renderHeartbeat() {
         <div class="heartbeat-last-label">Last check</div>
         <div class="heartbeat-last-value">${esc(heartbeatTime(S.heartbeat.last_run_at))}</div>
         <div class="heartbeat-last-label">Result</div>
-        <div class="heartbeat-last-value"><span class="heartbeat-run-status ${esc(status)}">${esc(status)}</span> · ${esc(detail)}</div>
+        <div class="heartbeat-last-value"><span class="heartbeat-run-status ${esc(status)}">${esc(statusLabel)}</span> · ${esc(detail)}</div>
         <div class="heartbeat-last-label">Next check</div>
         <div class="heartbeat-last-value">${enabled ? esc(heartbeatTime(S.heartbeat.next_run_at)) : 'Disabled'}</div>
       </section>
@@ -1823,7 +1857,7 @@ function renderHeartbeat() {
 }
 
 function heartbeatTime(value) {
-  if (!value) return 'Never';
+  if (!value) return 'Not run';
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
@@ -1851,7 +1885,7 @@ async function saveHeartbeatSettings(runNow) {
   feedback.textContent = runNow ? 'Saving and running the check…' : 'Saving…';
   try {
     const payload = heartbeatFormPayload();
-    if (!payload.selected_tools.length) throw new Error('Select at least one tool for heartbeat checks.');
+    if (!payload.selected_tools.length) throw new Error('Select at least one tool to continue.');
     S.heartbeat = await api('PUT', API.heartbeat.update(), payload);
     if (runNow) S.heartbeat = await api('POST', '/api/heartbeat/run');
     renderHeartbeat();
@@ -1878,7 +1912,7 @@ function agentNodeHtml(item, kind, nodeId, agentId) {
   const behavior = dynamic
     ? ` data-agent-id="${agentId}" title="${inactive ? 'Inactive — open subagent settings' : 'Open subagent settings'}" role="button" tabindex="0"`
     : builtin
-    ? ` data-builtin-key="${esc(item.key)}" title="${inactive ? 'Inactive — open specialist settings' : 'View capabilities and model'}" role="button" tabindex="0"`
+    ? ` data-builtin-key="${esc(item.key)}" title="${inactive ? 'Inactive — open specialist settings' : 'Open specialist settings'}" role="button" tabindex="0"`
     : '';
   return `
     <article class="agent-node ${dynamic ? 'dynamic' : builtin ? 'builtin' : ''}${inactive ? ' inactive' : ''}" id="node-${nodeId}"${behavior}>
@@ -1888,9 +1922,9 @@ function agentNodeHtml(item, kind, nodeId, agentId) {
         <div class="node-icon${dynamic && item.has_icon ? ' has-image' : ''}">${icon}</div>
         <div class="node-identity"><div class="node-name">${esc(item.name)}</div></div>
       </div>
-      <div class="node-model" title="${esc(item.model || item.model_name || 'Not configured')}">
+      <div class="node-model" title="${esc(item.model || item.model_name || 'No model selected')}">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
-        ${esc(item.model || item.model_name || 'Not configured')}
+        ${esc(item.model || item.model_name || 'No model selected')}
       </div>
     </article>`;
 }
@@ -1925,7 +1959,7 @@ function drawWorkflowLinks() {
     const bend = sy + Math.max(28, (ty - sy) * .54);
     const inactive = target.classList.contains('inactive');
     const endpoint = inactive
-      ? `<path class="inactive-end" d="M ${tx - 3} ${ty - 3} L ${tx + 3} ${ty + 3} M ${tx + 3} ${ty - 3} L ${tx - 3} ${ty + 3}"/>`
+      ? ''
       : `<circle cx="${tx}" cy="${ty}" r="2.5"/>`;
     paths.push(`<path class="specialist-link${inactive ? ' inactive-link' : ''}" d="M ${sx} ${sy} C ${sx} ${bend}, ${tx} ${bend}, ${tx} ${ty}"/>${endpoint}`);
   });
@@ -1972,8 +2006,8 @@ function renderListItem(item) {
         <div class="primary">${esc(item.name)}</div>
         <div class="secondary">${esc(item.provider || 'No provider')}</div>
       </div>
-      <span class="badge">${item.api_key ? 'key set' : 'no key'}</span>
-      <button class="del-btn" data-action="delete" title="Remove">
+      ${item.api_key ? '<span class="badge">API key saved</span>' : ''}
+      <button class="del-btn" data-action="delete" title="Delete">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>`;
@@ -1987,7 +2021,7 @@ function renderListItem(item) {
       </div>
       <span class="badge">${esc(item.transport || 'stdio')}</span>
       <span class="connection-status server-list-status ${status.kind}" role="status" aria-label="${esc(status.label)}" title="${esc(status.label)}"></span>
-      <button class="del-btn" data-action="delete" title="Remove">
+      <button class="del-btn" data-action="delete" title="Delete">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>`;
@@ -2005,8 +2039,8 @@ function renderListItem(item) {
         <div class="secondary">${esc(item.description)}</div>
       </div>
       <span class="agent-state-dot${inactive ? ' inactive' : ''}" role="status" aria-label="${inactive ? 'Inactive' : 'Active'}" title="${inactive ? 'Inactive' : 'Active'}"></span>
-      <span class="badge mono">delegate_to_${slug(item.name)}</span>
-      <button class="del-btn" data-action="delete" title="Remove">
+      <span class="badge">${esc(item.server_name || 'MCP subagent')}</span>
+      <button class="del-btn" data-action="delete" title="Delete">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>`;
@@ -2059,10 +2093,10 @@ function buildRecordDetailsHtml(item) {
   if (S.tab === 'models') {
     const keyStatus = item.api_key
       ? '<div class="record-value record-secret-status">Configured</div>'
-      : '<div class="record-value muted">No API key</div>';
+      : '<div class="record-value muted">Not configured or not required</div>';
     return `
       <section class="record-card">
-        <div class="record-card-title">Model information</div>
+        <div class="record-card-title">Model details</div>
         <div class="record-grid">
           ${recordFieldHtml('Name', item.name, { full: true })}
           ${recordFieldHtml('Model ID', item.model, { full: true, mono: true })}
@@ -2094,7 +2128,7 @@ function buildRecordDetailsHtml(item) {
     } else if (auth.mode === 'credential' && auth.method === 'bearer') {
       credentialDetails = recordHtmlField(
         'Authentication',
-        '<div class="record-value record-secret-status">Bearer token configured</div>',
+        '<div class="record-value record-secret-status">Access token configured</div>',
         { full: true }
       );
     } else if (auth.mode === 'credential') {
@@ -2122,12 +2156,12 @@ function buildRecordDetailsHtml(item) {
       </div>` : '';
     return `
       <section class="record-card">
-        <div class="record-card-title">Server information</div>
+        <div class="record-card-title">Server details</div>
         <div class="record-grid">
           ${recordFieldHtml('Name', item.name)}
-          ${recordFieldHtml('Server type', transportNames[item.transport] || item.transport)}
+          ${recordFieldHtml('Connection type', transportNames[item.transport] || item.transport)}
           ${recordFieldHtml('Connection', item.connection, { full: true, mono: true })}
-          ${recordFieldHtml('Description', item.description, { full: true, long: true, empty: 'No description provided' })}
+          ${recordFieldHtml('Description', item.description, { full: true, long: true, empty: 'No description available' })}
           ${credentialDetails}
         </div>
       </section>
@@ -2138,20 +2172,20 @@ function buildRecordDetailsHtml(item) {
   const server = S.servers.find(entry => entry.id === +item.mcp_server_id);
   const modelLabel = model
     ? `${model.name}${model.model ? ` — ${model.model}` : ''}`
-    : item.model_name || 'Unknown model';
+    : item.model_name || 'Model unavailable';
   const confirmationTools = parseStringList(
     item.confirm_tools,
     item.confirm_tool_calls ? ['*'] : []
   );
   let confirmation;
   if (confirmationTools.includes('*')) {
-    confirmation = '<div class="record-value">Ask before every MCP tool call</div>';
+    confirmation = '<div class="record-value">Ask before every action</div>';
   } else if (confirmationTools.length) {
     confirmation = `
-      <div class="record-value" style="margin-bottom:8px">Ask only for selected tools</div>
-      ${recordChipsHtml(confirmationTools)}`;
+      <div class="record-value" style="margin-bottom:8px">Ask for selected actions</div>
+      ${recordChipsHtml(confirmationTools.map(readableToolName))}`;
   } else {
-    confirmation = '<div class="record-value">Tool calls run without confirmation</div>';
+    confirmation = '<div class="record-value">Run without confirmation</div>';
   }
   const dedupeTools = parseStringList(item.dedupe_tools);
   const initial = (item.name || '?').trim().charAt(0).toUpperCase();
@@ -2159,6 +2193,7 @@ function buildRecordDetailsHtml(item) {
     ? `<div class="record-agent-icon has-image"><img src="/api/subagents/${item.id}/icon" alt=""></div>`
     : `<div class="record-agent-icon">${esc(initial)}</div>`;
   const enabled = !(item.enabled === false || Number(item.enabled) === 0);
+  const assistantName = assistantLabel();
   return `
     <section class="record-card">
       <div class="record-agent-heading">
@@ -2169,7 +2204,7 @@ function buildRecordDetailsHtml(item) {
         <div class="agent-availability">
           <div class="agent-availability-copy">
             <strong>${enabled ? 'Active' : 'Inactive'}</strong>
-            <span>${enabled ? 'Available to Mounir' : 'Saved, but unavailable at runtime'}</span>
+            <span>${enabled ? `Available to ${esc(assistantName)}` : `Unavailable to ${esc(assistantName)} until reactivated`}</span>
           </div>
           <label class="switch" title="${enabled ? 'Deactivate subagent' : 'Activate subagent'}">
             <input type="checkbox" data-subagent-enabled="${item.id}"${enabled ? ' checked' : ''}>
@@ -2180,19 +2215,19 @@ function buildRecordDetailsHtml(item) {
       <div class="agent-availability-feedback" id="agentAvailabilityFeedback"></div>
     </section>
     <section class="record-card">
-      <div class="record-card-title">Agent configuration</div>
+      <div class="record-card-title">Subagent details</div>
       <div class="record-grid">
         ${recordFieldHtml('Model', modelLabel)}
-        ${recordFieldHtml('MCP server', server?.name || item.mcp_server_name || 'Unknown server')}
+        ${recordFieldHtml('MCP server', server?.name || item.mcp_server_name || 'Server unavailable')}
         ${recordFieldHtml('Description', item.description, { full: true, long: true })}
-        ${recordFieldHtml('System prompt', item.system_prompt, { full: true, long: true, empty: 'Uses the standard subagent prompt' })}
+        ${recordFieldHtml('System prompt', item.system_prompt, { full: true, long: true, empty: 'Default instructions' })}
       </div>
     </section>
     <section class="record-card">
-      <div class="record-card-title">Tool safety</div>
+      <div class="record-card-title">Action permissions</div>
       <div class="record-grid">
         ${recordHtmlField('Confirmation', confirmation, { full: true })}
-        ${recordHtmlField('Duplicate action protection', recordChipsHtml(dedupeTools, 'No tools selected'), { full: true })}
+        ${recordHtmlField('Repeated action protection', recordChipsHtml(dedupeTools.map(readableToolName), 'No protected actions'), { full: true })}
       </div>
     </section>`;
 }
@@ -2257,14 +2292,14 @@ function serverToolsPanelHtml(item) {
             <div class="server-tools-title">Available tools</div>
             <span class="server-tools-count" id="serverToolsCount">—</span>
           </div>
-          <div class="server-tools-subtitle">What this server lets the agent do</div>
+          <div class="server-tools-subtitle">Actions available through this server</div>
         </div>
         <div class="server-tools-meta">
           <span class="connection-status ${status.kind}" id="serverConnectionStatus">${status.label}</span>
         </div>
       </div>
       <div class="server-tools-state${saved ? ' loading' : ''}" id="serverToolsContent">
-        ${saved ? 'Reading the server’s capabilities…' : '<strong>No tools yet</strong>Save the server first, then its tools will appear here.'}
+        ${saved ? 'Loading saved tools…' : '<strong>No tools yet</strong>Save the server to discover its available tools.'}
       </div>
     </aside>`;
 }
@@ -2278,7 +2313,7 @@ function readableToolName(name) {
 function connectionStatusInfo(status) {
   if (status === 'connected') return { kind: 'connected', label: 'Connected' };
   if (status === 'failed') return { kind: 'failed', label: 'Failed' };
-  if (status === 'stale') return { kind: 'stale', label: 'Needs retest' };
+  if (status === 'stale') return { kind: 'stale', label: 'Retest needed' };
   return { kind: 'untested', label: 'Not tested' };
 }
 
@@ -2312,11 +2347,11 @@ function renderServerTools(state) {
     if (state?.status === 'failed') {
       content.innerHTML = `<strong>Connection failed</strong>${esc(state.last_error || 'Check the server connection and credentials, then test again.')}`;
     } else if (state?.status === 'untested') {
-      content.innerHTML = '<strong>Testing for the first time…</strong>The discovered tools will be saved here.';
+      content.innerHTML = '<strong>Discovering tools…</strong>Available tools will be saved here.';
     } else if (state?.status === 'stale') {
-      content.innerHTML = '<strong>Connection changed</strong>Test the connection to refresh its saved tools.';
+      content.innerHTML = '<strong>Settings changed</strong>Test the connection to refresh its saved tools.';
     } else {
-      content.innerHTML = '<strong>No tools advertised</strong>The connection worked, but this server did not provide any tools.';
+      content.innerHTML = '<strong>No tools available</strong>The connection worked, but this server did not provide any tools.';
     }
     return;
   }
@@ -2324,12 +2359,12 @@ function renderServerTools(state) {
   const notice = state?.status === 'failed'
     ? `<div class="server-tools-notice failed">Latest test failed. Showing the last successful tool list.</div>`
     : state?.status === 'stale'
-    ? `<div class="server-tools-notice stale">Connection settings changed. Showing cached tools until you test again.</div>`
+    ? `<div class="server-tools-notice stale">Settings changed. Showing the last saved tools until you test again.</div>`
     : '';
   content.innerHTML = notice + available.map(tool => `
     <article class="server-tool">
       <div class="server-tool-name">${esc(readableToolName(tool.name))}</div>
-      <div class="server-tool-description">${esc(tool.description || 'No description was provided for this tool.')}</div>
+      <div class="server-tool-description">${esc(tool.description || 'No description available.')}</div>
     </article>`).join('');
 }
 
@@ -2342,7 +2377,7 @@ async function loadServerTools(forceTest = false) {
   if (!content || !count) return;
   if (forceTest) {
     content.className = 'server-tools-state loading';
-    content.textContent = 'Testing the connection and refreshing tools…';
+    content.textContent = 'Testing connection and refreshing tools…';
     count.textContent = '—';
   }
   $('testBtn').disabled = true;
@@ -2383,22 +2418,23 @@ function buildFormHtml(item, readonly) {
   const e = (field, def) => item ? esc(item[field] ?? '') : (def ?? '');
   const ro = readonly ? ' readonly' : '';
   const dis = readonly ? ' disabled' : '';
+  const assistantName = assistantLabel();
   if (S.tab === 'profile') return `
     <form class="form-grid" id="formEl">
-      <label>User name
-        <span class="hint">The person using this assistant.</span>
-        <input type="text" name="user_name" value="${e('user_name')}" placeholder="e.g. Ahmed" maxlength="80" required${ro}>
+      <label>Your name
+        <span class="hint">How ${esc(assistantName)} identifies and addresses you.</span>
+        <input type="text" name="user_name" value="${e('user_name')}" placeholder="Your name" maxlength="80" required${ro}>
       </label>
       <label>Assistant name
-        <span class="hint">Used in the assistant prompt and interface.</span>
-        <input type="text" name="assistant_name" value="${e('assistant_name')}" placeholder="e.g. Mounir" maxlength="80" required${ro}>
+        <span class="hint">Shown in the interface and used in responses.</span>
+        <input type="text" name="assistant_name" value="${e('assistant_name')}" placeholder="Assistant name" maxlength="80" required${ro}>
       </label>
       <label class="full">Location
-        <span class="hint">Used for location-aware questions such as weather and local recommendations.</span>
+        <span class="hint">Used for local information such as weather and nearby places.</span>
         <input type="text" name="location" value="${e('location')}" placeholder="City, region, country" maxlength="160" required${ro}>
       </label>
       <label class="full">Preferred response language
-        <span class="hint">Automatic follows the language used in each message.</span>
+        <span class="hint">Automatic replies in the language of each message.</span>
         <select name="preferred_language"${dis}>
           <option value="auto"${item?.preferred_language === 'auto' ? ' selected' : ''}>Automatic</option>
           <option value="en"${item?.preferred_language === 'en' ? ' selected' : ''}>English</option>
@@ -2410,16 +2446,28 @@ function buildFormHtml(item, readonly) {
     </form>`;
   if (S.tab === 'models') return `
     <form class="form-grid" id="formEl">
-      <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="e.g. Ollama Cloud" required${ro}></label>
-      <label class="full">Model ID
-        <span class="hint">The actual model identifier sent to the API (e.g. qwen3:4b, gpt-4o).</span>
-        <input type="text" name="model" value="${e('model')}" placeholder="qwen3:4b" required${ro}>
+      <div class="form-guidance">
+        <strong>Local model compatibility.</strong> Ollama models can power ${esc(assistantName)} and MCP subagents. Other OpenAI-compatible local servers can power MCP subagents. Tool calling is required.
+      </div>
+      <label class="full">Name
+        <span class="hint">A display name used in Agent Studio.</span>
+        <input type="text" name="name" value="${e('name')}" placeholder="Display name" required${ro}>
       </label>
-      <label class="full">Provider <input type="text" name="provider" value="${e('provider')}" placeholder="e.g. Ollama / OpenAI / Groq"${ro}></label>
-      <label class="full">Base URL <input type="text" name="base_url" value="${e('base_url')}" placeholder="https://ollama.com/v1" required${ro}></label>
+      <label class="full">Model ID
+        <span class="hint">Enter the exact model name provided by your model service.</span>
+        <input type="text" name="model" value="${e('model')}" placeholder="Model name or ID" required${ro}>
+      </label>
+      <label class="full">Provider
+        <span class="hint">Used to match the model with compatible built-in agents. Use Ollama for a local Ollama model.</span>
+        <input type="text" name="provider" value="${e('provider')}" placeholder="Provider name"${ro}>
+      </label>
+      <label class="full">Base URL
+        <span class="hint">Use the service API address. Local Ollama normally uses http://localhost:11434/v1.</span>
+        <input type="text" name="base_url" value="${e('base_url')}" placeholder="Model API URL" required${ro}>
+      </label>
       <label class="full">API key
-        <span class="hint">Paste the key here. Leave it empty for local models that do not require one.</span>
-        <input type="password" name="api_key" value="${e('api_key')}" placeholder="Paste API key"${ro}>
+        <span class="hint">Required by most cloud providers; usually not needed for local models.</span>
+        <input type="password" name="api_key" value="${e('api_key')}" placeholder="Enter API key"${ro}>
       </label>
       <div class="full error" id="formError"></div>
     </form>`;
@@ -2431,17 +2479,17 @@ function buildFormHtml(item, readonly) {
     const disabled = readonly ? ' disabled' : '';
     return `
     <form class="form-grid" id="formEl">
-      <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="e.g. Company Search" required${ro}></label>
+      <label class="full">Name <input type="text" name="name" value="${e('name')}" placeholder="Server name" required${ro}></label>
       <label class="full">Description
-        <span class="hint">Optional information about what this server provides or how it is configured.</span>
-        <textarea name="description" rows="2" placeholder="What this MCP server does and anything the user should know."${ro}>${e('description')}</textarea>
+        <span class="hint">Briefly describe what this server adds to your assistant.</span>
+        <textarea name="description" rows="2" placeholder="Capabilities and setup notes"${ro}>${e('description')}</textarea>
       </label>
-      <label class="full">Server type
-        <span class="hint">Choose the type specified by the MCP provider.</span>
+      <label class="full">Connection type
+        <span class="hint">Choose the connection method listed in the server’s setup guide.</span>
         <select name="transport" id="serverTransport" required${dis}>
-          <option value="stdio"${transport === 'stdio' ? ' selected' : ''}>Local server — runs on this computer</option>
-          <option value="streamable_http"${transport === 'streamable_http' ? ' selected' : ''}>Remote server — recommended HTTP connection</option>
-          <option value="sse"${transport === 'sse' ? ' selected' : ''}>Remote server — legacy SSE connection</option>
+          <option value="stdio"${transport === 'stdio' ? ' selected' : ''}>Local server (this computer)</option>
+          <option value="streamable_http"${transport === 'streamable_http' ? ' selected' : ''}>Remote server (HTTP)</option>
+          <option value="sse"${transport === 'sse' ? ' selected' : ''}>Remote server (legacy SSE)</option>
         </select>
       </label>
       <label class="full">Connection
@@ -2450,8 +2498,8 @@ function buildFormHtml(item, readonly) {
       </label>
 
       <div class="credential-box" id="localCredentials">
-        <div class="credential-title">Local server credentials</div>
-        <div class="hint">Add the credential names listed in the MCP server's setup instructions.</div>
+        <div class="credential-title">Local server access</div>
+        <div class="hint">Add any names and secret values required by this server.</div>
         <div id="environmentRows">${credentialRowsHtml(Object.entries(environment), readonly)}</div>
         <button type="button" class="btn outline credential-add" data-add-credential="environment"${disabled}>+ Add credential</button>
       </div>
@@ -2465,22 +2513,22 @@ function buildFormHtml(item, readonly) {
           </select>
         </label>
         <div id="credentialFields" class="credential-auth-fields">
-          <label>How should it be sent?
+          <label>Authentication method
             <select id="credentialDelivery"${dis}>
-              <option value="bearer"${auth.method === 'bearer' ? ' selected' : ''}>Bearer token — Authorization header</option>
+              <option value="bearer"${auth.method === 'bearer' ? ' selected' : ''}>Bearer token (most common)</option>
               <option value="header"${auth.method === 'header' ? ' selected' : ''}>Named API key header</option>
             </select>
           </label>
           <label id="credentialHeaderField">Header name
-            <input type="text" id="credentialHeader" value="${esc(auth.header)}" placeholder="Example: X-API-Key"${ro}>
+            <input type="text" id="credentialHeader" value="${esc(auth.header)}" placeholder="Header name from the setup guide"${ro}>
           </label>
           <label class="credential-secret-field">Token or API key
             <span class="hint" id="credentialDeliveryHint"></span>
-            <input type="password" id="credentialSecret" value="${esc(auth.secret)}" placeholder="Paste the value from the provider"${ro}>
+            <input type="password" id="credentialSecret" value="${esc(auth.secret)}" placeholder="Enter token or API key"${ro}>
           </label>
         </div>
         <div id="customHeaderFields">
-          <div class="hint">Only use this when the provider requires multiple custom headers.</div>
+          <div class="hint">Use this only when the server requires custom headers.</div>
           <div id="headerRows">${credentialRowsHtml(Object.entries(headers), readonly)}</div>
           <button type="button" class="btn outline credential-add" data-add-credential="headers"${disabled}>+ Add header</button>
         </div>
@@ -2525,8 +2573,8 @@ function buildFormHtml(item, readonly) {
     ${prerequisites}
     <form class="form-grid" id="formEl">
       <label class="full">Name
-        <span class="hint">Becomes delegate_to_&lt;slug&gt;</span>
-        <input type="text" name="name" value="${e('name')}" placeholder="e.g. Web Search" required${ro}>
+        <span class="hint">Choose a short name that describes this specialist.</span>
+        <input type="text" name="name" value="${e('name')}" placeholder="Subagent name" required${ro}>
       </label>
       <div class="agent-icon-field">
         <div class="agent-icon-preview" id="agentIconPreview">${iconPreview}</div>
@@ -2541,32 +2589,33 @@ function buildFormHtml(item, readonly) {
         </div>
       </div>
       <label class="full">Description
-        <span class="hint">Routing signal — when should the supervisor delegate here.</span>
-        <textarea name="description" rows="2" placeholder="Search the web with Brave. Use for any lookup." required${ro}>${e('description')}</textarea>
+        <span class="hint">Explain when ${esc(assistantName)} should use this subagent.</span>
+        <textarea name="description" rows="2" placeholder="Describe what this subagent can do and when to use it." required${ro}>${e('description')}</textarea>
       </label>
       <label class="full">System prompt
-        <textarea name="system_prompt" rows="4" placeholder="The agent's personality and rules. Leave empty for a generic default."${ro}>${e('system_prompt')}</textarea>
+        <span class="hint">Optional instructions that apply only to this subagent.</span>
+        <textarea name="system_prompt" rows="4" placeholder="Add role-specific instructions, or leave blank to use the default."${ro}>${e('system_prompt')}</textarea>
       </label>
       <label>Model <select name="model_id" required${dis}></select></label>
       <label>MCP server <select name="mcp_server_id" required${dis}></select></label>
-      <label class="full">Tool confirmation
-        <span class="hint">Control which MCP actions need your approval before they run.</span>
+      <label class="full">Action confirmation
+        <span class="hint">Choose which actions require your approval.</span>
         <select name="confirmation_mode" id="confirmationMode"${dis}>
-          <option value="all"${confirmationMode === 'all' ? ' selected' : ''}>Ask before every MCP tool call</option>
-          <option value="selected"${confirmationMode === 'selected' ? ' selected' : ''}>Ask only for selected tools</option>
-          <option value="none"${confirmationMode === 'none' ? ' selected' : ''}>Allow tool calls without asking</option>
+          <option value="all"${confirmationMode === 'all' ? ' selected' : ''}>Ask before every action</option>
+          <option value="selected"${confirmationMode === 'selected' ? ' selected' : ''}>Ask for selected actions</option>
+          <option value="none"${confirmationMode === 'none' ? ' selected' : ''}>Run without confirmation</option>
         </select>
       </label>
       <div class="full" id="confirmationToolsField">
-        <div class="credential-title">Tools requiring confirmation</div>
-        <span class="hint">Select from the tools saved by the server's last successful connection test.</span>
+        <div class="credential-title">Actions requiring confirmation</div>
+        <span class="hint">Choose the actions that should always ask for approval.</span>
         <div class="tool-choice-list" id="confirmationToolChoices">
           <div class="tool-choice-empty">Choose an MCP server to see its saved tools.</div>
         </div>
       </div>
       <div class="full">
-        <div class="credential-title">Prevent exact duplicate actions</div>
-        <span class="hint">Select actions that must not run twice with the same information during one request. Best for actions such as sending email or creating a payment.</span>
+        <div class="credential-title">Block repeated actions</div>
+        <span class="hint">Prevents a selected action from running twice with identical information during the same request.</span>
         <div class="tool-choice-list" id="dedupeToolChoices">
           <div class="tool-choice-empty">Choose an MCP server to see its saved tools.</div>
         </div>
@@ -2601,11 +2650,11 @@ function updateServerFormVisibility() {
   $('localCredentials').style.display = local ? '' : 'none';
   $('remoteCredentials').style.display = local ? 'none' : '';
   $('connectionHint').textContent = local
-    ? 'Copy the launch command from the MCP server instructions.'
-    : 'Paste the complete MCP endpoint URL supplied by the provider.';
+    ? 'Paste the start command from the server’s setup guide.'
+    : 'Paste the MCP server URL from its setup guide.';
   $('serverConnection').placeholder = local
-    ? 'Example: npx -y package-name'
-    : 'Example: https://provider.example/mcp';
+    ? 'Paste the server command'
+    : 'Paste the MCP server URL';
   if (!local) updateRemoteAuthVisibility();
 }
 
@@ -2618,8 +2667,8 @@ function updateRemoteAuthVisibility() {
   const method = $('credentialDelivery').value;
   $('credentialHeaderField').style.display = method === 'header' ? '' : 'none';
   $('credentialDeliveryHint').textContent = method === 'bearer'
-    ? 'Mounir sends this automatically as Authorization: Bearer <value>.'
-    : 'Mounir sends this value using the exact header name above.';
+    ? 'Sent as a bearer token.'
+    : 'Sent using the header name requested by the provider.';
 }
 
 function updateConfirmationVisibility() {
@@ -2639,16 +2688,16 @@ function renderConfirmationToolChoices(state) {
     <label class="tool-choice">
       <input type="checkbox" data-confirmation-tool="${esc(tool.name)}"${pendingConfirmationTools.has(tool.name) ? ' checked' : ''}${readonly}>
       <span>
-        <span class="tool-choice-name mono">${esc(tool.name)}</span>
-        <span class="tool-choice-description">${esc(tool.description || tool.name)}</span>
+        <span class="tool-choice-name">${esc(readableToolName(tool.name))}</span>
+        <span class="tool-choice-description">${esc(tool.description || 'No description available.')}</span>
       </span>
     </label>`).join('');
   const missingChoices = missing.map(name => `
     <label class="tool-choice missing">
       <input type="checkbox" data-confirmation-tool="${esc(name)}" checked${readonly}>
       <span>
-        <span class="tool-choice-name mono">${esc(name)}</span>
-        <span class="tool-choice-description">No longer advertised by the server's saved tool list.</span>
+        <span class="tool-choice-name">${esc(readableToolName(name))}</span>
+        <span class="tool-choice-description">This action is no longer available from the server.</span>
       </span>
     </label>`).join('');
   if (choices || missingChoices) {
@@ -2657,10 +2706,10 @@ function renderConfirmationToolChoices(state) {
   }
   const status = state?.status || 'untested';
   const message = status === 'untested'
-    ? 'Test this MCP server once to discover and save its tools.'
+    ? 'Test this MCP server to discover its available tools.'
     : status === 'failed'
-    ? 'The server has no saved tools. Fix it and run Test Connection.'
-    : 'This server did not advertise any tools.';
+    ? 'No tools are available. Check the server settings, then test the connection again.'
+    : 'This server did not provide any tools.';
   container.innerHTML = `<div class="tool-choice-empty">${esc(message)}</div>`;
 }
 
@@ -2674,16 +2723,16 @@ function renderDedupeToolChoices(state) {
     <label class="tool-choice">
       <input type="checkbox" data-dedupe-tool="${esc(tool.name)}"${pendingDedupeTools.has(tool.name) ? ' checked' : ''}>
       <span>
-        <span class="tool-choice-name mono">${esc(tool.name)}</span>
-        <span class="tool-choice-description">${esc(tool.description || tool.name)}</span>
+        <span class="tool-choice-name">${esc(readableToolName(tool.name))}</span>
+        <span class="tool-choice-description">${esc(tool.description || 'No description available.')}</span>
       </span>
     </label>`).join('');
   const missingChoices = missing.map(name => `
     <label class="tool-choice missing">
       <input type="checkbox" data-dedupe-tool="${esc(name)}" checked>
       <span>
-        <span class="tool-choice-name mono">${esc(name)}</span>
-        <span class="tool-choice-description">No longer advertised by the server's saved tool list.</span>
+        <span class="tool-choice-name">${esc(readableToolName(name))}</span>
+        <span class="tool-choice-description">This action is no longer available from the server.</span>
       </span>
     </label>`).join('');
   if (choices || missingChoices) {
@@ -2692,10 +2741,10 @@ function renderDedupeToolChoices(state) {
   }
   const status = state?.status || 'untested';
   const message = status === 'untested'
-    ? 'Test this MCP server once to discover and save its tools.'
+    ? 'Test this MCP server to discover its available tools.'
     : status === 'failed'
-    ? 'The server has no saved tools. Fix it and run Test Connection.'
-    : 'This server did not advertise any tools.';
+    ? 'No tools are available. Check the server settings, then test the connection again.'
+    : 'This server did not provide any tools.';
   container.innerHTML = `<div class="tool-choice-empty">${esc(message)}</div>`;
 }
 
@@ -2962,7 +3011,7 @@ async function onFormSubmit(e) {
     } else if (mode === 'selected') {
       body.confirm_tools = [...pendingConfirmationTools];
       if (!body.confirm_tools.length) {
-        errEl.textContent = 'Add at least one tool that requires confirmation.';
+        errEl.textContent = 'Select at least one action that requires confirmation.';
         return;
       }
     } else {
@@ -3075,7 +3124,7 @@ $('content').addEventListener('click', async e => {
     const list = items();
     const item = list.find(x => x.id === id);
     if (!item) return;
-    if (!await showConfirm(`Remove “${item.name}”?`)) return;
+    if (!await showConfirm(`Delete “${item.name}”? This cannot be undone.`, 'Delete')) return;
     try {
       await api('DELETE', API[S.tab].del(id));
       await loadAll();
@@ -3253,7 +3302,7 @@ $('cancelBtn').addEventListener('click', () => {
 /* ========== delete button (readonly form) ========== */
 $('deleteBtn').addEventListener('click', async () => {
   if (!S.editing) return;
-  if (!await showConfirm(`Delete “${S.editing.name}”? This cannot be undone.`)) return;
+  if (!await showConfirm(`Delete “${S.editing.name}”? This cannot be undone.`, 'Delete')) return;
   try {
     await api('DELETE', API[S.tab].del(S.editing.id));
     S.editing = null;
@@ -3293,11 +3342,11 @@ init();
         <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
       </svg>
     </div>
-    <div class="modal-title">Remove item?</div>
+    <div class="modal-title">Confirm action</div>
     <div class="modal-desc" id="confirmMsg"></div>
     <div class="modal-actions">
       <button class="btn" id="confirmCancelBtn">Cancel</button>
-      <button class="btn primary" id="confirmOkBtn">Remove</button>
+      <button class="btn primary" id="confirmOkBtn">Continue</button>
     </div>
   </div>
 </div>
@@ -3320,7 +3369,7 @@ function openSupervisor() {
       <div class="builtin-modal-icon">${esc((supervisor.name || 'M').charAt(0).toUpperCase())}</div>
       <div>
         <div class="builtin-modal-title" id="builtinModalTitle">${esc(supervisor.name || 'Mounir')}</div>
-        <div class="builtin-modal-provider">Supervisor · ${esc(supervisor.provider || 'Not configured')}</div>
+        <div class="builtin-modal-provider">Supervisor · ${esc(supervisor.provider || 'No model selected')}</div>
       </div>
     </div>
     <div class="builtin-modal-description">${esc(supervisor.description || 'Coordinates requests and delegates focused work to specialists.')}</div>
@@ -3330,7 +3379,7 @@ function openSupervisor() {
         <select class="builtin-model-select" id="supervisorModelSelect">
           ${options.map(option => `<option value="${option.id}"${+option.id === +supervisor.model_id ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
         </select>
-        <div class="builtin-model-hint">Mounir supports saved Mistral, Groq, and Ollama models. Changes apply on the next message.</div>` : `
+        <div class="builtin-model-hint">Choose a saved Mistral, Groq, or Ollama model. Ollama models can run locally. Changes apply to the next message.</div>` : `
         <div class="setup-prerequisite">
           <strong>No compatible models are available.</strong> Create a Mistral, Groq, or Ollama model first.
           <button type="button" class="setup-link" data-create-prerequisite="models">Create model</button>
@@ -3342,7 +3391,7 @@ function openSupervisor() {
         ${capabilities.length ? capabilities.map(tool => `
           <div class="builtin-capability">
             <strong>${esc(readableToolName(tool.name))}</strong>
-            <span>${esc(tool.description || 'No description provided.')}</span>
+            <span>${esc(tool.description || 'No description available.')}</span>
           </div>`).join('') : '<div class="builtin-capability"><span>No tools available.</span></div>'}
       </div>
     </section>
@@ -3384,13 +3433,13 @@ function openBuiltinAgent(key) {
         <div class="builtin-modal-provider">Built-in specialist · ${esc(agent.provider)}</div>
       </div>
     </div>
-    <div class="builtin-modal-description">${esc(agent.description || 'Built-in Mounir specialist.')}</div>
+    <div class="builtin-modal-description">${esc(agent.description || `Built-in ${assistantLabel()} specialist.`)}</div>
     <section class="builtin-modal-section">
       <h4>Availability</h4>
       <div class="agent-availability" style="justify-content:space-between">
         <div class="agent-availability-copy" style="text-align:left">
           <strong id="builtinAvailabilityLabel">${enabled ? 'Active' : 'Inactive'}</strong>
-          <span>Inactive specialists remain configured but cannot be delegated to or run by heartbeat.</span>
+          <span>Inactive specialists cannot receive requests or run heartbeat checks.</span>
         </div>
         <label class="switch" title="${enabled ? 'Deactivate specialist' : 'Activate specialist'}">
           <input type="checkbox" id="builtinEnabled"${enabled ? ' checked' : ''}>
@@ -3404,7 +3453,7 @@ function openBuiltinAgent(key) {
         ${tools.length ? tools.map(tool => `
           <div class="builtin-capability">
             <strong>${esc(readableToolName(tool.name))}</strong>
-            <span>${esc(tool.description || 'No description provided.')}</span>
+            <span>${esc(tool.description || 'No description available.')}</span>
           </div>`).join('') : '<div class="builtin-capability"><span>No tools available.</span></div>'}
       </div>
     </section>
@@ -3414,7 +3463,7 @@ function openBuiltinAgent(key) {
         <select class="builtin-model-select" id="builtinModelSelect">
           ${options.map(option => `<option value="${option.id}"${+option.id === +agent.model_id ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
         </select>
-        <div class="builtin-model-hint">Only compatible ${esc(agent.provider)} model presets are shown. Create another compatible model in Models to add it here.</div>` : `
+        <div class="builtin-model-hint">Only saved ${esc(agent.provider)} models are shown.</div>` : `
         <div class="setup-prerequisite">
           <strong>No compatible models are available.</strong> Create a ${esc(agent.provider)} model first.
           <button type="button" class="setup-link" data-create-prerequisite="models">Create model</button>
@@ -3478,10 +3527,11 @@ let _confirmResolve = null;
 const confirmOverlay = $('confirmOverlay');
 const confirmMsg = $('confirmMsg');
 
-function showConfirm(msg) {
+function showConfirm(msg, confirmLabel = 'Continue') {
   return new Promise(resolve => {
     _confirmResolve = resolve;
     confirmMsg.textContent = msg;
+    $('confirmOkBtn').textContent = confirmLabel;
     confirmOverlay.classList.add('show');
   });
 }

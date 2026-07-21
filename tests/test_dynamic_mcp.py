@@ -593,6 +593,27 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(run_builtin.call_args.args[0], "media")
         self.assertEqual(run_builtin.call_args.args[2], ["find_media"])
 
+    def test_heartbeat_notifications_only_include_alerts(self):
+        db.init()
+        quiet_run = db.begin_heartbeat_run("scheduled")
+        db.finish_heartbeat_run(quiet_run, status="quiet")
+        alert_run = db.begin_heartbeat_run("scheduled")
+        db.finish_heartbeat_run(
+            alert_run,
+            status="alert",
+            message="An important update is available.",
+        )
+        error_run = db.begin_heartbeat_run("manual")
+        db.finish_heartbeat_run(error_run, status="error", error="Unavailable")
+
+        notifications = db.list_heartbeat_notifications()
+
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0]["id"], alert_run)
+        self.assertEqual(
+            notifications[0]["message"], "An important update is available."
+        )
+
     def test_heartbeat_runner_suppresses_quiet_checks_and_persists_alerts(self):
         db.init()
         email = self._create_email_fixture()
@@ -1292,6 +1313,32 @@ class TransportTests(unittest.TestCase):
 
 
 class AdminApiTests(TemporaryDatabaseTest):
+    def test_heartbeat_notifications_endpoint_returns_saved_alerts(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+        run_id = db.begin_heartbeat_run("scheduled")
+        db.finish_heartbeat_run(
+            run_id,
+            status="alert",
+            message="A saved heartbeat notification.",
+        )
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                response = await client.get("/api/heartbeat/notifications")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json()["notifications"][0]["message"],
+                    "A saved heartbeat notification.",
+                )
+
+        asyncio.run(exercise_api())
+
     def test_admin_flow_persists_transport_and_tests_connection(self):
         import httpx
         import server as web_server
@@ -1646,6 +1693,13 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(heartbeat_run.json()["last_status"], "quiet")
                 self.assertEqual(
                     heartbeat_run.json()["recent_runs"][0]["trigger"], "manual"
+                )
+                heartbeat_notifications = await client.get(
+                    "/api/heartbeat/notifications"
+                )
+                self.assertEqual(heartbeat_notifications.status_code, 200)
+                self.assertEqual(
+                    heartbeat_notifications.json(), {"notifications": []}
                 )
 
                 remove_icon = await client.put(

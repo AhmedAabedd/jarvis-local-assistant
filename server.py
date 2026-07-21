@@ -493,6 +493,11 @@ async def get_heartbeat():
     }
 
 
+@app.get("/api/heartbeat/notifications")
+async def get_heartbeat_notifications():
+    return {"notifications": db.list_heartbeat_notifications()}
+
+
 @app.put("/api/heartbeat")
 async def update_heartbeat(req: dict):
     try:
