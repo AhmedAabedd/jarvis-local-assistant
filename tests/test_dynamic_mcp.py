@@ -55,6 +55,18 @@ class TemporaryDatabaseTest(unittest.TestCase):
 
 
 class DatabaseTests(TemporaryDatabaseTest):
+    def _create_email_fixture(self):
+        model = db.add_model(
+            "Email model", "email-test", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Gmail MCP", "npx -y test-gmail-mcp")
+        return db.add_subagent(
+            "Email", "Handles test email.", "", model["id"], server["id"],
+            confirm_tools=["send_email", "delete_email"],
+            dedupe_tools=["send_email"],
+        )
+
     def test_telegram_settings_migrate_env_and_never_expose_token(self):
         with (
             patch.object(config, "TELEGRAM_BOT_TOKEN", "123:secret"),
@@ -244,7 +256,7 @@ class DatabaseTests(TemporaryDatabaseTest):
 
     def test_heartbeat_uses_only_selected_noninteractive_cached_tools(self):
         db.init()
-        email = db.get_subagent_by_name("Email")
+        email = self._create_email_fixture()
         db.save_server_tools(
             email["mcp_server_id"],
             [
@@ -366,45 +378,57 @@ class DatabaseTests(TemporaryDatabaseTest):
         with self.assertRaisesRegex(ValueError, "configured NVIDIA"):
             db.update_builtin_agent_model("system", ollama["id"])
 
-    def test_builtin_models_are_seeded_as_manageable_model_records(self):
+    def test_fresh_database_keeps_user_registry_empty(self):
         db.init()
-        initial = db.list_models()
-        by_name = {model["name"]: model for model in initial}
-
+        self.assertEqual(db.list_models(), [])
+        self.assertEqual(db.list_servers(), [])
+        self.assertEqual(db.list_subagents(), [])
+        self.assertIsNone(db.get_supervisor_config()["model_id"])
+        self.assertEqual(db.get_supervisor_config()["model_options"], [])
         self.assertTrue(
-            {
-                "Media (Built-in)",
-                "Knowledge (Built-in)",
-                "System (Built-in)",
-            }.issubset(by_name),
+            all(agent["model_id"] is None for agent in db.list_builtin_agents())
         )
-        self.assertEqual(
-            by_name["Media (Built-in)"]["api_key"], "$NVIDIA_API_KEY"
+        with self.assertRaisesRegex(ValueError, "Select a model"):
+            db.add_subagent("Helper", "Test helper", "", None, None)
+        model = db.add_model(
+            "User model", "user/model", "OpenAI",
+            "https://models.example.test/v1", "key",
         )
-        self.assertEqual(
-            by_name["Knowledge (Built-in)"]["api_key"], "$GEMINI_API_KEY"
-        )
-        self.assertEqual(
-            by_name["System (Built-in)"]["api_key"], "$NVIDIA_API_KEY"
-        )
+        with self.assertRaisesRegex(ValueError, "Select an MCP server"):
+            db.add_subagent("Helper", "Test helper", "", model["id"], None)
 
-        agents = {agent["key"]: agent for agent in db.list_builtin_agents()}
+        # A later application restart must not reinterpret this as an upgrade
+        # and populate the registry.
+        db.init()
         self.assertEqual(
-            agents["media"]["model_id"], by_name["Media (Built-in)"]["id"]
+            [item["name"] for item in db.list_models()], ["User model"]
         )
-        self.assertEqual(
-            agents["knowledge"]["model_id"],
-            by_name["Knowledge (Built-in)"]["id"],
-        )
-        self.assertEqual(
-            agents["system"]["model_id"], by_name["System (Built-in)"]["id"]
-        )
+        self.assertEqual(db.list_servers(), [])
+        self.assertEqual(db.list_subagents(), [])
+
+    def test_existing_database_keeps_one_time_builtin_agent_upgrade(self):
+        # Simulate a database made by the release where Email and Researcher
+        # were still hard-coded and had not yet been converted.
+        with db._connect() as conn:
+            db._init_schema(conn)
 
         db.init()
-        self.assertEqual(len(db.list_models()), len(initial))
+        self.assertIsNotNone(db.get_subagent_by_name("Email"))
+        self.assertIsNotNone(db.get_subagent_by_name("Researcher"))
+
+        initial_agents = [item["id"] for item in db.list_subagents()]
+        db.init()
+        self.assertEqual(
+            [item["id"] for item in db.list_subagents()], initial_agents
+        )
 
     def test_assigned_builtin_model_is_managed_through_models_registry(self):
         db.init()
+        selected = db.add_model(
+            "System model", "nvidia/system", "NVIDIA",
+            "https://integrate.api.nvidia.com/v1", "initial-key",
+        )
+        db.update_builtin_agent_model("system", selected["id"])
         system = next(
             agent for agent in db.list_builtin_agents() if agent["key"] == "system"
         )
@@ -432,20 +456,11 @@ class DatabaseTests(TemporaryDatabaseTest):
         with self.assertRaisesRegex(ValueError, "must remain a NVIDIA model"):
             db.update_model(system["model_id"], provider="Ollama")
 
-    def test_supervisor_model_is_seeded_selectable_and_used_at_runtime(self):
-        with (
-            patch.object(config, "USE_MISTRAL", True),
-            patch.object(config, "MISTRAL_MODEL", "mistral-small-latest"),
-            patch.object(config, "MISTRAL_BASE_URL", "https://api.mistral.ai/v1"),
-        ):
-            db.init()
-
+    def test_supervisor_model_is_user_created_selectable_and_used_at_runtime(self):
+        db.init()
         supervisor = db.get_supervisor_config()
-        seeded = db.get_model(supervisor["model_id"])
-        self.assertEqual(seeded["name"], "Mounir (Supervisor)")
-        self.assertEqual(seeded["provider"], "Mistral")
-        self.assertEqual(seeded["model"], "mistral-small-latest")
-        self.assertEqual(seeded["api_key"], "$MISTRAL_API_KEY")
+        self.assertIsNone(supervisor["model_id"])
+        self.assertEqual(supervisor["model_options"], [])
 
         alternate = db.add_model(
             "Mistral Large",
@@ -580,7 +595,7 @@ class DatabaseTests(TemporaryDatabaseTest):
 
     def test_heartbeat_runner_suppresses_quiet_checks_and_persists_alerts(self):
         db.init()
-        email = db.get_subagent_by_name("Email")
+        email = self._create_email_fixture()
         db.save_server_tools(
             email["mcp_server_id"],
             [{"name": "search_emails", "description": "Read email", "input_schema": {}}],
@@ -797,80 +812,14 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(agent["confirm_tool_calls"], 1)
         self.assertEqual(agent["confirm_tools"], '["dangerous_action"]')
 
-    def test_builtin_email_is_migrated_once_to_dynamic_registry(self):
-        db.init()
-        email = db.get_subagent_by_name("Email")
-        self.assertIsNotNone(email)
-        self.assertEqual(email["server_name"], "Gmail MCP")
-        email_server = db.get_server(email["mcp_server_id"])
-        self.assertEqual(email_server["setup_type"], "gmail_oauth")
-        self.assertTrue(email_server["description"])
-        self.assertEqual(
-            json.loads(email["confirm_tools"]),
-            ["send_email", "delete_email", "batch_delete_emails"],
-        )
-        self.assertEqual(json.loads(email["dedupe_tools"]), ["send_email"])
-        email_spec = next(spec for spec in db.build_specs() if spec["name"] == "Email")
-        self.assertEqual(
-            mcp_agents.delegate_schema(email_spec)["function"]["name"],
-            "delegate_to_email",
-        )
-        builtin_names = {
-            schema["function"]["name"] for schema in mounir_tools.SCHEMAS
-        }
-        self.assertNotIn("delegate_to_email", builtin_names)
-        self.assertTrue(db.delete_subagent(email["id"]))
-        db.init()
-        self.assertIsNone(db.get_subagent_by_name("Email"))
-
-    def test_builtin_researcher_is_migrated_once_to_playwright(self):
-        db.init()
-        researcher = db.get_subagent_by_name("Researcher")
-        self.assertIsNotNone(researcher)
-        researcher_server = db.get_server(researcher["mcp_server_id"])
-        self.assertTrue(researcher_server["description"])
-        self.assertEqual(researcher_server["setup_type"], "")
-        self.assertEqual(researcher["server_name"], "Playwright Web")
-        self.assertIn("@playwright/mcp@0.0.78", researcher["connection"])
-        self.assertIn("--headless", researcher["connection"])
-        self.assertIn("--isolated", researcher["connection"])
-        self.assertEqual(
-            json.loads(researcher["confirm_tools"]),
-            [
-                "browser_click",
-                "browser_type",
-                "browser_fill_form",
-                "browser_press_key",
-                "browser_select_option",
-                "browser_handle_dialog",
-                "browser_file_upload",
-                "browser_drop",
-                "browser_run_code_unsafe",
-            ],
-        )
-        researcher_spec = next(
-            spec for spec in db.build_specs() if spec["name"] == "Researcher"
-        )
-        self.assertEqual(
-            mcp_agents.delegate_schema(researcher_spec)["function"]["name"],
-            "delegate_to_researcher",
-        )
-        builtin_names = {
-            schema["function"]["name"] for schema in mounir_tools.SCHEMAS
-        }
-        self.assertNotIn("delegate_to_researcher", builtin_names)
-        self.assertTrue(db.delete_subagent(researcher["id"]))
-        db.init()
-        self.assertIsNone(db.get_subagent_by_name("Researcher"))
-
-    def test_dynamic_default_agents_compile_into_the_graph(self):
+    def test_fresh_graph_has_no_automatic_dynamic_agents(self):
         from mounir.langgraph_agent import build_graph
 
         db.init()
         graph = build_graph()
         node_names = set(graph.get_graph().nodes)
-        self.assertIn("mcp_email", node_names)
-        self.assertIn("mcp_researcher", node_names)
+        self.assertNotIn("mcp_email", node_names)
+        self.assertNotIn("mcp_researcher", node_names)
         self.assertNotIn("email", node_names)
         self.assertNotIn("researcher", node_names)
 
@@ -1216,6 +1165,24 @@ class AdminApiTests(TemporaryDatabaseTest):
         import server as web_server
 
         db.init()
+        with db._connect() as conn:
+            email_model_id = db._add_model(
+                conn, "Email test model", "email-test", "Ollama",
+                "http://localhost:11434/v1", "",
+            )
+            email_server_id = db._add_server(
+                conn,
+                "Gmail MCP",
+                "npx -y test-gmail-mcp",
+                description="Test Gmail server",
+                setup_type="gmail_oauth",
+            )
+            db._add_subagent(
+                conn, "Email", "Handles test email.", "",
+                email_model_id, email_server_id,
+                confirm_tools=["send_email", "delete_email"],
+                dedupe_tools=["send_email"],
+            )
         web_server.GMAIL_AUTH_DIR = Path(self.temp_dir.name) / ".gmail-mcp"
         web_server.GMAIL_OAUTH_KEYS = web_server.GMAIL_AUTH_DIR / "gcp-oauth.keys.json"
         web_server.GMAIL_CREDENTIALS = web_server.GMAIL_AUTH_DIR / "credentials.json"

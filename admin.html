@@ -805,6 +805,17 @@
   .voice-feedback { flex: 1; color: var(--text-dim); font-size: 10px; }
   .voice-feedback.error { color: var(--danger); }
   .voice-feedback.ok { color: var(--ok); }
+  .setup-prerequisite {
+    margin-bottom: 14px; padding: 13px 14px; border: 1px solid rgba(224,122,74,.34);
+    border-radius: 11px; background: rgba(224,122,74,.07); color: var(--text-mid);
+    font-size: 10px; line-height: 1.5;
+  }
+  .setup-prerequisite strong { color: var(--text); }
+  .setup-link {
+    margin-left: 6px; padding: 0; border: 0; background: none; color: var(--lav);
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .setup-link:hover { text-decoration: underline; }
 
   ::-webkit-scrollbar { width: 7px; height: 7px; }
   ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
@@ -1065,6 +1076,24 @@ async function loadAll() {
   document.title = `${assistantName} Agent Studio`;
   $('backAssistantName').textContent = `Return to ${assistantName}`;
 }
+
+function openCreateRecord(tab) {
+  document.querySelectorAll('.nav-item').forEach(button => {
+    button.classList.toggle('active', button.dataset.tab === tab);
+  });
+  S.tab = tab;
+  S.view = 'form';
+  S.editing = null;
+  S.formReadonly = false;
+  renderForm();
+}
+
+document.addEventListener('click', event => {
+  const action = event.target.closest('[data-create-prerequisite]');
+  if (!action) return;
+  document.getElementById('builtinOverlay')?.classList.remove('show');
+  openCreateRecord(action.dataset.createPrerequisite);
+});
 
 /* ========== rendering ========== */
 function render() {
@@ -2434,7 +2463,20 @@ function buildFormHtml(item, readonly) {
   const iconPreview = item?.has_icon
     ? `<img src="/api/subagents/${item.id}/icon" alt="">`
     : esc(agentInitial);
+  const prerequisites = [
+    !S.models.length ? `
+      <div class="setup-prerequisite">
+        <strong>No models are available.</strong> Create a model before creating a subagent.
+        <button type="button" class="setup-link" data-create-prerequisite="models">Create model</button>
+      </div>` : '',
+    !S.servers.length ? `
+      <div class="setup-prerequisite">
+        <strong>No MCP servers are available.</strong> Connect an MCP server before creating a subagent.
+        <button type="button" class="setup-link" data-create-prerequisite="servers">Create MCP server</button>
+      </div>` : '',
+  ].join('');
   return `
+    ${prerequisites}
     <form class="form-grid" id="formEl">
       <label class="full">Name
         <span class="hint">Becomes delegate_to_&lt;slug&gt;</span>
@@ -2496,11 +2538,13 @@ function populateSelects() {
     const cur = S.editing ? S.editing.model_id : '';
     mSel.innerHTML = '<option value="">Choose a model…</option>' +
       S.models.map(m => `<option value="${m.id}"${m.id === cur ? ' selected' : ''}>${esc(m.name)} — ${esc(m.provider || 'no provider')}</option>`).join('');
+    mSel.disabled = !S.models.length;
   }
   if (sSel) {
     const cur = S.editing ? S.editing.mcp_server_id : '';
     sSel.innerHTML = '<option value="">Choose an MCP server…</option>' +
       S.servers.map(s => `<option value="${s.id}"${s.id === cur ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
+    sSel.disabled = !S.servers.length;
   }
 }
 
@@ -2855,6 +2899,14 @@ async function onFormSubmit(e) {
   const body = Object.fromEntries(data.entries());
   // Parse numeric fields for agents
   if (S.tab === 'agents') {
+    if (!S.models.length || !body.model_id) {
+      errEl.textContent = 'Create and select a model before creating the subagent.';
+      return;
+    }
+    if (!S.servers.length || !body.mcp_server_id) {
+      errEl.textContent = 'Create and select an MCP server before creating the subagent.';
+      return;
+    }
     body.model_id = +body.model_id;
     body.mcp_server_id = +body.mcp_server_id;
     const mode = body.confirmation_mode;
@@ -3206,10 +3258,15 @@ function openSupervisor() {
     <div class="builtin-modal-description">${esc(supervisor.description || 'Coordinates requests and delegates focused work to specialists.')}</div>
     <section class="builtin-modal-section">
       <h4>Language model</h4>
-      <select class="builtin-model-select" id="supervisorModelSelect">
-        ${options.map(option => `<option value="${option.id}"${+option.id === +supervisor.model_id ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
-      </select>
-      <div class="builtin-model-hint">Mounir supports saved Mistral, Groq, and Ollama models. Changes apply on the next message.</div>
+      ${options.length ? `
+        <select class="builtin-model-select" id="supervisorModelSelect">
+          ${options.map(option => `<option value="${option.id}"${+option.id === +supervisor.model_id ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
+        </select>
+        <div class="builtin-model-hint">Mounir supports saved Mistral, Groq, and Ollama models. Changes apply on the next message.</div>` : `
+        <div class="setup-prerequisite">
+          <strong>No compatible models are available.</strong> Create a Mistral, Groq, or Ollama model first.
+          <button type="button" class="setup-link" data-create-prerequisite="models">Create model</button>
+        </div>`}
     </section>
     <section class="builtin-modal-section">
       <h4>Capabilities</h4>
@@ -3224,7 +3281,7 @@ function openSupervisor() {
     <div class="builtin-modal-feedback" id="builtinModalFeedback"></div>
     <div class="builtin-modal-actions">
       <button class="btn" type="button" id="builtinCancel">Close</button>
-      <button class="btn primary" type="button" id="supervisorSave">Save model</button>
+      <button class="btn primary" type="button" id="supervisorSave"${options.length ? '' : ' disabled'}>Save model</button>
     </div>`;
   builtinOverlay.classList.add('show');
   $('builtinCancel').addEventListener('click', closeBuiltinAgent);
@@ -3271,15 +3328,20 @@ function openBuiltinAgent(key) {
     </section>
     <section class="builtin-modal-section">
       <h4>Language model</h4>
-      <select class="builtin-model-select" id="builtinModelSelect">
-        ${options.map(option => `<option value="${option.id}"${+option.id === +agent.model_id ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
-      </select>
-      <div class="builtin-model-hint">Only compatible ${esc(agent.provider)} model presets are shown. Create another compatible model in Models to add it here.</div>
+      ${options.length ? `
+        <select class="builtin-model-select" id="builtinModelSelect">
+          ${options.map(option => `<option value="${option.id}"${+option.id === +agent.model_id ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
+        </select>
+        <div class="builtin-model-hint">Only compatible ${esc(agent.provider)} model presets are shown. Create another compatible model in Models to add it here.</div>` : `
+        <div class="setup-prerequisite">
+          <strong>No compatible models are available.</strong> Create a ${esc(agent.provider)} model first.
+          <button type="button" class="setup-link" data-create-prerequisite="models">Create model</button>
+        </div>`}
     </section>
     <div class="builtin-modal-feedback" id="builtinModalFeedback"></div>
     <div class="builtin-modal-actions">
       <button class="btn" type="button" id="builtinCancel">Close</button>
-      <button class="btn primary" type="button" id="builtinSave">Save model</button>
+      <button class="btn primary" type="button" id="builtinSave"${options.length ? '' : ' disabled'}>Save model</button>
     </div>`;
   builtinOverlay.classList.add('show');
   $('builtinCancel').addEventListener('click', closeBuiltinAgent);

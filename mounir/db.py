@@ -429,8 +429,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 "UPDATE models SET base_url = ? WHERE id = ?",
                 (normalized, row["id"]),
             )
-    _seed_builtin_models(conn)
-    _seed_supervisor_model(conn)
     conn.commit()
 
 
@@ -590,104 +588,6 @@ def _unique_name(conn: sqlite3.Connection, table: str, preferred: str) -> str:
     return candidate
 
 
-def _seed_builtin_models(conn: sqlite3.Connection) -> None:
-    """Create manageable model presets for the built-in specialists.
-
-    Existing compatible presets are reused.  Secrets remain environment
-    references so initializing the database never copies API keys into it.
-    """
-    provider_defaults = {
-        "NVIDIA": (cfg.NVIDIA_BASE_URL, "$NVIDIA_API_KEY"),
-        "Gemini": (cfg.GEMINI_BASE_URL, "$GEMINI_API_KEY"),
-    }
-    all_models = [dict(row) for row in conn.execute("SELECT * FROM models")]
-
-    for definition in builtin_agents.definitions():
-        key = definition["key"]
-        setting = conn.execute(
-            """
-            SELECT agent_key, model, model_id
-            FROM builtin_agent_settings
-            WHERE agent_key = ?
-            """,
-            (key,),
-        ).fetchone()
-        linked = None
-        if setting and setting["model_id"] is not None:
-            linked = next(
-                (
-                    model for model in all_models
-                    if int(model["id"]) == int(setting["model_id"])
-                    and builtin_agents.provider_matches(
-                        key, model.get("provider", "")
-                    )
-                ),
-                None,
-            )
-        if linked is None and setting:
-            linked = next(
-                (
-                    model for model in all_models
-                    if model["model"] == setting["model"]
-                    and builtin_agents.provider_matches(
-                        key, model.get("provider", "")
-                    )
-                ),
-                None,
-            )
-        if linked is None:
-            base_url, api_key = provider_defaults[definition["provider"]]
-            normalized_base_url = _normalize_model_base_url(base_url)
-            linked = next(
-                (
-                    model for model in all_models
-                    if model["model"] == definition["default_model"]
-                    and builtin_agents.provider_matches(
-                        key, model.get("provider", "")
-                    )
-                    and str(model["base_url"]).rstrip("/")
-                        == normalized_base_url
-                ),
-                None,
-            )
-            if linked is None:
-                preset_name = _unique_name(
-                    conn, "models", f"{definition['name']} (Built-in)"
-                )
-                cursor = conn.execute(
-                    """
-                    INSERT INTO models
-                        (name, model, provider, base_url, api_key, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        preset_name,
-                        definition["default_model"],
-                        definition["provider"],
-                        normalized_base_url,
-                        api_key,
-                        _now(),
-                    ),
-                )
-                linked = {
-                    "id": cursor.lastrowid,
-                    "name": preset_name,
-                    "model": definition["default_model"],
-                    "provider": definition["provider"],
-                    "base_url": normalized_base_url,
-                    "api_key": api_key,
-                }
-                all_models.append(linked)
-        conn.execute(
-            """
-            UPDATE builtin_agent_settings
-            SET model = ?, model_id = ?, updated_at = ?
-            WHERE agent_key = ?
-            """,
-            (linked["model"], linked["id"], _now(), key),
-        )
-
-
 def _active_supervisor_model_defaults() -> dict:
     if cfg.USE_MISTRAL:
         return {
@@ -714,48 +614,6 @@ def _active_supervisor_model_defaults() -> dict:
 def _supervisor_provider_supported(provider: str) -> bool:
     normalized = str(provider or "").strip().lower()
     return any(name in normalized for name in ("mistral", "groq", "ollama"))
-
-
-def _seed_supervisor_model(conn: sqlite3.Connection) -> None:
-    """Link Mounir to a normal Model record on the first upgraded run."""
-    current = conn.execute(
-        """
-        SELECT s.model_id
-        FROM supervisor_settings s
-        JOIN models m ON m.id = s.model_id
-        WHERE s.id = 1
-        """
-    ).fetchone()
-    if current:
-        return
-
-    defaults = _active_supervisor_model_defaults()
-    preset_name = _unique_name(conn, "models", "Mounir (Supervisor)")
-    cursor = conn.execute(
-        """
-        INSERT INTO models
-            (name, model, provider, base_url, api_key, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            preset_name,
-            defaults["model"],
-            defaults["provider"],
-            _normalize_model_base_url(defaults["base_url"]),
-            defaults["api_key"],
-            _now(),
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO supervisor_settings (id, model_id, updated_at)
-        VALUES (1, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            model_id = excluded.model_id,
-            updated_at = excluded.updated_at
-        """,
-        (cursor.lastrowid, _now()),
-    )
 
 
 def _migrate_builtin_email(conn: sqlite3.Connection) -> None:
@@ -960,12 +818,27 @@ def _migrate_action_deduplication(conn: sqlite3.Connection) -> None:
 
 
 def init() -> None:
-    """Create tables and run one-time registry migrations."""
+    """Create tables and migrate only configuration the user already owns."""
+    existing_installation = DB_PATH.exists()
     with _connect() as conn:
         _init_schema(conn)
         _migrate_legacy(conn)
-        _migrate_builtin_email(conn)
-        _migrate_builtin_researcher(conn)
+        # Email and Researcher used to be hard-coded specialists. Preserve the
+        # one-time conversion for upgrades, but never populate a fresh user's
+        # intentionally empty registry.
+        registry_policy_key = "user_owned_empty_registry_v1"
+        registry_policy_set = conn.execute(
+            "SELECT 1 FROM app_meta WHERE key = ?", (registry_policy_key,)
+        ).fetchone()
+        if not registry_policy_set:
+            if existing_installation:
+                _migrate_builtin_email(conn)
+                _migrate_builtin_researcher(conn)
+            conn.execute(
+                "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+                (registry_policy_key, _now()),
+            )
+            conn.commit()
         _migrate_server_metadata(conn)
         _migrate_action_deduplication(conn)
 
@@ -2406,6 +2279,22 @@ def _add_subagent(
     icon_mime: str = "",
     dedupe_tools=None,
 ) -> int:
+    try:
+        selected_model_id = int(model_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Select a model before creating the subagent.") from exc
+    try:
+        selected_server_id = int(mcp_server_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Select an MCP server before creating the subagent.") from exc
+    if selected_model_id <= 0 or conn.execute(
+        "SELECT 1 FROM models WHERE id = ?", (selected_model_id,)
+    ).fetchone() is None:
+        raise ValueError("Select an existing model before creating the subagent.")
+    if selected_server_id <= 0 or conn.execute(
+        "SELECT 1 FROM mcp_servers WHERE id = ?", (selected_server_id,)
+    ).fetchone() is None:
+        raise ValueError("Select an existing MCP server before creating the subagent.")
     if confirm_tools is None:
         confirm_tools = ["*"] if _bool(confirm_tool_calls, "confirm_tool_calls") else []
     confirm_tools_json = _json_string_list(confirm_tools, "confirmation tools")
@@ -2426,8 +2315,8 @@ def _add_subagent(
                 (system_prompt or "").strip(),
                 bytes(icon_data or b""),
                 (icon_mime or "").strip(),
-                int(model_id),
-                int(mcp_server_id),
+                selected_model_id,
+                selected_server_id,
                 int(has_confirmations),
                 confirm_tools_json,
                 dedupe_tools_json,
@@ -2529,6 +2418,16 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
         fields["name"] = _required(fields["name"], "name")
     if "description" in fields:
         fields["description"] = _required(fields["description"], "description")
+    if "model_id" in fields:
+        try:
+            fields["model_id"] = int(fields["model_id"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Select a model for the subagent.") from exc
+    if "mcp_server_id" in fields:
+        try:
+            fields["mcp_server_id"] = int(fields["mcp_server_id"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Select an MCP server for the subagent.") from exc
     if "icon_data" in fields:
         fields["icon_data"] = bytes(fields["icon_data"] or b"")
     if "icon_mime" in fields:
@@ -2547,6 +2446,15 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
             fields["dedupe_tools"], "duplicate protection tools"
         )
     with _connect() as conn:
+        if "model_id" in fields and conn.execute(
+            "SELECT 1 FROM models WHERE id = ?", (fields["model_id"],)
+        ).fetchone() is None:
+            raise ValueError("Select an existing model for the subagent.")
+        if "mcp_server_id" in fields and conn.execute(
+            "SELECT 1 FROM mcp_servers WHERE id = ?",
+            (fields["mcp_server_id"],),
+        ).fetchone() is None:
+            raise ValueError("Select an existing MCP server for the subagent.")
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
             conn.execute(

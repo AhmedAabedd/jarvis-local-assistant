@@ -128,7 +128,7 @@ Rules of thumb the supervisor prompt encodes:
   goes to the **media** agent.
 - Long-term knowledge changes go to the **knowledge** agent.
 - Hardware/system control goes to the **system** agent.
-- Anything Gmail goes to the dynamic **Email** MCP agent seeded in the registry.
+- Anything Gmail goes to a user-configured Email MCP subagent, when one is connected.
 - Each specialist's tools are isolated to its own module; its raw work never
   leaks into the supervisor's context.
 
@@ -172,22 +172,19 @@ Rules of thumb the supervisor prompt encodes:
 ## Dynamic MCP subagents
 
 You can register **specialists backed by any MCP server** — no code changes.
-Email and Researcher are dynamic agents seeded automatically during one-time
-upgrades from their former built-in implementations. The setup is
-three-tier and persisted in a
+Models, MCP servers, and dynamic subagents are intentionally empty on a fresh
+installation: each user chooses their own providers and capabilities. Existing
+records from older installations are preserved. The setup is three-tier and persisted in a
 SQLite DB at `~/.mounir/mounir.db`:
 
 1. **Models** — reusable LLM presets: name, provider, base URL, and an optional
    API key entered directly in the admin form. The endpoint must implement OpenAI-compatible
    `/chat/completions` including function/tool calls. The provider field remains
    a label rather than a separate adapter, but Agent Studio also uses it to show
-   compatible presets in built-in specialist model selectors. On first run,
-   Mounir, Media, Knowledge, and System receive normal Model records based on
-   their current configuration. Their keys are saved as environment references
-   such as `$MISTRAL_API_KEY`, `$NVIDIA_API_KEY`, or `$GEMINI_API_KEY` rather
-   than copied secrets. Editing one of these
-   records changes that specialist's runtime configuration; an assigned record
-   cannot be deleted until the specialist is switched to another compatible model.
+   compatible presets in supervisor and built-in specialist model selectors.
+   Empty selectors explain which model is needed and link directly to model
+   creation. Assigned records cannot be deleted until their agents are switched
+   to another compatible model.
 2. **MCP servers** — reusable connections with an editable description. Use `stdio` for a local server
    process, Streamable HTTP for a remote server, or the deprecated HTTP+SSE
    transport only when an older server requires it. The admin form provides
@@ -197,8 +194,7 @@ SQLite DB at `~/.mounir/mounir.db`:
    description (the routing signal for the small supervisor model), system
    prompt, plus a chosen model and MCP server. Uploaded icons are validated and
    stored directly in the local SQLite database. Each subagent can also name
-   tools whose exact calls must not run twice in one user turn; the seeded Email
-   agent enables this protection for `send_email`.
+   tools whose exact calls must not run twice in one user turn.
 
 Each subagent becomes one `delegate_to_<slug>` tool and one graph node. Only
 its short report crosses back; the server's own tools never enter the
@@ -261,7 +257,7 @@ so users do not have to copy exact tool names into a text field. If a previously
 selected tool later disappears from the server, it remains visible as a stale
 selection until the user removes it.
 
-For the seeded **Gmail MCP** server, its saved setup capability provides OAuth-file
+For an existing **Gmail MCP** record using Mounir's Gmail setup adapter, its saved setup capability provides OAuth-file
 upload and a **Connect account** button. The admin UI renders these setup actions
 from the server's API data; it does not recognize Gmail from a package name.
 Authorization opens in the browser and
@@ -276,7 +272,7 @@ The preset keeps the existing
 package for compatibility. Its upstream repository is archived, so review or
 replace that MCP server before relying on it for a sensitive long-term setup.
 
-The seeded **Playwright Web** server needs no account or search API key. Its
+An existing **Playwright Web** record needs no account or search API key. Its
 saved server description explains the isolated-browser behavior without any
 package-name logic in Agent Studio. First use downloads the pinned MCP npm
 package and starts a temporary isolated Chrome profile. Ranked search results
@@ -316,17 +312,16 @@ migrated into the DB. Today every dynamic agent reports to the supervisor;
 nested parents (a subagent reporting to another subagent) are future work.
 New subagents ask for confirmation before every MCP tool call by default.
 The form can instead require approval only for named tools or allow all calls.
-The seeded Email agent confirms only send/delete operations. The seeded
-Researcher confirms interactive and high-risk browser operations while ordinary
-navigation and read-only page inspection run without interruptions.
+Confirmation and duplicate-action rules are selected by the user for each
+subagent after its MCP server tools have been discovered.
 After saving a server, open it in the admin UI and use **Test Connection** to
 verify the handshake and see the tools it advertises.
 
 Mounir is the MCP **host** and contains a generic MCP **client** used by every
-dynamic MCP agent, including Email and Researcher. It does not expose an MCP server of its own.
+dynamic MCP agent the user creates, including optional Email or Researcher agents. It does not expose an MCP server of its own.
 The dynamic layer currently consumes MCP **tools**; it does not yet surface a
 server's prompts/resources or a generic interactive MCP OAuth browser flow.
-The seeded local Gmail integration has its own browser OAuth onboarding. Remote
+The optional Gmail setup adapter has its own browser OAuth onboarding. Remote
 servers currently work with no authentication, a pasted bearer
 token, an API-key header, or advanced custom headers.
 
@@ -350,11 +345,10 @@ instance; `respond()` appends the turn produced by the graph to it.
 ### Prerequisites
 
 - **Python 3.10+**
-- **Node.js 18+**, npm, and **Google Chrome** (for the seeded Playwright Researcher)
+- **Node.js 18+** and npm (plus a browser when a chosen MCP server requires one)
 - **[Ollama](https://ollama.com)** running locally (for the supervisor model)
-- Specialist keys (free tiers available; each powers different agents):
-  - **[Ollama Cloud](https://ollama.com/settings/keys)** — researcher and the
-    seeded dynamic Email agent (`OLLAMA_API_KEY`)
+- Specialist keys only for the providers the user chooses:
+  - **[Ollama Cloud](https://ollama.com/settings/keys)** (`OLLAMA_API_KEY`)
   - **[NVIDIA build.nvidia.com](https://build.nvidia.com)** — media, system,
     coder (`NVIDIA_API_KEY`)
   - **Google Gemini** — knowledge agent (`GEMINI_API_KEY`)
@@ -371,7 +365,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 3. Specialist API keys. Persist them in ~/.bashrc:
-export OLLAMA_API_KEY="..."        # researcher + seeded dynamic Email agent
+export OLLAMA_API_KEY="..."        # only when using Ollama Cloud
 export NVIDIA_API_KEY="nvapi-..."  # media + system + coder
 export GEMINI_API_KEY="..."        # knowledge
 
@@ -395,9 +389,8 @@ MOUNIR_MODEL=qwen3:4b python cli.py
 ## Configuration
 
 Runtime defaults live in `mounir/config.py` and are overridable by environment variables.
-Dynamic MCP subagents—including Email and Researcher—are stored in SQLite and managed from Agent Studio.
-Their variables below are legacy seed overrides used only by one-time migrations
-from the old built-in specialists.
+User-created models, MCP servers, and dynamic subagents are stored in SQLite and
+managed from Agent Studio. A fresh installation does not create any registry records.
 
 ### Core / supervisor model
 
@@ -414,16 +407,12 @@ from the old built-in specialists.
 | `MOUNIR_MCP_TOOL_TIMEOUT` | `60` | Maximum seconds for one dynamic MCP tool call |
 | `MOUNIR_MCP_AGENT_TIMEOUT` | `300` | Maximum seconds for one complete dynamic MCP subagent task |
 
-### Built-in specialists and dynamic migration defaults
+### Built-in specialist defaults
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OLLAMA_API_KEY` | – | Ollama Cloud key — researcher and the seeded dynamic Email agent |
+| `OLLAMA_API_KEY` | – | Optional Ollama Cloud key |
 | `OLLAMA_CLOUD_BASE_URL` | `https://ollama.com/v1` | OpenAI-compatible endpoint |
-| `RESEARCHER_MODEL` | `nemotron-3-super:cloud` | Researcher model |
-| `RESEARCHER_MCP_COMMAND` | pinned Playwright MCP command | One-time server-command override when seeding Researcher |
-| `EMAIL_MODEL` | `gpt-oss:120b-cloud` | One-time model override when seeding the dynamic Email agent |
-| `GMAIL_MCP_COMMAND` | `npx -y @gongrzhe/server-gmail-autoauth-mcp` | One-time server-command override when seeding Email |
 | `NVIDIA_API_KEY` | – | NVIDIA key — media, system, coder |
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | OpenAI-compatible endpoint |
 | `MEDIA_MODEL` | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | Media (omni) model |
@@ -670,9 +659,7 @@ persisted status and proactive dashboard alerts.
 - `tools.request_confirmation()` gates outward-facing actions. Its
   request-scoped handler routes approval to the interface that started the
   turn; `tools.confirm_fn` remains the fallback used by standalone CLIs.
-- The seeded built-in Model records initially reference API keys from environment
-  variables. They can later be managed like other Model records in Agent Studio.
-  Dynamic model and MCP credentials entered in the UI are stored in the
+- Model and MCP credentials entered in Agent Studio are stored in the
   user-only SQLite database.
 
 ### Adding a built-in specialist
