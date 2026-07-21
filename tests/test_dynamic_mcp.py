@@ -74,6 +74,78 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(private["chat_id"], "42")
         self.assertEqual(stat.S_IMODE(db.DB_PATH.stat().st_mode), 0o600)
 
+    def test_voice_configuration_is_persisted_without_exposing_credentials(self):
+        db.init()
+        saved = db.update_voice_settings(
+            stt={
+                "provider": "groq",
+                "model": "whisper-large-v3-turbo",
+                "base_url": "https://api.groq.com/openai/v1",
+                "api_key": "groq-voice-key",
+                "language": "auto",
+            },
+            tts={
+                "provider": "google",
+                "model": "en-US-Neural2-D",
+                "base_url": "https://texttospeech.googleapis.com/v1",
+                "api_key": "google-voice-key",
+                "language": "en-US",
+            },
+        )
+
+        self.assertNotIn("api_key", saved["stt"])
+        self.assertNotIn("api_key", saved["tts"])
+        self.assertTrue(saved["stt"]["api_key_configured"])
+        self.assertTrue(saved["tts"]["api_key_configured"])
+        self.assertEqual(db.get_voice_runtime("stt")["api_key"], "groq-voice-key")
+        self.assertEqual(db.get_voice_runtime("tts")["api_key"], "google-voice-key")
+
+        db.update_voice_settings(
+            stt={
+                "provider": "groq",
+                "model": "whisper-large-v3-turbo",
+                "base_url": "https://api.groq.com/openai/v1",
+                "api_key": "",
+                "language": "fr",
+            }
+        )
+        self.assertEqual(db.get_voice_runtime("stt")["api_key"], "groq-voice-key")
+        self.assertEqual(db.get_voice_runtime("stt")["language"], "fr")
+
+    def test_voice_runtime_dispatches_selected_stt_and_tts_providers(self):
+        db.init()
+        db.update_voice_settings(
+            stt={
+                "provider": "groq",
+                "model": "whisper-test",
+                "base_url": "https://speech.example.test/v1",
+                "api_key": "speech-key",
+                "language": "en",
+            },
+            tts={
+                "provider": "google",
+                "model": "voice-test",
+                "base_url": "https://voice.example.test/v1",
+                "api_key": "voice-key",
+                "language": "en-US",
+            },
+        )
+        from mounir import stt as stt_mod, tts as tts_mod
+
+        with patch.object(
+            stt_mod, "_transcribe_groq", return_value=("hello", "en")
+        ) as transcribe:
+            self.assertEqual(stt_mod.transcribe([0.1]), ("hello", "en"))
+        self.assertEqual(transcribe.call_args.args[2]["model"], "whisper-test")
+        self.assertEqual(transcribe.call_args.args[2]["api_key"], "speech-key")
+
+        with patch.object(
+            tts_mod, "_synthesize_google_wav", return_value=b"wav"
+        ) as synthesize:
+            self.assertEqual(tts_mod.synthesize_wav("hello"), b"wav")
+        self.assertEqual(synthesize.call_args.args[1]["model"], "voice-test")
+        self.assertEqual(synthesize.call_args.args[1]["api_key"], "voice-key")
+
     def test_telegram_token_replacement_and_pairing_are_persisted(self):
         db.init()
         with self.assertRaisesRegex(ValueError, "bot token"):
@@ -597,6 +669,9 @@ class DatabaseTests(TemporaryDatabaseTest):
             supervisor_settings_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'supervisor_settings'"
             ).fetchone()
+            voice_settings_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'voice_settings'"
+            ).fetchone()
             heartbeat_tables = {
                 row["name"]
                 for row in conn.execute(
@@ -627,6 +702,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertIsNotNone(tool_table)
         self.assertIsNotNone(builtin_settings_table)
         self.assertIsNotNone(supervisor_settings_table)
+        self.assertIsNotNone(voice_settings_table)
         self.assertTrue(
             {
                 "heartbeat_settings", "heartbeat_tools", "heartbeat_runs",

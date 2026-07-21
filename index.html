@@ -540,7 +540,7 @@ function readLevel(){
   analyser.getByteTimeDomainData(freqData);
   let sum = 0;
   for(const v of freqData){ const x = (v - 128) / 128; sum += x * x; }
-  return Math.min(1, Math.sqrt(sum / freqData.length) * 4.0);  // RMS, scaled
+  return Math.min(1, Math.sqrt(sum / freqData.length) * 4.0);  // RMS, visual level only
 }
 
 /* --- canvas blob renderer --- */
@@ -575,8 +575,8 @@ function strokeBlob(time, baseR, amp, phase, color, lineW, glow){
 function frame(){
   // target intensity per state; listening/speaking ride on real audio level.
   let target;
-  if(orbState === 'listening')      target = 0.20 + audioLevel * 1.0;
-  else if(orbState === 'speaking')  target = 0.26 + audioLevel * 1.0;
+  if(orbState === 'listening')      target = 0.30 + audioLevel * 1.55;
+  else if(orbState === 'speaking')  target = 0.36 + audioLevel * 1.45;
   else if(orbState === 'thinking')  target = 0.26 + 0.10*Math.sin(t*4);
   else                              target = 0.10;                 // idle breathe
   if(orbState === 'listening' || orbState === 'speaking') audioLevel = readLevel();
@@ -586,10 +586,10 @@ function frame(){
   t += 0.016 * speed;
 
   ctx.clearRect(0,0,W,H);
-  const amp   = 4 + level*22;                 // gentler curves
-  const baseR = 168 + level*16;               // bigger, swells when active
-  const lineW = 2 + level*6;                  // thicker outline when moving
-  const glow  = 10 + level*46;                // more glow when moving
+  const amp   = 5 + level*34;                 // stronger movement while hearing/speaking
+  const baseR = 168 + level*24;               // more visible swelling when active
+  const lineW = 2 + level*7;
+  const glow  = 10 + level*58;
 
   // --- glassy translucent body, lit from the top-left (3D sphere) ---
   ctx.globalCompositeOperation = 'source-over';

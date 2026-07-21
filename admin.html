@@ -784,6 +784,28 @@
   .builtin-modal-feedback { min-height: 16px; margin-top: 10px; color: var(--danger); font-size: 10px; }
   .builtin-modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
 
+  .voice-config { max-width: 920px; margin: 0 auto; display: grid; gap: 18px; }
+  .voice-card {
+    padding: 22px; border: 1px solid var(--line); border-radius: 16px;
+    background: var(--bg-panel);
+  }
+  .voice-card-head { margin-bottom: 18px; }
+  .voice-card-head h3 { font-size: 14px; font-weight: 600; }
+  .voice-card-head p { margin-top: 5px; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
+  .voice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+  .voice-grid label { color: var(--text-mid); font-size: 10px; }
+  .voice-grid label.full { grid-column: 1 / -1; }
+  .voice-grid input, .voice-grid select {
+    width: 100%; margin-top: 7px; padding: 10px 11px; border: 1px solid var(--line);
+    border-radius: 9px; background: var(--bg); color: var(--text); font: inherit; outline: none;
+  }
+  .voice-grid input:focus, .voice-grid select:focus { border-color: var(--purple); }
+  .voice-key-state { margin-top: 6px; color: var(--text-dim); font-size: 9px; }
+  .voice-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+  .voice-feedback { flex: 1; color: var(--text-dim); font-size: 10px; }
+  .voice-feedback.error { color: var(--danger); }
+  .voice-feedback.ok { color: var(--ok); }
+
   ::-webkit-scrollbar { width: 7px; height: 7px; }
   ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--purple-dim); }
@@ -852,6 +874,10 @@
       </button>
     </nav>
     <div class="sidebar-footer">
+      <button class="nav-item" data-tab="voice">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg>
+        <span>Voice</span>
+      </button>
       <button class="nav-item" data-tab="telegram">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21 3-7.2 18-4.1-7.4L3 9.7 21 3Z"/><path d="m9.7 13.6 4.1-3.8"/></svg>
         <span>Telegram</span>
@@ -904,6 +930,7 @@ const S = {
   overview: { supervisor: {}, builtins: [] },
   heartbeat: { enabled: false },
   telegram: { enabled: false },
+  voice: { stt: {}, tts: {} },
   profile: {},
   models: [],
   servers: [],
@@ -923,6 +950,7 @@ const API = {
   overview: '/api/agent-overview',
   heartbeat: { update: () => '/api/heartbeat' },
   telegram: { update: () => '/api/telegram' },
+  voice: { update: () => '/api/voice-settings' },
   profile:  { update: () => '/api/profile' },
   models:  { list: '/api/models',  create: '/api/models',  update: id => `/api/models/${id}`,  del: id => `/api/models/${id}` },
   servers: { list: '/api/mcp-servers', create: '/api/mcp-servers', update: id => `/api/mcp-servers/${id}`, del: id => `/api/mcp-servers/${id}` },
@@ -933,6 +961,7 @@ const TAB_META = {
   overview: { title: 'Agent Overview', labelSingular: '', subtitle: 'How your assistant is connected' },
   heartbeat: { title: 'Heartbeat', labelSingular: '', subtitle: 'Run safe background checks and surface important updates' },
   telegram: { title: 'Telegram', labelSingular: '', subtitle: 'Use your assistant securely from Telegram' },
+  voice: { title: 'Voice', labelSingular: '', subtitle: 'Choose how Mounir listens and speaks' },
   profile: { title: 'Profile', labelSingular: 'Profile', subtitle: 'Who the assistant is and who it works for' },
   models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Language models used by built-in and dynamic subagents' },
   servers: { title: 'MCP Servers',   labelSingular: 'Server', subtitle: 'External capabilities connected through MCP' },
@@ -1014,10 +1043,11 @@ async function api(method, url, body) {
 }
 
 async function loadAll() {
-  const [o, h, t, p, m, s, a] = await Promise.all([
+  const [o, h, t, v, p, m, s, a] = await Promise.all([
     api('GET', API.overview),
     api('GET', '/api/heartbeat'),
     api('GET', '/api/telegram'),
+    api('GET', '/api/voice-settings'),
     api('GET', '/api/profile'),
     api('GET', API.models.list),
     api('GET', API.servers.list),
@@ -1026,6 +1056,7 @@ async function loadAll() {
   S.overview = o;
   S.heartbeat = h;
   S.telegram = t;
+  S.voice = v;
   S.profile = p;
   S.models = m;
   S.servers = s;
@@ -1040,6 +1071,7 @@ function render() {
   if (S.tab === 'overview') renderOverview();
   else if (S.tab === 'heartbeat') renderHeartbeat();
   else if (S.tab === 'telegram') renderTelegram();
+  else if (S.tab === 'voice') renderVoice();
   else if (S.tab === 'profile') renderForm();
   else if (S.view === 'list') renderList();
   else renderForm();
@@ -1051,6 +1083,7 @@ function updateHeader() {
   const inOverview = S.tab === 'overview';
   const inHeartbeat = S.tab === 'heartbeat';
   const inTelegram = S.tab === 'telegram';
+  const inVoice = S.tab === 'voice';
   const inProfile = S.tab === 'profile';
   const inForm = S.view === 'form';
   const editing = inForm && S.editing;
@@ -1061,14 +1094,14 @@ function updateHeader() {
     : meta.title;
   $('viewSubtitle').textContent = meta.subtitle;
   // Create New: only in list view
-  $('createBtn').style.display = (inOverview || inHeartbeat || inTelegram || inProfile || inForm) ? 'none' : '';
+  $('createBtn').style.display = (inOverview || inHeartbeat || inTelegram || inVoice || inProfile || inForm) ? 'none' : '';
   // Delete: only in readonly form view
   $('deleteBtn').style.display = (!inOverview && !inProfile && editing && S.formReadonly) ? '' : 'none';
   $('testBtn').style.display = (S.tab === 'servers' && editing && S.formReadonly) ? '' : 'none';
   // Cancel: in form view but NOT in readonly edit mode
   $('cancelBtn').style.display = (inForm && !(editing && S.formReadonly)) ? '' : 'none';
   // Modify / Save / Create button
-  if (inOverview || inHeartbeat || inTelegram) {
+  if (inOverview || inHeartbeat || inTelegram || inVoice) {
     $('modifyBtn').style.display = 'none';
     $('cancelBtn').style.display = 'none';
     $('testBtn').style.display = 'none';
@@ -1191,6 +1224,122 @@ function telegramStatusInfo(status) {
   };
   const [kind, label] = states[status] || states.disabled;
   return { kind, label };
+}
+
+function renderVoice() {
+  const stt = S.voice.stt || {};
+  const tts = S.voice.tts || {};
+  const keyHint = item => item.api_key_configured
+    ? 'A credential is configured. Leave this empty to keep it.'
+    : 'No credential configured.';
+  $('content').innerHTML = `
+    <form class="voice-config" id="voiceForm">
+      <section class="voice-card">
+        <div class="voice-card-head">
+          <h3>Speech to text</h3>
+          <p>Controls how recorded speech is converted into the message Mounir receives.</p>
+        </div>
+        <div class="voice-grid">
+          <label>Provider
+            <select id="sttProvider">
+              <option value="local_whisper"${stt.provider === 'local_whisper' ? ' selected' : ''}>Faster Whisper — local</option>
+              <option value="groq"${stt.provider === 'groq' ? ' selected' : ''}>Groq Whisper — cloud</option>
+            </select>
+          </label>
+          <label>Model
+            <input id="sttModel" value="${esc(stt.model || '')}" placeholder="small or whisper-large-v3-turbo" required>
+          </label>
+          <label>Language
+            <input id="sttLanguage" value="${esc(stt.language || 'auto')}" placeholder="auto, en, fr, ar">
+          </label>
+          <label data-stt-cloud>Base URL
+            <input id="sttBaseUrl" value="${esc(stt.base_url || 'https://api.groq.com/openai/v1')}" placeholder="https://api.groq.com/openai/v1">
+          </label>
+          <label class="full" data-stt-cloud>API key
+            <input type="password" id="sttApiKey" autocomplete="new-password" placeholder="Paste a replacement key">
+            <div class="voice-key-state">${esc(keyHint(stt))}</div>
+          </label>
+        </div>
+      </section>
+
+      <section class="voice-card">
+        <div class="voice-card-head">
+          <h3>Text to speech</h3>
+          <p>Controls how Mounir turns its reply into the audio played by the web interface and voice modes.</p>
+        </div>
+        <div class="voice-grid">
+          <label>Provider
+            <select id="ttsProvider">
+              <option value="piper"${tts.provider === 'piper' ? ' selected' : ''}>Piper — local</option>
+              <option value="google"${tts.provider === 'google' ? ' selected' : ''}>Google Cloud Text-to-Speech</option>
+            </select>
+          </label>
+          <label>Model or voice
+            <input id="ttsModel" value="${esc(tts.model || '')}" placeholder="Voice file path or cloud voice name" required>
+          </label>
+          <label>Language
+            <input id="ttsLanguage" value="${esc(tts.language || 'en-US')}" placeholder="en-US, fr-FR, ar-XA">
+          </label>
+          <label data-tts-cloud>Base URL
+            <input id="ttsBaseUrl" value="${esc(tts.base_url || 'https://texttospeech.googleapis.com/v1')}" placeholder="https://texttospeech.googleapis.com/v1">
+          </label>
+          <label class="full" data-tts-cloud>API key
+            <input type="password" id="ttsApiKey" autocomplete="new-password" placeholder="Paste a replacement key">
+            <div class="voice-key-state">${esc(keyHint(tts))}</div>
+          </label>
+        </div>
+      </section>
+
+      <div class="voice-actions">
+        <div class="voice-feedback" id="voiceFeedback"></div>
+        <button class="btn primary" type="submit" id="voiceSave">Save voice configuration</button>
+      </div>
+    </form>`;
+  S.view = 'voice';
+
+  const syncProviders = () => {
+    const sttCloud = $('sttProvider').value === 'groq';
+    const ttsCloud = $('ttsProvider').value === 'google';
+    document.querySelectorAll('[data-stt-cloud]').forEach(field => field.hidden = !sttCloud);
+    document.querySelectorAll('[data-tts-cloud]').forEach(field => field.hidden = !ttsCloud);
+  };
+  $('sttProvider').addEventListener('change', syncProviders);
+  $('ttsProvider').addEventListener('change', syncProviders);
+  syncProviders();
+
+  $('voiceForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const feedback = $('voiceFeedback');
+    const save = $('voiceSave');
+    save.disabled = true;
+    feedback.className = 'voice-feedback';
+    feedback.textContent = 'Saving…';
+    try {
+      S.voice = await api('PUT', API.voice.update(), {
+        stt: {
+          provider: $('sttProvider').value,
+          model: $('sttModel').value.trim(),
+          language: $('sttLanguage').value.trim() || 'auto',
+          base_url: $('sttBaseUrl').value.trim(),
+          api_key: $('sttApiKey').value.trim(),
+        },
+        tts: {
+          provider: $('ttsProvider').value,
+          model: $('ttsModel').value.trim(),
+          language: $('ttsLanguage').value.trim() || 'en-US',
+          base_url: $('ttsBaseUrl').value.trim(),
+          api_key: $('ttsApiKey').value.trim(),
+        },
+      });
+      renderVoice();
+      $('voiceFeedback').textContent = 'Voice configuration saved.';
+      $('voiceFeedback').className = 'voice-feedback ok';
+    } catch (error) {
+      feedback.textContent = error.message;
+      feedback.className = 'voice-feedback error';
+      save.disabled = false;
+    }
+  });
 }
 
 function renderTelegram() {

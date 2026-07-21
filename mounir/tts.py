@@ -11,27 +11,28 @@ Heavy deps (piper, requests, numpy, sounddevice) are imported lazily.
 
 from __future__ import annotations
 
-from . import config
-
-_GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+from . import config, db
 
 _voice = None  # cached PiperVoice
+_voice_model = None
 
 
-def _load():
-    global _voice
-    if _voice is None:
+def _load(model: str | None = None):
+    global _voice, _voice_model
+    model = model or config.PIPER_MODEL
+    if _voice is None or _voice_model != model:
         from pathlib import Path
 
         from piper import PiperVoice
 
-        model_path = Path(config.PIPER_MODEL)
+        model_path = Path(model)
         if not model_path.exists():
             raise FileNotFoundError(
                 f"Piper voice not found at {model_path}. Download one (see README) "
                 "or set MOUNIR_PIPER_MODEL."
             )
         _voice = PiperVoice.load(str(model_path))
+        _voice_model = model
     return _voice
 
 
@@ -40,10 +41,9 @@ def speak(text: str) -> None:
     text = text.strip()
     if not text:
         return
-    if config.TTS_BACKEND == "google":
-        _speak_google(text)
-    else:
-        _speak_piper(text)
+    wav_bytes = synthesize_wav(text)
+    if wav_bytes:
+        _play_wav(wav_bytes)
 
 
 def _play(audio, sample_rate) -> None:
@@ -54,59 +54,76 @@ def _play(audio, sample_rate) -> None:
     sd.wait()
 
 
-def _speak_piper(text: str) -> None:
-    """Synthesize `text` with local Piper."""
-    import numpy as np
-
-    voice = _load()
-    # piper >= 1.3 yields AudioChunk objects from synthesize(); each carries the
-    # int16 PCM bytes and the sample rate.
-    parts: list = []
-    sample_rate = None
-    for chunk in voice.synthesize(text):
-        parts.append(np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16))
-        sample_rate = chunk.sample_rate
-    if not parts:
-        return
-    _play(np.concatenate(parts), sample_rate)
+def synthesize_wav(text: str) -> bytes:
+    """Synthesize text with the selected database-backed voice configuration."""
+    text = str(text or "").strip()
+    if not text:
+        return b""
+    runtime = db.get_voice_runtime("tts")
+    if runtime["provider"] == "google":
+        return _synthesize_google_wav(text, runtime)
+    return _synthesize_piper_wav(text, runtime)
 
 
-def _speak_google(text: str) -> None:
-    """Synthesize `text` with Google Cloud TTS (REST + API key) and play it."""
-    if not config.GOOGLE_TTS_API_KEY:
-        raise RuntimeError(
-            "GOOGLE_TTS_API_KEY is not set (needed for MOUNIR_TTS_BACKEND=google)."
-        )
-
-    import base64
+def _synthesize_piper_wav(text: str, runtime: dict) -> bytes:
     import io
     import wave
 
-    import numpy as np
+    voice = _load(runtime["model"])
+    parts: list[bytes] = []
+    sample_rate = 22050
+    for chunk in voice.synthesize(text):
+        parts.append(chunk.audio_int16_bytes)
+        sample_rate = chunk.sample_rate
+    if not parts:
+        return b""
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"".join(parts))
+    return output.getvalue()
+
+
+def _synthesize_google_wav(text: str, runtime: dict) -> bytes:
+    """Synthesize with Google Cloud TTS and return its LINEAR16 WAV."""
+    if not runtime.get("api_key"):
+        raise RuntimeError(
+            "The selected Google text-to-speech configuration has no API key."
+        )
+
+    import base64
     import requests
 
     payload = {
         "input": {"text": text},
         "voice": {
-            "languageCode": config.GOOGLE_TTS_LANGUAGE,
-            "name": config.GOOGLE_TTS_VOICE,
+            "languageCode": runtime.get("language") or "en-US",
+            "name": runtime["model"],
         },
         # LINEAR16 comes back as a WAV container, so we can read rate + PCM
         # straight out of it with the stdlib wave module.
         "audioConfig": {"audioEncoding": "LINEAR16"},
     }
     resp = requests.post(
-        _GOOGLE_TTS_URL,
-        params={"key": config.GOOGLE_TTS_API_KEY},
+        f"{runtime['base_url'].rstrip('/')}/text:synthesize",
+        params={"key": runtime["api_key"]},
         json=payload,
         timeout=30,
     )
     resp.raise_for_status()
     audio_b64 = resp.json().get("audioContent")
-    if not audio_b64:
-        return
+    return base64.b64decode(audio_b64) if audio_b64 else b""
 
-    with wave.open(io.BytesIO(base64.b64decode(audio_b64)), "rb") as wf:
+
+def _play_wav(wav_bytes: bytes) -> None:
+    import io
+    import wave
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         sample_rate = wf.getframerate()
         frames = wf.readframes(wf.getnframes())
     _play(np.frombuffer(frames, dtype=np.int16), sample_rate)

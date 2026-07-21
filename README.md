@@ -470,11 +470,22 @@ using the standalone entry point.
 
 ### Voice / wake word
 
+Speech recognition and synthesis are configured from **Agent Studio → Voice**.
+Choose the provider, model or voice, language, endpoint, and API key for each
+direction. The current environment-based configuration is imported into SQLite
+once; later changes in Agent Studio apply to the web UI and standalone voice
+modes without editing exports. Supported STT providers are local Faster Whisper
+and Groq Whisper. Supported TTS providers are local Piper and Google Cloud TTS.
+
 | Variable | Default | Purpose |
 |---|---|---|
+| `MOUNIR_STT_BACKEND` | `local` | Initial STT provider (`local` or `groq`) |
+| `MOUNIR_TTS_BACKEND` | `piper` | Initial TTS provider (`piper` or `google`) |
 | `MOUNIR_WHISPER_MODEL` | `small` | Whisper size (`base` for more speed) |
 | `MOUNIR_WHISPER_LANG` | auto | Force STT language (`en`, `ar`) |
 | `MOUNIR_PIPER_MODEL` | `~/.mounir/voices/en_US-amy-medium.onnx` | TTS voice file |
+| `GROQ_STT_MODEL` / `GROQ_API_KEY` | `whisper-large-v3-turbo` / – | Initial Groq STT model and credential |
+| `GOOGLE_TTS_VOICE` / `GOOGLE_TTS_API_KEY` | `en-US-Neural2-D` / – | Initial Google TTS voice and credential |
 | `MOUNIR_WAKE_WORD` | `hey_jarvis` | openwakeword trigger |
 | `MOUNIR_WAKE_THRESHOLD` | `0.5` | Wake sensitivity |
 
@@ -532,6 +543,8 @@ Two separate pages, both served by `server.py`:
 - **Telegram** in the admin sidebar provides the complete bot setup: private
   token storage, live connection testing, enable/disable control, status, and
   secure one-time account pairing without manually entering a chat id.
+- **Voice** manages the active speech-to-text and text-to-speech providers,
+  models, endpoints, languages, and credentials stored in SQLite.
 - **Heartbeat** in the admin sidebar runs optional periodic checks while the web
   server is active. Choose an interval, describe what deserves an alert, and
   select tools from either the built-in specialists or dynamic MCP subagents.

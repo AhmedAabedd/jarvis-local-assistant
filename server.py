@@ -363,17 +363,9 @@ async def voice_turn(file: UploadFile = File(...)):
     # Synthesize reply to WAV bytes (in-memory, no playback on server side).
     audio_b64 = ""
     try:
-        voice = tts._load()
-        pcm_parts = []
-        sample_rate = 22050
-        for chunk in voice.synthesize(reply):
-            pcm_parts.append(np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16))
-            sample_rate = chunk.sample_rate
-        if pcm_parts:
-            pcm = np.concatenate(pcm_parts)
-            buf = io.BytesIO()
-            sf.write(buf, pcm, sample_rate, format="WAV", subtype="PCM_16")
-            audio_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        wav_bytes = tts.synthesize_wav(reply)
+        if wav_bytes:
+            audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
     except Exception:
         pass  # UI will just show text if TTS isn't set up
 
@@ -381,6 +373,18 @@ async def voice_turn(file: UploadFile = File(...)):
 
 
 # --- Admin: models, MCP servers, subagents ------------------------------------
+
+@app.get("/api/voice-settings")
+async def get_voice_settings():
+    return db.get_voice_settings()
+
+
+@app.put("/api/voice-settings")
+async def update_voice_settings(req: dict):
+    try:
+        return db.update_voice_settings(stt=req.get("stt"), tts=req.get("tts"))
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 @app.get("/api/profile")
 async def get_profile():

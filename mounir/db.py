@@ -160,6 +160,21 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS voice_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            stt_provider TEXT NOT NULL,
+            stt_model TEXT NOT NULL,
+            stt_base_url TEXT NOT NULL DEFAULT '',
+            stt_api_key TEXT NOT NULL DEFAULT '',
+            stt_language TEXT NOT NULL DEFAULT 'auto',
+            tts_provider TEXT NOT NULL,
+            tts_model TEXT NOT NULL,
+            tts_base_url TEXT NOT NULL DEFAULT '',
+            tts_api_key TEXT NOT NULL DEFAULT '',
+            tts_language TEXT NOT NULL DEFAULT 'en-US',
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS builtin_agent_settings (
             agent_key TEXT PRIMARY KEY,
             model TEXT NOT NULL,
@@ -258,6 +273,28 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             cfg.DEFAULT_ASSISTANT_NAME,
             cfg.DEFAULT_LOCATION,
             cfg.DEFAULT_LANGUAGE,
+            _now(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO voice_settings
+            (id, stt_provider, stt_model, stt_base_url, stt_api_key,
+             stt_language, tts_provider, tts_model, tts_base_url,
+             tts_api_key, tts_language, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "groq" if cfg.STT_BACKEND == "groq" else "local_whisper",
+            cfg.GROQ_STT_MODEL if cfg.STT_BACKEND == "groq" else cfg.WHISPER_MODEL,
+            cfg.GROQ_BASE_URL if cfg.STT_BACKEND == "groq" else "",
+            "$GROQ_API_KEY" if cfg.STT_BACKEND == "groq" else "",
+            cfg.WHISPER_LANGUAGE or "auto",
+            "google" if cfg.TTS_BACKEND == "google" else "piper",
+            cfg.GOOGLE_TTS_VOICE if cfg.TTS_BACKEND == "google" else cfg.PIPER_MODEL,
+            "https://texttospeech.googleapis.com/v1" if cfg.TTS_BACKEND == "google" else "",
+            "$GOOGLE_TTS_API_KEY" if cfg.TTS_BACKEND == "google" else "",
+            cfg.GOOGLE_TTS_LANGUAGE,
             _now(),
         ),
     )
@@ -990,6 +1027,98 @@ def update_profile(**kwargs) -> dict:
         )
         conn.commit()
     return get_profile()
+
+
+# -----------------------------------------------------------------------------
+# Voice configuration
+# -----------------------------------------------------------------------------
+
+VOICE_PROVIDERS = {
+    "stt": {"local_whisper", "groq"},
+    "tts": {"piper", "google"},
+}
+
+
+def get_voice_settings(*, include_secrets: bool = False) -> dict:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM voice_settings WHERE id = 1").fetchone()
+    if row is None:
+        return {"stt": {}, "tts": {}}
+    result = {}
+    for kind in ("stt", "tts"):
+        secret = row[f"{kind}_api_key"] or ""
+        item = {
+            "provider": row[f"{kind}_provider"],
+            "model": row[f"{kind}_model"],
+            "base_url": row[f"{kind}_base_url"] or "",
+            "language": row[f"{kind}_language"] or "auto",
+            "api_key_configured": bool(secret),
+        }
+        if include_secrets:
+            item["api_key"] = secret
+        result[kind] = item
+    result["updated_at"] = row["updated_at"]
+    return result
+
+
+def get_voice_runtime(kind: str) -> dict:
+    normalized = str(kind or "").strip().lower()
+    if normalized not in VOICE_PROVIDERS:
+        raise ValueError("voice type is not supported")
+    settings = get_voice_settings(include_secrets=True)[normalized]
+    settings["api_key"] = _resolve_key(settings.get("api_key") or "")
+    return settings
+
+
+def update_voice_settings(*, stt=None, tts=None) -> dict:
+    updates: dict[str, object] = {}
+    current = get_voice_settings(include_secrets=True)
+    for kind, supplied in (("stt", stt), ("tts", tts)):
+        if supplied is None:
+            continue
+        if not isinstance(supplied, dict):
+            raise ValueError(f"{kind.upper()} configuration must be an object")
+        provider = str(supplied.get("provider") or "").strip().lower()
+        if provider not in VOICE_PROVIDERS[kind]:
+            raise ValueError(f"{kind.upper()} provider is not supported")
+        model = _required(supplied.get("model"), f"{kind.upper()} model")
+        language = str(supplied.get("language") or "auto").strip()
+        if len(language) > 32:
+            raise ValueError(f"{kind.upper()} language is too long")
+        base_url = str(supplied.get("base_url") or "").strip()
+        cloud = provider in {"groq", "google"}
+        if cloud:
+            if provider == "groq":
+                base_url = base_url.rstrip("/").removesuffix("/audio/transcriptions")
+            else:
+                base_url = base_url.rstrip("/").removesuffix("/text:synthesize")
+            base_url = _normalize_model_base_url(base_url)
+        else:
+            base_url = ""
+        updates.update(
+            {
+                f"{kind}_provider": provider,
+                f"{kind}_model": model,
+                f"{kind}_base_url": base_url,
+                f"{kind}_language": language or "auto",
+            }
+        )
+        api_key = supplied.get("api_key")
+        if api_key is not None and str(api_key).strip():
+            updates[f"{kind}_api_key"] = str(api_key).strip()
+        elif cloud and not current[kind].get("api_key"):
+            raise ValueError(f"{kind.upper()} API key is required for this provider")
+    if not updates:
+        return get_voice_settings()
+    updates["updated_at"] = _now()
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in updates)
+        conn.execute(
+            f"UPDATE voice_settings SET {sets} WHERE id = 1",
+            tuple(updates.values()),
+        )
+        conn.commit()
+    return get_voice_settings()
 
 
 # -----------------------------------------------------------------------------
