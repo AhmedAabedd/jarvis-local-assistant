@@ -206,6 +206,42 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertIn("Reply in French", config.build_system_prompt(profile))
         self.assertIn("Location: Paris, France", config.profile_instruction(profile))
 
+    def test_voice_turn_instruction_is_mandatory_and_not_saved_in_history(self):
+        db.init()
+        observed = {}
+
+        def compile_graph(stream_q, *_args, **_kwargs):
+            class Graph:
+                def invoke(self, state):
+                    observed["user"] = next(
+                        message["content"]
+                        for message in reversed(state["messages"])
+                        if message["role"] == "user"
+                    )
+                    stream_q.put("plain reply")
+                    return {
+                        "messages": state["messages"]
+                        + [{"role": "assistant", "content": "plain reply"}]
+                    }
+
+            return Graph()
+
+        conversation = Conversation(system_prompt="test")
+        voice_agent = Agent(conversation=conversation)
+        with patch.object(
+            langgraph_agent, "_compile_graph", side_effect=compile_graph
+        ):
+            self.assertEqual(
+                "".join(voice_agent.respond("tell me the time", voice=True)),
+                "plain reply",
+            )
+
+        self.assertIn("MANDATORY VOICE MODE", observed["user"])
+        self.assertIn("Never use Markdown", observed["user"])
+        visible = conversation.display_messages()
+        self.assertEqual(visible[0]["content"], "tell me the time")
+        self.assertNotIn("VOICE MODE", visible[0]["content"])
+
     def test_heartbeat_uses_only_selected_noninteractive_cached_tools(self):
         db.init()
         email = db.get_subagent_by_name("Email")

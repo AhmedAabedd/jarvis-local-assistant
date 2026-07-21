@@ -21,7 +21,7 @@ def _handle_utterance(agent: Agent, wav) -> None:
     print(f"you ({lang}) ▸ {text}")
     print(f"{db.get_profile()['assistant_name'].lower()} ▸ ", end="", flush=True)
     try:
-        for sentence in iter_sentences(agent.respond(text)):
+        for sentence in iter_sentences(agent.respond(text, voice=True)):
             print(sentence, end=" ", flush=True)
             tts.speak(sentence)
     except Exception as exc:  # keep the loop alive on a single failure

@@ -356,7 +356,7 @@ async def voice_turn(file: UploadFile = File(...)):
     def respond() -> str:
         with _agent_lock:
             with tools.use_confirmation_handler(_web_confirm):
-                return "".join(agent.respond(text))
+                return "".join(agent.respond(text, voice=True))
 
     reply = await loop.run_in_executor(None, respond)
 

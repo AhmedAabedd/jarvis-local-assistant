@@ -52,6 +52,10 @@ MAX_TOOL_ROUNDS = 10
 # Safety cap on supervisor -> specialist -> supervisor hand-offs per turn, so a
 # model that keeps re-delegating can't loop forever.
 MAX_DELEGATIONS = 3
+VOICE_RESPONSE_INSTRUCTION = (
+    "MANDATORY VOICE MODE: Reply as natural spoken language only. "
+    "Never use Markdown, bullets, tables, code formatting, emojis, or decorative symbols."
+)
 
 # Delegation tools mapped to the node they hand off to.
 _DELEGATES = {
@@ -451,13 +455,24 @@ class Agent:
         self.model = model
         self.use_tools = use_tools
 
-    def respond(self, user_input: str) -> Iterator[str]:
+    def respond(self, user_input: str, *, voice: bool = False) -> Iterator[str]:
         """Run one user turn through the graph, streaming the reply chunks."""
         if self._profile_managed_prompt:
             self.conversation.system_prompt = cfg.build_system_prompt(db.get_profile())
         self.conversation.add_user(user_input)
         stream_q: queue.Queue[str | None] = queue.Queue()
-        state: TurnState = {"messages": self.conversation.to_messages()}
+        messages = self.conversation.to_messages()
+        if voice:
+            # Keep the instruction turn-local: the real transcription remains
+            # clean in shared conversation memory and in the visible transcript.
+            messages = [dict(message) for message in messages]
+            for message in reversed(messages):
+                if message.get("role") == "user":
+                    message["content"] = (
+                        f"{message.get('content') or ''}\n\n{VOICE_RESPONSE_INSTRUCTION}"
+                    )
+                    break
+        state: TurnState = {"messages": messages}
         input_len = len(state["messages"])  # everything after this is new this turn
         graph = _compile_graph(stream_q, self.model, self.use_tools)
         result: dict = {}
