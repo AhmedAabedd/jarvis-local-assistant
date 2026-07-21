@@ -1313,6 +1313,48 @@ class TransportTests(unittest.TestCase):
 
 
 class AdminApiTests(TemporaryDatabaseTest):
+    def test_web_and_telegram_histories_are_isolated_and_receive_heartbeat(self):
+        import server as web_server
+
+        db.init()
+        db.update_telegram_settings(enabled=True, bot_token="123:secret")
+        db.pair_telegram_chat(42, "Ada", "ada")
+        web_server.agent.conversation.reset()
+        web_server.telegram_agent.conversation.reset()
+
+        web_server.agent.conversation.add_user("Web-only context")
+        self.assertEqual(len(web_server.agent.conversation), 1)
+        self.assertEqual(len(web_server.telegram_agent.conversation), 0)
+        self.assertIsNot(web_server.agent, web_server.telegram_service.agent)
+
+        web_server.agent.conversation.reset()
+        async def run_inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with (
+            patch.object(
+                web_server.telegram_service,
+                "send_notification",
+                return_value=True,
+            ) as send_notification,
+            patch.object(web_server.asyncio, "to_thread", side_effect=run_inline),
+        ):
+            asyncio.run(web_server._deliver_heartbeat_alert("Important update"))
+
+        send_notification.assert_called_once_with(
+            "Heartbeat update\n\nImportant update"
+        )
+        expected = [{
+            "role": "assistant",
+            "content": "Heartbeat update\n\nImportant update",
+        }]
+        self.assertEqual(web_server.agent.conversation.display_messages(), expected)
+        self.assertEqual(
+            web_server.telegram_agent.conversation.display_messages(), expected
+        )
+        web_server.agent.conversation.reset()
+        web_server.telegram_agent.conversation.reset()
+
     def test_heartbeat_notifications_endpoint_returns_saved_alerts(self):
         import httpx
         import server as web_server
@@ -1948,7 +1990,9 @@ class InterfaceRoutingTests(unittest.TestCase):
         self.assertEqual(reply, "done")
         self.assertEqual(observed, [True])
 
-    def test_telegram_turn_uses_telegram_confirmation_and_shared_agent(self):
+    def test_telegram_turn_uses_telegram_confirmation_handler(self):
+        db.init()
+
         class FakeBot:
             def __init__(self):
                 self.handlers = []
@@ -2004,7 +2048,76 @@ class InterfaceRoutingTests(unittest.TestCase):
         fallback.assert_called_once_with("outside")
         self.assertEqual(fake_bot.sent[-1][1], "Telegram reply")
 
+    def test_telegram_can_send_a_proactive_notification(self):
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def send_message(self, chat_id, text, **kwargs):
+                self.sent.append((chat_id, text, kwargs))
+
+        fake_bot = FakeBot()
+        bridge = TelegramBridge(
+            token="123:abc",
+            chat_id="42",
+            bot_factory=lambda _token: fake_bot,
+        )
+
+        self.assertTrue(bridge.send_notification("Heartbeat update"))
+        self.assertEqual(fake_bot.sent[0][0:2], (42, "Heartbeat update"))
+
+        unpaired = TelegramBridge(
+            token="123:abc",
+            chat_id="",
+            bot_factory=lambda _token: fake_bot,
+        )
+        self.assertFalse(unpaired.send_notification("Heartbeat update"))
+
+    def test_telegram_stops_polling_when_token_is_rejected(self):
+        class UnauthorizedError(Exception):
+            error_code = 401
+
+        class FakeBot:
+            def __init__(self):
+                self.infinity_started = False
+                self.stopped = False
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def get_me(self):
+                raise UnauthorizedError("Unauthorized")
+
+            def infinity_polling(self, **_kwargs):
+                self.infinity_started = True
+
+            def stop_polling(self):
+                self.stopped = True
+
+        statuses = []
+        fake_bot = FakeBot()
+        bridge = TelegramBridge(
+            token="invalid-token",
+            chat_id="42",
+            bot_factory=lambda _token: fake_bot,
+            on_status=lambda status, _username, error: statuses.append(
+                (status, error)
+            ),
+        )
+
+        bridge._poll()
+
+        self.assertFalse(fake_bot.infinity_started)
+        self.assertTrue(fake_bot.stopped)
+        self.assertEqual(statuses[-1][0], "error")
+        self.assertIn("Replace it in Agent Studio", statuses[-1][1])
+
     def test_telegram_pairing_code_is_one_use_and_records_identity(self):
+        db.init()
+
         class FakeBot:
             def __init__(self):
                 self.sent = []

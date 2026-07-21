@@ -20,6 +20,17 @@ from .agent import Agent
 
 MAX_MESSAGE_CHARS = 4096
 CONFIRM_TIMEOUT_SECONDS = 120
+INVALID_TOKEN_MESSAGE = (
+    "Telegram rejected the bot token. Replace it in Agent Studio."
+)
+
+
+class _PollingExceptionHandler:
+    def __init__(self, bridge: "TelegramBridge") -> None:
+        self.bridge = bridge
+
+    def handle(self, exception: Exception) -> bool:
+        return self.bridge._handle_polling_exception(exception)
 
 
 class TelegramBridge:
@@ -52,6 +63,7 @@ class TelegramBridge:
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.RLock()
         self._stopping = threading.Event()
+        self._send_lock = threading.Lock()
         self._confirm_lock = threading.Lock()
         self._confirm_event: threading.Event | None = None
         self._confirm_answer = False
@@ -84,6 +96,7 @@ class TelegramBridge:
         if self.bot is not None:
             return self.bot
         bot = self._bot_factory(self.token)
+        bot.exception_handler = _PollingExceptionHandler(self)
         bot.register_message_handler(self._handle_text, content_types=["text"])
         bot.register_message_handler(
             self._handle_other,
@@ -93,6 +106,17 @@ class TelegramBridge:
         )
         self.bot = bot
         return bot
+
+    def _handle_polling_exception(self, exception: Exception) -> bool:
+        """Stop retrying permanent authentication failures."""
+        if getattr(exception, "error_code", None) != 401:
+            return False
+        self._report_status("error", INVALID_TOKEN_MESSAGE)
+        self._stopping.set()
+        if self.bot is not None:
+            self.bot.stop_polling()
+        trace.kv("telegram", "bot token rejected; polling stopped")
+        return True
 
     def _report_status(self, status: str, error: str = "") -> None:
         self.last_error = error
@@ -182,11 +206,21 @@ class TelegramBridge:
 
     def _send(self, chat_id: int, text: str) -> None:
         bot = self._ensure_bot()
-        for chunk in self.split_message(text):
-            try:
-                bot.send_message(chat_id, chunk, parse_mode="Markdown")
-            except telebot.apihelper.ApiTelegramException:
-                bot.send_message(chat_id, chunk)
+        with self._send_lock:
+            for chunk in self.split_message(text):
+                try:
+                    bot.send_message(chat_id, chunk, parse_mode="Markdown")
+                except telebot.apihelper.ApiTelegramException:
+                    bot.send_message(chat_id, chunk)
+
+    def send_notification(self, text: str) -> bool:
+        """Send a proactive message to the paired chat, if one exists."""
+        chat_id = self._allowed_chat()
+        message = str(text or "").strip()
+        if chat_id is None or not message:
+            return False
+        self._send(chat_id, message)
+        return True
 
     def _telegram_confirm(self, action: str) -> bool:
         chat_id = self._allowed_chat()
@@ -315,6 +349,8 @@ class TelegramBridge:
                 trace.kv("paired chat", str(paired) if paired else "not paired yet")
                 self._report_status("connected" if paired else "waiting_pairing")
             except Exception as exc:
+                if self._handle_polling_exception(exc):
+                    return
                 # infinity_polling owns reconnection; a temporary startup network
                 # failure must not take down the web server.
                 self._report_status("error", str(exc))
