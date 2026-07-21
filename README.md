@@ -460,9 +460,11 @@ database settings are first created. Agent Studio owns the configuration after
 that migration.
 
 When enabled, `python server.py` owns Telegram in a managed background thread
-alongside the web dashboard and heartbeat. Web and Telegram turns use the same
-conversation and are serialized so they cannot modify shared history at the
-same time. Tool confirmations return to the interface that initiated the turn.
+alongside the web dashboard and heartbeat. Web and Telegram keep separate
+conversation histories, while turns remain serialized for safe access to
+shared desktop tools. Heartbeat alerts are delivered to both the web dashboard
+and the paired Telegram chat. Tool confirmations return to the interface that
+initiated the turn.
 
 `python telegram_cli.py` remains available to run only the Telegram bridge. Do
 not run it while Telegram is enabled in the web server, because Telegram allows
@@ -649,7 +651,7 @@ Streamable HTTP, and legacy SSE), full-turn memory, voice
 (push-to-talk + hands-free), Telegram bridge, web dashboard, profile settings,
 default-browser control, MCP timeouts, and admin UI.
 The web runtime also supports configurable, isolated heartbeat checks with
-persisted status and proactive dashboard alerts.
+persisted status and proactive web and Telegram alerts.
 
 **Ongoing / future:**
 - Custom "Hey Mounir" wake word

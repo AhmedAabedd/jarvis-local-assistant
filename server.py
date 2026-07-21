@@ -7,7 +7,8 @@ Serves:
   - POST /api/voice        -> upload audio, returns transcript + spoken reply (base64 wav)
 
 Also owns the heartbeat scheduler and, when configured, the Telegram
-long-polling bridge. All user interfaces share one serialized Agent instance.
+long-polling bridge. Web and Telegram keep separate conversation histories,
+while agent turns remain serialized for safe access to shared desktop tools.
 
 Run with:
     pip install fastapi uvicorn psutil python-multipart
@@ -86,8 +87,11 @@ _secure_gmail_auth_files()
 # Ensure the SQLite DB exists and the legacy JSON file is migrated.
 db.init()
 
-# One shared agent instance = one shared conversation memory across the UI.
+# Web and Telegram use separate context windows so messages from one interface
+# never become conversational history in the other. ``agent`` remains the web
+# alias for compatibility with existing integrations and tests.
 agent = Agent()
+telegram_agent = Agent()
 _agent_lock = threading.Lock()
 
 # --- in-browser tool confirmation -------------------------------------------
@@ -125,7 +129,7 @@ tools.confirm_fn = _web_confirm
 
 
 async def _deliver_heartbeat_alert(message: str) -> None:
-    """Persist one proactive alert and deliver it to the live dashboard."""
+    """Deliver one proactive alert to enabled user interfaces."""
     alert = f"Heartbeat update\n\n{message}"
 
     def persist() -> None:
@@ -136,6 +140,27 @@ async def _deliver_heartbeat_alert(message: str) -> None:
     out = _ui.get("out")
     if out is not None:
         out.put_nowait({"type": "heartbeat", "text": alert})
+
+    telegram = db.get_telegram_settings()
+    if not (
+        telegram["enabled"]
+        and telegram["token_configured"]
+        and telegram["paired"]
+    ):
+        return
+
+    try:
+        sent = await asyncio.to_thread(telegram_service.send_notification, alert)
+        if sent:
+            def persist_telegram() -> None:
+                with _agent_lock:
+                    telegram_agent.conversation.add_assistant(alert)
+
+            await asyncio.to_thread(persist_telegram)
+    except Exception as exc:
+        # A Telegram outage must not suppress the web notification or turn a
+        # successful heartbeat check into a failed run.
+        trace.kv("heartbeat telegram", f"delivery failed: {exc}")
 
 
 heartbeat_service = HeartbeatService(_deliver_heartbeat_alert)
@@ -153,7 +178,7 @@ def _telegram_status(status: str, bot_username: str, error: str) -> None:
 
 _telegram_saved = db.get_telegram_settings(include_secret=True)
 telegram_service = TelegramBridge(
-    agent=agent,
+    agent=telegram_agent,
     turn_lock=_agent_lock,
     token=_telegram_saved["bot_token"],
     chat_id=_telegram_saved["chat_id"],
