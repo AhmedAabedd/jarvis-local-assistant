@@ -146,6 +146,12 @@
     padding: 10px 12px; display: flex; align-items: center; justify-content: space-between;
     gap: 10px; color: var(--text-mid); font-size: 11px; font-weight: 600;
   }
+  .heartbeat-agent-head-actions { display: flex; align-items: center; gap: 12px; }
+  .heartbeat-select-all {
+    display: inline-flex; align-items: center; gap: 7px; color: var(--text-mid);
+    font-size: 9px; font-weight: 500; cursor: pointer;
+  }
+  .heartbeat-select-all input { width: 14px; height: 14px; accent-color: var(--purple); }
   .heartbeat-agent-tools { border-top: 1px solid var(--line); }
   .heartbeat-tool {
     display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start;
@@ -1363,28 +1369,42 @@ function renderTelegram() {
   if (state.connection_status === 'connecting') startTelegramStatusPolling();
 }
 
-function heartbeatToolKey(subagentId, toolName) {
-  return JSON.stringify([Number(subagentId), String(toolName)]);
+function heartbeatAgentKey(agent) {
+  return String(agent?.key ?? agent?.id ?? '');
+}
+
+function heartbeatToolKey(agentKey, toolName) {
+  return JSON.stringify([String(agentKey), String(toolName)]);
 }
 
 function heartbeatAgentToolsHtml(agent) {
-  if (!agent) return '<div class="heartbeat-empty">No dynamic MCP subagents are available yet.</div>';
+  if (!agent) return '<div class="heartbeat-empty">No subagents are available yet.</div>';
   const tools = Array.isArray(agent.tools) ? agent.tools : [];
+  const agentKey = heartbeatAgentKey(agent);
+  const safeTools = tools.filter(tool => !tool.requires_confirmation);
+  const allSafeSelected = safeTools.length > 0 && safeTools.every(tool =>
+    heartbeatToolSelections.has(heartbeatToolKey(agentKey, tool.name)));
   return `
     <section class="heartbeat-agent">
       <div class="heartbeat-agent-head">
         <span>${esc(agent.name)}</span>
-        <span class="connection-status ${esc(agent.connection_status || 'untested')}" title="MCP connection status">${tools.length} tools</span>
+        <div class="heartbeat-agent-head-actions">
+          <label class="heartbeat-select-all">
+            <input type="checkbox" data-heartbeat-select-all data-agent-key="${esc(agentKey)}"${allSafeSelected ? ' checked' : ''}${safeTools.length ? '' : ' disabled'}>
+            <span>Select all safe</span>
+          </label>
+          <span class="connection-status ${esc(agent.connection_status || 'untested')}">${tools.length} tools</span>
+        </div>
       </div>
       <div class="heartbeat-agent-tools">
         ${tools.length ? tools.map(tool => {
           const locked = Boolean(tool.requires_confirmation);
-          const selected = heartbeatToolSelections.has(heartbeatToolKey(agent.id, tool.name));
+          const selected = heartbeatToolSelections.has(heartbeatToolKey(agentKey, tool.name));
           return `
             <label class="heartbeat-tool${locked ? ' locked' : ''}">
-              <input type="checkbox" data-heartbeat-tool data-subagent-id="${agent.id}" data-tool-name="${esc(tool.name)}"${selected && !locked ? ' checked' : ''}${locked ? ' disabled' : ''}>
+              <input type="checkbox" data-heartbeat-tool data-agent-key="${esc(agentKey)}" data-tool-name="${esc(tool.name)}"${selected && !locked ? ' checked' : ''}${locked ? ' disabled' : ''}>
               <span>
-                <span class="heartbeat-tool-name mono">${esc(tool.name)}</span>
+                <span class="heartbeat-tool-name">${esc(readableToolName(tool.name))}</span>
                 <span class="heartbeat-tool-description">${esc(tool.description || 'No description provided.')}</span>
               </span>
               ${locked ? '<span class="heartbeat-tool-lock">Needs confirmation</span>' : ''}
@@ -1394,20 +1414,32 @@ function heartbeatAgentToolsHtml(agent) {
     </section>`;
 }
 
+function syncHeartbeatSelectAll(agent) {
+  if (!agent) return;
+  const agentKey = heartbeatAgentKey(agent);
+  const control = document.querySelector('[data-heartbeat-select-all]');
+  if (!control || control.dataset.agentKey !== agentKey) return;
+  const safeTools = (agent.tools || []).filter(tool => !tool.requires_confirmation);
+  const selectedCount = safeTools.filter(tool =>
+    heartbeatToolSelections.has(heartbeatToolKey(agentKey, tool.name))).length;
+  control.checked = safeTools.length > 0 && selectedCount === safeTools.length;
+  control.indeterminate = selectedCount > 0 && selectedCount < safeTools.length;
+}
+
 function renderHeartbeat() {
   const enabled = Boolean(S.heartbeat.enabled);
   const capabilities = Array.isArray(S.heartbeat.capabilities) ? S.heartbeat.capabilities : [];
   heartbeatToolSelections = new Set(
     capabilities.flatMap(agent => (Array.isArray(agent.tools) ? agent.tools : [])
       .filter(tool => tool.selected && !tool.requires_confirmation)
-      .map(tool => heartbeatToolKey(agent.id, tool.name)))
+      .map(tool => heartbeatToolKey(heartbeatAgentKey(agent), tool.name)))
   );
-  const currentAgentExists = capabilities.some(agent => +agent.id === +heartbeatSelectedAgentId);
+  const currentAgentExists = capabilities.some(agent => heartbeatAgentKey(agent) === String(heartbeatSelectedAgentId));
   if (!currentAgentExists) {
     const selectedAgent = capabilities.find(agent => (agent.tools || []).some(tool => tool.selected));
-    heartbeatSelectedAgentId = selectedAgent?.id ?? capabilities[0]?.id ?? null;
+    heartbeatSelectedAgentId = selectedAgent ? heartbeatAgentKey(selectedAgent) : (capabilities[0] ? heartbeatAgentKey(capabilities[0]) : null);
   }
-  const selectedAgent = capabilities.find(agent => +agent.id === +heartbeatSelectedAgentId) || null;
+  const selectedAgent = capabilities.find(agent => heartbeatAgentKey(agent) === String(heartbeatSelectedAgentId)) || null;
   const interval = Number(S.heartbeat.interval_minutes || 30);
   const intervalOptions = [5, 15, 30, 60, 180, 360, 720, 1440];
   if (!intervalOptions.includes(interval)) intervalOptions.push(interval);
@@ -1466,7 +1498,7 @@ function renderHeartbeat() {
           <span>Subagent</span>
           <select id="heartbeatAgentSelect"${capabilities.length ? '' : ' disabled'}>
             ${capabilities.length
-              ? capabilities.map(agent => `<option value="${agent.id}"${+agent.id === +heartbeatSelectedAgentId ? ' selected' : ''}>${esc(agent.name)}</option>`).join('')
+              ? capabilities.map(agent => `<option value="${esc(heartbeatAgentKey(agent))}"${heartbeatAgentKey(agent) === String(heartbeatSelectedAgentId) ? ' selected' : ''}>${esc(agent.name)}</option>`).join('')
               : '<option value="">No subagents available</option>'}
           </select>
         </label>
@@ -1490,6 +1522,7 @@ function renderHeartbeat() {
     </div>`;
   S.view = 'heartbeat';
   updateHeader();
+  syncHeartbeatSelectAll(selectedAgent);
 
   const toggle = $('heartbeatToggle');
   toggle.addEventListener('change', async () => {
@@ -1509,16 +1542,33 @@ function renderHeartbeat() {
   });
 
   $('heartbeatAgentSelect').addEventListener('change', event => {
-    heartbeatSelectedAgentId = Number(event.target.value);
-    const agent = capabilities.find(item => +item.id === +heartbeatSelectedAgentId) || null;
+    heartbeatSelectedAgentId = event.target.value;
+    const agent = capabilities.find(item => heartbeatAgentKey(item) === heartbeatSelectedAgentId) || null;
     $('heartbeatAgentTools').innerHTML = heartbeatAgentToolsHtml(agent);
+    syncHeartbeatSelectAll(agent);
   });
   $('heartbeatAgentTools').addEventListener('change', event => {
+    const selectAll = event.target.closest('[data-heartbeat-select-all]');
+    if (selectAll) {
+      const agent = capabilities.find(item => heartbeatAgentKey(item) === selectAll.dataset.agentKey) || null;
+      if (!agent) return;
+      for (const tool of agent.tools || []) {
+        if (tool.requires_confirmation) continue;
+        const key = heartbeatToolKey(selectAll.dataset.agentKey, tool.name);
+        if (selectAll.checked) heartbeatToolSelections.add(key);
+        else heartbeatToolSelections.delete(key);
+      }
+      $('heartbeatAgentTools').innerHTML = heartbeatAgentToolsHtml(agent);
+      syncHeartbeatSelectAll(agent);
+      return;
+    }
     const input = event.target.closest('[data-heartbeat-tool]');
     if (!input) return;
-    const key = heartbeatToolKey(input.dataset.subagentId, input.dataset.toolName);
+    const key = heartbeatToolKey(input.dataset.agentKey, input.dataset.toolName);
     if (input.checked) heartbeatToolSelections.add(key);
     else heartbeatToolSelections.delete(key);
+    const agent = capabilities.find(item => heartbeatAgentKey(item) === input.dataset.agentKey) || null;
+    syncHeartbeatSelectAll(agent);
   });
   $('heartbeatSave').addEventListener('click', () => saveHeartbeatSettings(false));
   $('heartbeatRun').addEventListener('click', () => saveHeartbeatSettings(true));
@@ -1532,8 +1582,8 @@ function heartbeatTime(value) {
 
 function heartbeatFormPayload(enabled = Boolean(S.heartbeat.enabled)) {
   const selected_tools = [...heartbeatToolSelections].map(key => {
-    const [subagent_id, tool_name] = JSON.parse(key);
-    return { subagent_id, tool_name };
+    const [agent_key, tool_name] = JSON.parse(key);
+    return { agent_key, tool_name };
   });
   return {
     enabled,

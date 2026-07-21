@@ -517,10 +517,12 @@ Two separate pages, both served by `server.py`:
   secure one-time account pairing without manually entering a chat id.
 - **Heartbeat** in the admin sidebar runs optional periodic checks while the web
   server is active. Choose an interval, describe what deserves an alert, and
-  select the cached MCP tools it may use. Heartbeat runs each selected subagent
-  in an isolated context with only those tools exposed. Tools configured to
-  require confirmation are unavailable to heartbeat, and every run is told to
-  observe only and never change external state. `HEARTBEAT_OK` results remain
+  select tools from either the built-in specialists or dynamic MCP subagents.
+  Safe tools are selected by default, and each subagent has a **Select all
+  safe** control. Heartbeat runs each selected subagent in an isolated context
+  with a code-enforced tool allowlist. Tools that require confirmation or can
+  change external state are unavailable, and every run is told to observe only
+  and never make changes. `HEARTBEAT_OK` results remain
   silent; meaningful alerts are stored in the conversation and pushed to the
   open dashboard. The setting is disabled by default, recent run state is
   persisted in SQLite, and **Run now** tests the same path on demand.
@@ -584,7 +586,7 @@ mounir/
   tools.py              supervisor tools (files, bash, browser, delegation)
   default_agents.py     one-time presets for migrated dynamic agents such as Email and Researcher
   db.py                 SQLite persistence: profile, MCP registry, tool cache, heartbeat
-  heartbeat.py          safe periodic MCP checks + application-owned scheduler
+  heartbeat.py          safe built-in/MCP checks + application-owned scheduler
   mcp_agents.py         registry layer + management CLI (uses db.py)
   memory.py             conversation history + full-turn persistence + JSON save
   trace.py              the purple, Claude-Code-style terminal renderer

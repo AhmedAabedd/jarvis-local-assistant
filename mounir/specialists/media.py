@@ -348,10 +348,20 @@ def _dispatch(name: str, arguments: dict) -> tuple[str, list[dict]]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run(task: str) -> str:
+def run(task: str, allowed_tools: list[str] | None = None) -> str:
     """Run the media analyst on a task. Returns a plain-text report."""
     if not config.NVIDIA_API_KEY:
         return "Media agent failed: NVIDIA_API_KEY is not set."
+
+    allowed = (
+        {str(name) for name in allowed_tools}
+        if allowed_tools is not None
+        else set(_REGISTRY)
+    )
+    tool_schemas = [
+        schema for schema in TOOLS
+        if schema["function"]["name"] in allowed
+    ]
 
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
@@ -360,7 +370,9 @@ def run(task: str) -> str:
 
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
-            message = llm.nvidia_chat(messages, tools=TOOLS, model=config.MEDIA_MODEL)
+            message = llm.nvidia_chat(
+                messages, tools=tool_schemas or None, model=config.MEDIA_MODEL
+            )
         except Exception as exc:
             return f"Media agent failed: {exc}"
 
@@ -384,7 +396,11 @@ def run(task: str) -> str:
                 args = json.loads(tc["function"].get("arguments") or "{}")
             except Exception:
                 args = {}
-            summary, parts = _dispatch(name, args)
+            summary, parts = (
+                _dispatch(name, args)
+                if name in allowed
+                else (f"Tool {name} is not allowed for this run.", [])
+            )
             trace.tool(name, args, summary)
             messages.append(
                 {"role": "tool", "tool_call_id": tc.get("id", "call_0"), "content": summary}

@@ -522,16 +522,16 @@ async def get_heartbeat():
 async def update_heartbeat(req: dict):
     try:
         requested_enabled = req.get("enabled")
+        selected_tools = req.get("selected_tools")
         if requested_enabled is True:
-            selected = req.get("selected_tools")
-            if selected is None:
-                selected = [
-                    {"subagent_id": agent["id"], "tool_name": tool["name"]}
+            if selected_tools is None:
+                selected_tools = [
+                    {"agent_key": agent["key"], "tool_name": tool["name"]}
                     for agent in db.get_heartbeat_capabilities()
                     for tool in agent["tools"]
                     if tool["selected"] and not tool["requires_confirmation"]
                 ]
-            if not selected:
+            if not selected_tools:
                 raise ValueError(
                     "select at least one non-interactive tool before enabling heartbeat"
                 )
@@ -539,7 +539,7 @@ async def update_heartbeat(req: dict):
             enabled=requested_enabled,
             interval_minutes=req.get("interval_minutes"),
             instructions=req.get("instructions"),
-            selected_tools=req.get("selected_tools"),
+            selected_tools=selected_tools,
         )
         heartbeat_service.wake()
         return await get_heartbeat()

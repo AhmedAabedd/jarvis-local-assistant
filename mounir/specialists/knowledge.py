@@ -404,10 +404,20 @@ def _dispatch(name: str, arguments: dict) -> str:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run(task: str) -> str:
+def run(task: str, allowed_tools: list[str] | None = None) -> str:
     """Run the knowledge agent on a task. Returns a short plain-text report."""
     if not config.GEMINI_API_KEY:
         return "Knowledge agent failed: GEMINI_API_KEY is not set."
+
+    allowed = (
+        {str(name) for name in allowed_tools}
+        if allowed_tools is not None
+        else set(_REGISTRY)
+    )
+    tool_schemas = [
+        schema for schema in TOOLS
+        if schema["function"]["name"] in allowed
+    ]
 
     _files_read.clear()  # fresh task — must read a file before modifying it
     retried_empty = False
@@ -420,7 +430,9 @@ def run(task: str) -> str:
 
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
-            message = llm.gemini_chat(messages, tools=TOOLS, model=config.KNOWLEDGE_MODEL)
+            message = llm.gemini_chat(
+                messages, tools=tool_schemas or None, model=config.KNOWLEDGE_MODEL
+            )
         except Exception as exc:
             if executed:
                 # The LLM died AFTER tools ran (e.g. rate limit on the report
@@ -462,7 +474,11 @@ def run(task: str) -> str:
                 args = json.loads(tc["function"].get("arguments") or "{}")
             except Exception:
                 args = {}
-            result = _dispatch(name, args)
+            result = (
+                _dispatch(name, args)
+                if name in allowed
+                else f"Tool {name} is not allowed for this run."
+            )
             trace.tool(name, args, result)
             executed.append(f"{name} -> {result}")
             messages.append(

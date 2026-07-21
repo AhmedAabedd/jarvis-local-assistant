@@ -34,6 +34,7 @@ from mounir import (
 from mounir.agent import Agent
 from mounir.memory import Conversation
 from mounir.specialists import mcp_agent
+from mounir.specialists import system as system_agent
 from mounir.specialists.mcp_agent import _call, _mcp_session, _system_prompt, discover_tools
 from mounir.telegram_bridge import TelegramBridge
 
@@ -168,6 +169,109 @@ class DatabaseTests(TemporaryDatabaseTest):
             item for item in db.get_heartbeat_targets() if item["id"] == email["id"]
         )
         self.assertEqual(target["allowed_tools"], ["search_emails"])
+
+    def test_heartbeat_includes_builtins_and_defaults_to_their_safe_tools(self):
+        db.init()
+        capabilities = {
+            agent["key"]: agent for agent in db.get_heartbeat_capabilities()
+        }
+
+        self.assertTrue(
+            {"builtin:media", "builtin:knowledge", "builtin:system"}
+            <= capabilities.keys()
+        )
+        system_tools = {
+            tool["name"]: tool
+            for tool in capabilities["builtin:system"]["tools"]
+        }
+        self.assertTrue(system_tools["system_status"]["selected"])
+        self.assertFalse(system_tools["system_status"]["requires_confirmation"])
+        self.assertFalse(system_tools["set_volume"]["selected"])
+        self.assertTrue(system_tools["set_volume"]["requires_confirmation"])
+
+        with self.assertRaisesRegex(ValueError, "require confirmation"):
+            db.update_heartbeat_settings(
+                selected_tools=[
+                    {"agent_key": "builtin:system", "tool_name": "set_volume"}
+                ]
+            )
+        db.update_heartbeat_settings(
+            selected_tools=[
+                {"agent_key": "builtin:system", "tool_name": "system_status"}
+            ]
+        )
+        target = next(
+            item
+            for item in db.get_heartbeat_targets()
+            if item["id"] == "builtin:system"
+        )
+        self.assertEqual(target["allowed_tools"], ["system_status"])
+        saved_capabilities = {
+            agent["key"]: agent for agent in db.get_heartbeat_capabilities()
+        }
+        self.assertFalse(
+            any(
+                tool["selected"]
+                for tool in saved_capabilities["builtin:media"]["tools"]
+            )
+        )
+
+    def test_builtin_specialist_enforces_heartbeat_tool_allowlist(self):
+        calls = []
+        replies = iter(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "function": {
+                                "name": "set_volume",
+                                "arguments": '{"action":"mute"}',
+                            },
+                        }
+                    ],
+                },
+                {"content": "Nothing needs attention.", "tool_calls": []},
+            ]
+        )
+
+        def fake_chat(messages, tools=None, model=None):
+            calls.append(tools)
+            return next(replies)
+
+        with (
+            patch.object(config, "NVIDIA_API_KEY", "test-key"),
+            patch.object(system_agent, "_context", return_value="test device"),
+            patch.object(system_agent.llm, "nvidia_chat", side_effect=fake_chat),
+            patch.object(system_agent, "_dispatch") as dispatch,
+        ):
+            report = system_agent.run(
+                "Check the computer.", allowed_tools=["system_status"]
+            )
+
+        self.assertEqual(report, "Nothing needs attention.")
+        self.assertEqual(
+            [schema["function"]["name"] for schema in calls[0]],
+            ["system_status"],
+        )
+        dispatch.assert_not_called()
+
+    def test_heartbeat_runner_dispatches_selected_builtin(self):
+        db.init()
+        db.update_heartbeat_settings(
+            selected_tools=[
+                {"agent_key": "builtin:media", "tool_name": "find_media"}
+            ]
+        )
+        with patch.object(
+            heartbeat_mod.builtin_agents, "run", return_value="HEARTBEAT_OK"
+        ) as run_builtin:
+            self.assertEqual(heartbeat_mod.run_once(), ("quiet", ""))
+
+        run_builtin.assert_called_once()
+        self.assertEqual(run_builtin.call_args.args[0], "media")
+        self.assertEqual(run_builtin.call_args.args[2], ["find_media"])
 
     def test_heartbeat_runner_suppresses_quiet_checks_and_persists_alerts(self):
         db.init()
@@ -321,7 +425,8 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertTrue(
             {
                 "heartbeat_settings", "heartbeat_tools", "heartbeat_runs",
-                "heartbeat_agent_state",
+                "heartbeat_agent_state", "heartbeat_builtin_tools",
+                "heartbeat_builtin_agent_state", "heartbeat_agent_preferences",
             }
             <= heartbeat_tables
         )

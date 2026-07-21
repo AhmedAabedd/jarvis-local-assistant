@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import config as cfg, default_agents
+from . import builtin_agents, config as cfg, default_agents
 
 DB_PATH: Path = cfg.DATA_DIR / "mounir.db"
 LEGACY_REGISTRY: Path = cfg.DATA_DIR / "mcp_agents.json"
@@ -181,6 +181,18 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (subagent_id, tool_name)
         );
 
+        CREATE TABLE IF NOT EXISTS heartbeat_builtin_tools (
+            builtin_key TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (builtin_key, tool_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS heartbeat_agent_preferences (
+            agent_key TEXT PRIMARY KEY,
+            configured_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS heartbeat_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             trigger TEXT NOT NULL,
@@ -194,6 +206,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS heartbeat_agent_state (
             subagent_id INTEGER PRIMARY KEY
                 REFERENCES subagents(id) ON DELETE CASCADE,
+            last_report TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS heartbeat_builtin_agent_state (
+            builtin_key TEXT PRIMARY KEY,
             last_report TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         );
@@ -1007,23 +1025,27 @@ def update_heartbeat_settings(
         if len(instructions) > 2000:
             raise ValueError("heartbeat instructions must be 2000 characters or fewer")
 
-    normalized_tools: list[tuple[int, str]] | None = None
+    normalized_tools: list[tuple[str, str]] | None = None
     if selected_tools is not None:
         if not isinstance(selected_tools, list):
             raise ValueError("selected_tools must be a list")
         normalized_tools = []
-        seen: set[tuple[int, str]] = set()
+        seen: set[tuple[str, str]] = set()
         for entry in selected_tools:
             if not isinstance(entry, dict):
                 raise ValueError("each heartbeat tool selection must be an object")
-            try:
-                subagent_id = int(entry.get("subagent_id"))
-            except (TypeError, ValueError) as exc:
-                raise ValueError("heartbeat tool selection has an invalid subagent") from exc
+            agent_key = str(entry.get("agent_key") or "").strip()
+            if not agent_key:
+                try:
+                    agent_key = f"mcp:{int(entry.get('subagent_id'))}"
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "heartbeat tool selection has an invalid subagent"
+                    ) from exc
             tool_name = str(entry.get("tool_name") or "").strip()
             if not tool_name:
                 raise ValueError("heartbeat tool selection has no tool name")
-            key = (subagent_id, tool_name)
+            key = (agent_key, tool_name)
             if key not in seen:
                 seen.add(key)
                 normalized_tools.append(key)
@@ -1041,7 +1063,7 @@ def update_heartbeat_settings(
         )
         if normalized_tools is not None:
             valid = {
-                (int(row["subagent_id"]), row["name"])
+                (f"mcp:{int(row['subagent_id'])}", row["name"])
                 for row in conn.execute(
                     """
                     SELECT s.id AS subagent_id, t.name
@@ -1050,30 +1072,69 @@ def update_heartbeat_settings(
                     """
                 )
             }
+            confirmation_rules = {
+                f"mcp:{int(row['id'])}": set(
+                    json.loads(row["confirm_tools"] or "[]")
+                )
+                for row in conn.execute("SELECT id, confirm_tools FROM subagents")
+            }
+            builtin_capabilities = builtin_agents.capabilities()
+            for agent in builtin_capabilities:
+                confirmation_rules[agent["key"]] = {
+                    tool["name"]
+                    for tool in agent["tools"]
+                    if tool["requires_confirmation"]
+                }
+                valid.update(
+                    (agent["key"], tool["name"])
+                    for tool in agent["tools"]
+                )
             unknown = [key for key in normalized_tools if key not in valid]
             if unknown:
                 raise ValueError("one or more selected heartbeat tools are unavailable")
-            confirmation_rules = {
-                int(row["id"]): set(json.loads(row["confirm_tools"] or "[]"))
-                for row in conn.execute("SELECT id, confirm_tools FROM subagents")
-            }
             protected = [
-                (agent_id, name)
-                for agent_id, name in normalized_tools
-                if "*" in confirmation_rules.get(agent_id, {"*"})
-                or name in confirmation_rules.get(agent_id, {"*"})
+                (agent_key, name)
+                for agent_key, name in normalized_tools
+                if "*" in confirmation_rules.get(agent_key, {"*"})
+                or name in confirmation_rules.get(agent_key, {"*"})
             ]
             if protected:
                 raise ValueError(
                     "tools that require confirmation cannot run in the heartbeat"
                 )
             conn.execute("DELETE FROM heartbeat_tools")
+            conn.execute("DELETE FROM heartbeat_builtin_tools")
             conn.executemany(
                 """
                 INSERT INTO heartbeat_tools (subagent_id, tool_name, created_at)
                 VALUES (?, ?, ?)
                 """,
-                [(agent_id, name, now) for agent_id, name in normalized_tools],
+                [
+                    (int(agent_key.removeprefix("mcp:")), name, now)
+                    for agent_key, name in normalized_tools
+                    if agent_key.startswith("mcp:")
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT INTO heartbeat_builtin_tools
+                    (builtin_key, tool_name, created_at)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (agent_key, name, now)
+                    for agent_key, name in normalized_tools
+                    if agent_key.startswith("builtin:")
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT INTO heartbeat_agent_preferences (agent_key, configured_at)
+                VALUES (?, ?)
+                ON CONFLICT(agent_key) DO UPDATE SET
+                    configured_at = excluded.configured_at
+                """,
+                [(agent_key, now) for agent_key in confirmation_rules],
             )
         fields = {"updated_at": now}
         if enabled is not None:
@@ -1099,12 +1160,27 @@ def update_heartbeat_settings(
 
 
 def get_heartbeat_capabilities() -> list[dict]:
-    """Return cached MCP tools grouped by subagent for heartbeat configuration."""
+    """Return built-in and cached MCP tools grouped for heartbeat configuration."""
     with _connect() as conn:
         selected = {
-            (int(row["subagent_id"]), row["tool_name"])
+            (f"mcp:{int(row['subagent_id'])}", row["tool_name"])
             for row in conn.execute("SELECT subagent_id, tool_name FROM heartbeat_tools")
         }
+        selected.update(
+            (row["builtin_key"], row["tool_name"])
+            for row in conn.execute(
+                "SELECT builtin_key, tool_name FROM heartbeat_builtin_tools"
+            )
+        )
+        configured = {
+            row["agent_key"]
+            for row in conn.execute(
+                "SELECT agent_key FROM heartbeat_agent_preferences"
+            )
+        }
+        # Preserve the meaning of selections made before per-agent preference
+        # tracking was introduced.
+        configured.update(agent_key for agent_key, _ in selected)
         agents = conn.execute(
             """
             SELECT s.id, s.name, s.confirm_tools, s.mcp_server_id,
@@ -1128,7 +1204,7 @@ def get_heartbeat_capabilities() -> list[dict]:
             {
                 "name": row["name"],
                 "description": row["description"] or "",
-                "selected": (int(row["subagent_id"]), row["name"]) in selected,
+                "selected": False,
             }
         )
     result = []
@@ -1138,24 +1214,41 @@ def get_heartbeat_capabilities() -> list[dict]:
         except (json.JSONDecodeError, TypeError):
             protected = {"*"}
         tools = grouped.get(int(row["id"]), [])
+        agent_key = f"mcp:{int(row['id'])}"
         for tool in tools:
             tool["requires_confirmation"] = (
                 "*" in protected or tool["name"] in protected
             )
+            tool["selected"] = (
+                (agent_key, tool["name"]) in selected
+                if agent_key in configured
+                else not tool["requires_confirmation"]
+            )
         result.append(
             {
                 "id": int(row["id"]),
+                "key": agent_key,
+                "kind": "mcp",
                 "name": row["name"],
                 "connection_status": row["connection_status"] or "untested",
                 "tools": tools,
             }
         )
-    return result
+    builtins = builtin_agents.capabilities()
+    for agent in builtins:
+        for tool in agent["tools"]:
+            tool["selected"] = (
+                (agent["key"], tool["name"]) in selected
+                if agent["key"] in configured
+                else not tool["requires_confirmation"]
+            )
+    return [*builtins, *result]
 
 
 def get_heartbeat_targets() -> list[dict]:
-    """Return resolved subagent specs with only their selected safe tools."""
+    """Return resolved built-in and MCP specs with selected safe tools only."""
     selected: dict[int, list[str]] = {}
+    selected_builtins: dict[str, list[str]] = {}
     with _connect() as conn:
         for row in conn.execute(
             """
@@ -1169,20 +1262,58 @@ def get_heartbeat_targets() -> list[dict]:
             """
         ):
             selected.setdefault(int(row["subagent_id"]), []).append(row["tool_name"])
+        for row in conn.execute(
+            """
+            SELECT builtin_key, tool_name
+            FROM heartbeat_builtin_tools
+            ORDER BY builtin_key, tool_name
+            """
+        ):
+            selected_builtins.setdefault(row["builtin_key"], []).append(
+                row["tool_name"]
+            )
     targets = []
+    for agent in builtin_agents.capabilities():
+        chosen = selected_builtins.get(agent["key"], [])
+        safe_names = {
+            tool["name"]
+            for tool in agent["tools"]
+            if not tool["requires_confirmation"]
+        }
+        safe = [name for name in chosen if name in safe_names]
+        if safe:
+            targets.append(
+                {
+                    "id": agent["key"],
+                    "kind": "builtin",
+                    "builtin_key": agent["builtin_key"],
+                    "name": agent["name"],
+                    "allowed_tools": safe,
+                }
+            )
     for spec in build_specs():
         chosen = selected.get(int(spec["id"]), [])
         protected = set(spec.get("confirm_tools") or [])
         safe = [name for name in chosen if "*" not in protected and name not in protected]
         if safe:
             target = dict(spec)
+            target["kind"] = "mcp"
             target["allowed_tools"] = safe
             targets.append(target)
     return targets
 
 
-def get_heartbeat_agent_report(subagent_id: int) -> str:
+def get_heartbeat_agent_report(subagent_id: int | str) -> str:
     with _connect() as conn:
+        if isinstance(subagent_id, str) and subagent_id.startswith("builtin:"):
+            row = conn.execute(
+                """
+                SELECT last_report FROM heartbeat_builtin_agent_state
+                WHERE builtin_key = ?
+                """,
+                (subagent_id,),
+            ).fetchone()
+            return (row["last_report"] or "") if row else ""
         row = conn.execute(
             "SELECT last_report FROM heartbeat_agent_state WHERE subagent_id = ?",
             (subagent_id,),
@@ -1190,8 +1321,22 @@ def get_heartbeat_agent_report(subagent_id: int) -> str:
     return (row["last_report"] or "") if row else ""
 
 
-def set_heartbeat_agent_report(subagent_id: int, report: str) -> None:
+def set_heartbeat_agent_report(subagent_id: int | str, report: str) -> None:
     with _connect() as conn:
+        if isinstance(subagent_id, str) and subagent_id.startswith("builtin:"):
+            conn.execute(
+                """
+                INSERT INTO heartbeat_builtin_agent_state
+                    (builtin_key, last_report, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(builtin_key) DO UPDATE SET
+                    last_report = excluded.last_report,
+                    updated_at = excluded.updated_at
+                """,
+                (subagent_id, str(report or "").strip()[:8000], _now()),
+            )
+            conn.commit()
+            return
         conn.execute(
             """
             INSERT INTO heartbeat_agent_state (subagent_id, last_report, updated_at)
@@ -1825,6 +1970,11 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
 def delete_subagent(subagent_id: int) -> bool:
     with _connect() as conn:
         cur = conn.execute("DELETE FROM subagents WHERE id = ?", (subagent_id,))
+        if cur.rowcount:
+            conn.execute(
+                "DELETE FROM heartbeat_agent_preferences WHERE agent_key = ?",
+                (f"mcp:{int(subagent_id)}",),
+            )
         conn.commit()
         return cur.rowcount > 0
 

@@ -481,10 +481,20 @@ def _context() -> str:
     return f"DEVICE: {_device_info()}\n{state}."
 
 
-def run(task: str) -> str:
+def run(task: str, allowed_tools: list[str] | None = None) -> str:
     """Run the system agent on a task. Returns a short plain-text report."""
     if not config.NVIDIA_API_KEY:
         return "System agent failed: NVIDIA_API_KEY is not set."
+
+    allowed = (
+        {str(name) for name in allowed_tools}
+        if allowed_tools is not None
+        else set(_REGISTRY)
+    )
+    tool_schemas = [
+        schema for schema in TOOLS
+        if schema["function"]["name"] in allowed
+    ]
 
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
@@ -495,7 +505,9 @@ def run(task: str) -> str:
 
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
-            message = llm.nvidia_chat(messages, tools=TOOLS, model=config.SYSTEM_MODEL)
+            message = llm.nvidia_chat(
+                messages, tools=tool_schemas or None, model=config.SYSTEM_MODEL
+            )
         except Exception as exc:
             if executed:
                 # The LLM died AFTER tools ran (e.g. rate limit on the report
@@ -536,7 +548,11 @@ def run(task: str) -> str:
                 args = json.loads(tc["function"].get("arguments") or "{}")
             except Exception:
                 args = {}
-            result = _dispatch(name, args)
+            result = (
+                _dispatch(name, args)
+                if name in allowed
+                else f"Tool {name} is not allowed for this run."
+            )
             trace.tool(name, args, result)
             executed.append(f"{name} -> {result}")
             messages.append(

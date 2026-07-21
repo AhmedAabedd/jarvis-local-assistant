@@ -1,9 +1,9 @@
 """Safe, lifecycle-managed heartbeat checks for the web application.
 
-The scheduler never runs the normal conversation agent. Each configured MCP
-subagent receives an isolated check with only the explicitly selected,
-non-confirmation tools exposed. Quiet checks are persisted but not delivered;
-alerts are handed to the application through a callback.
+The scheduler never runs the normal conversation agent. Each configured
+built-in or MCP subagent receives an isolated check with only the explicitly
+selected, non-confirmation tools exposed. Quiet checks are persisted but not
+delivered; alerts are handed to the application through a callback.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
-from . import db, trace
+from . import builtin_agents, db, trace
 from .specialists.mcp_agent import run as run_mcp_agent
 
 QUIET_TOKEN = "HEARTBEAT_OK"
@@ -64,20 +64,28 @@ def run_once() -> tuple[str, str]:
     settings = db.get_heartbeat_settings()
     targets = db.get_heartbeat_targets()
     if not targets:
-        return "skipped", "No safe MCP tools are selected for heartbeat checks."
+        return "skipped", "No safe tools are selected for heartbeat checks."
 
     reports: list[str] = []
     for spec in targets:
         trace.node(f"heartbeat · {spec['name']}")
         previous_report = db.get_heartbeat_agent_report(spec["id"])
         task = _target_task(settings["instructions"], previous_report)
-        heartbeat_spec = dict(spec)
-        heartbeat_spec["prompt"] = "\n\n".join(
-            part
-            for part in (spec.get("prompt", "").strip(), HEARTBEAT_AGENT_PROMPT.strip())
-            if part
-        )
-        report = run_mcp_agent(task, heartbeat_spec).strip()
+        if spec.get("kind") == "builtin":
+            report = builtin_agents.run(
+                spec["builtin_key"], task, spec["allowed_tools"]
+            ).strip()
+        else:
+            heartbeat_spec = dict(spec)
+            heartbeat_spec["prompt"] = "\n\n".join(
+                part
+                for part in (
+                    spec.get("prompt", "").strip(),
+                    HEARTBEAT_AGENT_PROMPT.strip(),
+                )
+                if part
+            )
+            report = run_mcp_agent(task, heartbeat_spec).strip()
         if not report or _is_quiet(report):
             # Clearing after a quiet check lets a genuinely recurring event be
             # reported again after it disappeared in between.
