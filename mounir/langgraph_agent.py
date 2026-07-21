@@ -28,6 +28,7 @@ import json
 import operator
 import queue
 import threading
+from contextvars import copy_context
 from importlib import import_module
 from typing import Annotated, Iterator, TypedDict
 
@@ -461,7 +462,10 @@ class Agent:
             finally:
                 stream_q.put(None)
 
-        worker = threading.Thread(target=_run_graph, daemon=True)
+        # Preserve request-scoped state (notably the confirmation destination)
+        # when the graph moves onto its worker thread.
+        turn_context = copy_context()
+        worker = threading.Thread(target=turn_context.run, args=(_run_graph,), daemon=True)
         worker.start()
 
         chunks: list[str] = []

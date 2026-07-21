@@ -155,8 +155,10 @@ async def _call(
         from .. import tools as _tools
 
         summary = f"{name} {json.dumps(args, ensure_ascii=False)[:400]}"
-        # confirm_fn blocks (terminal prompt / Telegram reply) — off the loop.
-        allowed = await asyncio.to_thread(_tools.confirm_fn, summary)
+        # Confirmation blocks (browser / Telegram / terminal) — off the loop.
+        # Context routing makes the prompt return to the interface that owns
+        # this turn, even when web and Telegram are running together.
+        allowed = await asyncio.to_thread(_tools.request_confirmation, summary)
         if not allowed:
             return "User declined — action cancelled. Do not retry.", False
     try:

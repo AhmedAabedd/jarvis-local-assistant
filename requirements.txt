@@ -12,7 +12,7 @@ groq>=0.13
 # CLI — live markdown rendering of the streamed reply
 rich>=13.0
 
-# Telegram bridge (telegram_cli.py) — long-polling bot
+# Telegram bridge (started by server.py; telegram_cli.py remains standalone)
 pyTelegramBotAPI>=4.14
 
 # play_on_youtube: resolve a search to the top video, no API key

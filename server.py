@@ -7,6 +7,9 @@ Serves:
   - WS   /ws/chat          -> text chat, streams Mounir's reply token by token
   - POST /api/voice        -> upload audio, returns transcript + spoken reply (base64 wav)
 
+Also owns the heartbeat scheduler and, when configured, the Telegram
+long-polling bridge. All user interfaces share one serialized Agent instance.
+
 Run with:
     pip install fastapi uvicorn psutil python-multipart
     python server.py
@@ -34,11 +37,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from mounir.agent import Agent
-from mounir import config as cfg, db, llm
+from mounir import config as cfg, db, llm, trace
 from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
 from mounir.heartbeat import HeartbeatService
 from mounir.specialists.mcp_agent import discover_tools
+from mounir.telegram_bridge import TelegramBridge
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_PORT = int(os.environ.get("MOUNIR_WEB_PORT", "8000"))
@@ -136,14 +140,22 @@ async def _deliver_heartbeat_alert(message: str) -> None:
 
 
 heartbeat_service = HeartbeatService(_deliver_heartbeat_alert)
+telegram_service = TelegramBridge(agent=agent, turn_lock=_agent_lock)
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     await heartbeat_service.start()
+    telegram_started = False
+    if cfg.TELEGRAM_ENABLED:
+        telegram_started = telegram_service.start_background()
+        if not telegram_started:
+            trace.kv("telegram", f"not started: {telegram_service.last_error}")
     try:
         yield
     finally:
+        if telegram_started:
+            await asyncio.to_thread(telegram_service.stop)
         await heartbeat_service.stop()
 
 
@@ -240,10 +252,11 @@ async def ws_chat(ws: WebSocket):
     def produce(text: str):
         try:
             with _agent_lock:
-                for chunk in agent.respond(text):
-                    loop.call_soon_threadsafe(
-                        out.put_nowait, {"type": "chunk", "text": chunk}
-                    )
+                with tools.use_confirmation_handler(_web_confirm):
+                    for chunk in agent.respond(text):
+                        loop.call_soon_threadsafe(
+                            out.put_nowait, {"type": "chunk", "text": chunk}
+                        )
         except Exception as exc:
             loop.call_soon_threadsafe(out.put_nowait, {"type": "error", "message": str(exc)})
         finally:
@@ -317,7 +330,8 @@ async def voice_turn(file: UploadFile = File(...)):
     loop = asyncio.get_event_loop()
     def respond() -> str:
         with _agent_lock:
-            return "".join(agent.respond(text))
+            with tools.use_confirmation_handler(_web_confirm):
+                return "".join(agent.respond(text))
 
     reply = await loop.run_in_executor(None, respond)
 

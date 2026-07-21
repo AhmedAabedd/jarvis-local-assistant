@@ -90,7 +90,8 @@ Key pieces in `langgraph_agent.py`:
   `MAX_DELEGATIONS = 3`).
 - `Agent.respond()` is the public API used by `cli.py`, `voice_cli.py`,
   `telegram_cli.py`, and `server.py`; it yields reply chunks and persists the
-  full turn to memory.
+  full turn to memory. The server's web and Telegram transports share one
+  `Agent`, one conversation, and one turn lock.
 
 ### Why this shape
 
@@ -437,6 +438,20 @@ from the old built-in specialists.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | – | Bot token from @BotFather (long-polling — nothing exposed) |
 | `TELEGRAM_CHAT_ID` | – | The one chat allowed to talk to the assistant |
+| `MOUNIR_TELEGRAM_ENABLED` | `true` | Start Telegram automatically with `server.py` |
+
+When `TELEGRAM_BOT_TOKEN` is configured, `python server.py` starts Telegram in
+a managed background thread alongside the web dashboard and heartbeat. Web and
+Telegram turns use the same conversation and are serialized so they cannot
+modify the shared history simultaneously. Tool confirmations return to the
+interface that initiated the turn: browser turns ask in the browser, Telegram
+turns ask in Telegram.
+
+`python telegram_cli.py` remains available to run only the Telegram bridge.
+Do not run it with the same bot token while the web server's bridge is active,
+because Telegram permits only one long-poll consumer per bot. To test the
+standalone entry point while the server is running, start the server with
+`MOUNIR_TELEGRAM_ENABLED=false`.
 
 ### Voice / wake word
 
@@ -507,7 +522,7 @@ profile-neutral; the live profile now comes from SQLite at runtime.
 
 ```bash
 sudo apt install ffmpeg
-python server.py            # http://localhost:8000  +  http://localhost:8000/admin
+python server.py            # web + admin + Telegram (when its token is configured)
 ```
 
 The web app binds to `127.0.0.1` by default because it can execute local tools
@@ -552,6 +567,7 @@ mounir/
   __init__.py
   agent.py              thin compatibility wrapper around the LangGraph agent
   langgraph_agent.py    the supervisor + specialists graph (built-ins + dynamic MCP agents)
+  telegram_bridge.py    reusable lifecycle-managed Telegram transport
   config.py             all tunables (env-overridable) + the supervisor prompt
   browser_control.py    cross-platform default-browser discovery/open/close adapter
   llm.py                provider clients (Ollama stream, Mistral, Groq, NVIDIA, generic OpenAI)
@@ -609,9 +625,9 @@ persisted status and proactive dashboard alerts.
   tool chatter leak into the supervisor's context — only a compact report.
 - File edits are exact-string replacement (`edit_file` / `modify_file`), not
   full rewrites, and require the file to have been read first.
-- `tools.confirm_fn` gates outward-facing actions. The CLI uses a terminal
-  prompt; `server.py` swaps in a WebSocket confirmation so the browser can
-  approve.
+- `tools.request_confirmation()` gates outward-facing actions. Its
+  request-scoped handler routes approval to the interface that started the
+  turn; `tools.confirm_fn` remains the fallback used by standalone CLIs.
 - API keys for built-in specialists come from environment variables. Dynamic
   model and MCP credentials are entered through the admin UI and stored in the
   user-only SQLite database.

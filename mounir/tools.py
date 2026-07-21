@@ -10,7 +10,10 @@ from __future__ import annotations
 import datetime
 import shutil
 import subprocess
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from typing import Callable, Iterator
 
 from . import browser_control, config
 
@@ -197,6 +200,30 @@ def _default_confirm(action: str) -> bool:
 # is, those tools never act unless this returns True.
 confirm_fn = _default_confirm
 
+# A running server can accept turns from several interfaces at once (web,
+# Telegram, and later others).  The fallback above preserves the simple CLI
+# contract, while this context-local override routes a turn's confirmations
+# back to the interface that started that turn.
+_turn_confirm_fn: ContextVar[Callable[[str], bool] | None] = ContextVar(
+    "mounir_turn_confirm_fn", default=None
+)
+
+
+@contextmanager
+def use_confirmation_handler(handler: Callable[[str], bool]) -> Iterator[None]:
+    """Route confirmations in the current turn to ``handler`` only."""
+    token = _turn_confirm_fn.set(handler)
+    try:
+        yield
+    finally:
+        _turn_confirm_fn.reset(token)
+
+
+def request_confirmation(action: str) -> bool:
+    """Ask through the current interface, falling back to ``confirm_fn``."""
+    handler = _turn_confirm_fn.get() or confirm_fn
+    return handler(action)
+
 # Returned VERBATIM when the user declines a command. The supervisor loop
 # checks for this exact string and ends the turn with a fixed reply, instead
 # of handing the decline back to the model (which tends to retry or argue).
@@ -225,7 +252,7 @@ def close_browser() -> str:
     app = browser_control.default_browser()
     if app is None:
         return "Could not identify the operating system's default browser."
-    if not confirm_fn(f"Close {app.name} and all of its open windows?"):
+    if not request_confirmation(f"Close {app.name} and all of its open windows?"):
         return USER_DECLINED
     _, message = browser_control.close_default(app)
     return message
@@ -314,7 +341,7 @@ def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: b
     command = (command or "").strip()
     if not command:
         return "No command given."
-    if not confirm_fn(command):
+    if not request_confirmation(command):
         return USER_DECLINED
 
     if run_in_background:

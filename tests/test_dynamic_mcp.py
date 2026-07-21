@@ -8,25 +8,32 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 # Keep tests away from the owner's real ~/.mounir database.
 _IMPORT_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["MOUNIR_DATA_DIR"] = _IMPORT_DATA_DIR.name
+os.environ["MOUNIR_TELEGRAM_ENABLED"] = "false"
 
 from mounir import (
     browser_control,
     config,
     db,
     heartbeat as heartbeat_mod,
+    langgraph_agent,
     mcp_agents,
     tools as mounir_tools,
 )
+from mounir.agent import Agent
+from mounir.memory import Conversation
 from mounir.specialists import mcp_agent
 from mounir.specialists.mcp_agent import _call, _mcp_session, _system_prompt, discover_tools
+from mounir.telegram_bridge import TelegramBridge
 
 
 class TemporaryDatabaseTest(unittest.TestCase):
@@ -1100,6 +1107,137 @@ class AdminApiTests(TemporaryDatabaseTest):
                 web_server.agent.conversation.reset()
 
         asyncio.run(exercise_api())
+
+
+class InterfaceRoutingTests(unittest.TestCase):
+    def test_server_lifespan_owns_telegram_bridge(self):
+        import server as web_server
+
+        events = []
+
+        async def heartbeat_start():
+            events.append("heartbeat-start")
+
+        async def heartbeat_stop():
+            events.append("heartbeat-stop")
+
+        def telegram_start():
+            events.append("telegram-start")
+            return True
+
+        def telegram_stop():
+            events.append("telegram-stop")
+
+        async def exercise_lifespan():
+            with (
+                patch.object(web_server.cfg, "TELEGRAM_ENABLED", True),
+                patch.object(web_server.heartbeat_service, "start", heartbeat_start),
+                patch.object(web_server.heartbeat_service, "stop", heartbeat_stop),
+                patch.object(web_server.telegram_service, "start_background", telegram_start),
+                patch.object(web_server.telegram_service, "stop", telegram_stop),
+            ):
+                async with web_server._lifespan(web_server.app):
+                    events.append("serving")
+
+        asyncio.run(exercise_lifespan())
+        self.assertEqual(
+            events,
+            [
+                "heartbeat-start",
+                "telegram-start",
+                "serving",
+                "telegram-stop",
+                "heartbeat-stop",
+            ],
+        )
+
+    def test_confirmation_handler_reaches_the_agent_graph_worker(self):
+        observed = []
+
+        def compile_graph(stream_q, *_args, **_kwargs):
+            class Graph:
+                def invoke(self, state):
+                    observed.append(mounir_tools.request_confirmation("safe?"))
+                    stream_q.put("done")
+                    return {
+                        "messages": state["messages"] + [
+                            {"role": "assistant", "content": "done"}
+                        ]
+                    }
+
+            return Graph()
+
+        agent = Agent(conversation=Conversation(system_prompt="test"))
+        with (
+            patch.object(langgraph_agent, "_compile_graph", side_effect=compile_graph),
+            patch.object(mounir_tools, "confirm_fn", return_value=False),
+            mounir_tools.use_confirmation_handler(lambda _action: True),
+        ):
+            reply = "".join(agent.respond("hello"))
+
+        self.assertEqual(reply, "done")
+        self.assertEqual(observed, [True])
+
+    def test_telegram_turn_uses_telegram_confirmation_and_shared_agent(self):
+        class FakeBot:
+            def __init__(self):
+                self.handlers = []
+                self.sent = []
+
+            def register_message_handler(self, handler, **filters):
+                self.handlers.append((handler, filters))
+
+            def send_message(self, chat_id, text, **kwargs):
+                self.sent.append((chat_id, text, kwargs))
+
+            def reply_to(self, message, text):
+                self.sent.append((message.chat.id, text, {}))
+
+            def send_chat_action(self, *_args, **_kwargs):
+                return None
+
+            def stop_polling(self):
+                return None
+
+        class FakeAgent:
+            def __init__(self):
+                self.conversation = Conversation(system_prompt="test")
+                self.requests = []
+
+            def respond(self, text):
+                self.requests.append(text)
+                self.confirmed = mounir_tools.request_confirmation("send email?")
+                yield "Telegram reply"
+
+        fake_bot = FakeBot()
+        fake_agent = FakeAgent()
+        bridge = TelegramBridge(
+            agent=fake_agent,
+            turn_lock=threading.Lock(),
+            token="123:abc",
+            chat_id="42",
+            bot_factory=lambda _token: fake_bot,
+        )
+        message = SimpleNamespace(chat=SimpleNamespace(id=42), text="hello")
+
+        with (
+            patch.object(mounir_tools, "confirm_fn", return_value=False) as fallback,
+            patch.object(bridge, "_telegram_confirm", return_value=True) as confirm,
+        ):
+            bridge._handle_text(message)
+            outside_turn = mounir_tools.request_confirmation("outside")
+
+        self.assertEqual(fake_agent.requests, ["hello"])
+        self.assertTrue(fake_agent.confirmed)
+        confirm.assert_called_once_with("send email?")
+        self.assertFalse(outside_turn)
+        fallback.assert_called_once_with("outside")
+        self.assertEqual(fake_bot.sent[-1][1], "Telegram reply")
+
+    def test_telegram_without_token_does_not_start(self):
+        bridge = TelegramBridge(token="", chat_id="")
+        self.assertFalse(bridge.start_background())
+        self.assertIn("TELEGRAM_BOT_TOKEN", bridge.last_error)
 
 
 class BrowserToolTests(unittest.TestCase):

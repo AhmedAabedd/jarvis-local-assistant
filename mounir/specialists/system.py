@@ -295,8 +295,7 @@ def suspend() -> str:
     """Suspend the laptop — asks the user to confirm first."""
     from .. import tools as _tools  # confirm flow is owned by the tools module
 
-    confirm = getattr(_tools, "confirm_fn", None)
-    if confirm is None or not confirm(
+    if not _tools.request_confirmation(
         "Suspend the laptop? It stops responding (Telegram too) until "
         "someone wakes it up physically."
     ):
