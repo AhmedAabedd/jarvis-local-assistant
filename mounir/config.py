@@ -267,6 +267,7 @@ USE_GROQ: bool = os.environ.get("USE_GROQ", "false").lower() in ("1", "true", "y
 # --- Mistral ----------------------------------------------------------------
 MISTRAL_API_KEY: str = os.environ.get("MISTRAL_API_KEY", "")
 MISTRAL_MODEL: str = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
+MISTRAL_BASE_URL: str = os.environ.get("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
 USE_MISTRAL: bool = os.environ.get("USE_MISTRAL", "false").lower() in ("1", "true", "yes")
 
 

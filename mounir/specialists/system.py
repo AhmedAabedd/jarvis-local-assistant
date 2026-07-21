@@ -483,8 +483,15 @@ def _context() -> str:
 
 def run(task: str, allowed_tools: list[str] | None = None) -> str:
     """Run the system agent on a task. Returns a short plain-text report."""
-    if not config.NVIDIA_API_KEY:
-        return "System agent failed: NVIDIA_API_KEY is not set."
+    from .. import db
+    runtime = db.get_builtin_agent_runtime(
+        "system",
+        fallback_model=config.SYSTEM_MODEL,
+        fallback_base_url=config.NVIDIA_BASE_URL,
+        fallback_api_key=config.NVIDIA_API_KEY,
+    )
+    if not runtime["api_key"]:
+        return "System agent failed: its NVIDIA API key is not set."
 
     allowed = (
         {str(name) for name in allowed_tools}
@@ -506,7 +513,11 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
             message = llm.nvidia_chat(
-                messages, tools=tool_schemas or None, model=config.SYSTEM_MODEL
+                messages,
+                tools=tool_schemas or None,
+                model=runtime["model"],
+                base_url=runtime["base_url"],
+                api_key=runtime["api_key"],
             )
         except Exception as exc:
             if executed:

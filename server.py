@@ -558,41 +558,49 @@ async def run_heartbeat_now():
 @app.get("/api/agent-overview")
 async def agent_overview():
     """Return the configured, user-visible agent topology for Agent Studio."""
-    if cfg.USE_MISTRAL:
-        supervisor_provider = "Mistral"
-    elif cfg.USE_GROQ:
-        supervisor_provider = "Groq"
-    else:
-        supervisor_provider = "Ollama (local)"
+    supervisor_tools = []
+    for schema in tools.SCHEMAS:
+        function = schema.get("function") or {}
+        name = str(function.get("name") or "").strip()
+        if name and not name.startswith("delegate_to_"):
+            supervisor_tools.append(
+                {
+                    "name": name,
+                    "description": str(function.get("description") or ""),
+                }
+            )
 
     profile = db.get_profile()
+    supervisor = db.get_supervisor_config()
     return {
         "supervisor": {
+            **supervisor,
             "name": profile["assistant_name"],
-            "model": llm.active_model(agent.model),
-            "provider": supervisor_provider,
+            "description": (
+                "Understands your request, uses local computer tools, and "
+                "coordinates the right specialist for focused work."
+            ),
+            "tools": supervisor_tools,
         },
-        "builtins": [
-            {
-                "name": "Media",
-                "model": cfg.MEDIA_MODEL,
-                "provider": "NVIDIA",
-                "description": "Images, documents, audio and video",
-            },
-            {
-                "name": "Knowledge",
-                "model": cfg.KNOWLEDGE_MODEL,
-                "provider": "Gemini",
-                "description": "Long-term knowledge management",
-            },
-            {
-                "name": "System",
-                "model": cfg.SYSTEM_MODEL,
-                "provider": "NVIDIA",
-                "description": "Computer and hardware controls",
-            },
-        ],
+        "builtins": db.list_builtin_agents(),
     }
+
+
+@app.put("/api/supervisor")
+async def update_supervisor(req: dict):
+    try:
+        db.update_supervisor_model(req.get("model_id"))
+        return (await agent_overview())["supervisor"]
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/builtin-agents/{agent_key}")
+async def update_builtin_agent(agent_key: str, req: dict):
+    try:
+        return db.update_builtin_agent_model(agent_key, req.get("model_id"))
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 @app.get("/api/models")
 async def list_models():

@@ -406,8 +406,15 @@ def _dispatch(name: str, arguments: dict) -> str:
 
 def run(task: str, allowed_tools: list[str] | None = None) -> str:
     """Run the knowledge agent on a task. Returns a short plain-text report."""
-    if not config.GEMINI_API_KEY:
-        return "Knowledge agent failed: GEMINI_API_KEY is not set."
+    from .. import db
+    runtime = db.get_builtin_agent_runtime(
+        "knowledge",
+        fallback_model=config.KNOWLEDGE_MODEL,
+        fallback_base_url=config.GEMINI_BASE_URL,
+        fallback_api_key=config.GEMINI_API_KEY,
+    )
+    if not runtime["api_key"]:
+        return "Knowledge agent failed: its Gemini API key is not set."
 
     allowed = (
         {str(name) for name in allowed_tools}
@@ -431,7 +438,11 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
             message = llm.gemini_chat(
-                messages, tools=tool_schemas or None, model=config.KNOWLEDGE_MODEL
+                messages,
+                tools=tool_schemas or None,
+                model=runtime["model"],
+                base_url=runtime["base_url"],
+                api_key=runtime["api_key"],
             )
         except Exception as exc:
             if executed:

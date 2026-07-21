@@ -384,6 +384,8 @@
   }
   .agent-node.dynamic { cursor: pointer; border-color: rgba(91,156,245,.30); }
   .agent-node.dynamic:hover { border-color: rgba(91,156,245,.72); box-shadow: 0 10px 28px rgba(0,0,0,.28); }
+  .agent-node.builtin { cursor: pointer; }
+  .agent-node.builtin:hover { border-color: rgba(168,85,247,.58); box-shadow: 0 10px 28px rgba(0,0,0,.28); }
   .node-open {
     position: absolute; top: 9px; right: 9px; color: #78aef8;
     opacity: .55; transition: opacity .15s;
@@ -391,9 +393,10 @@
   .agent-node.dynamic:hover .node-open { opacity: 1; }
   .agent-node.supervisor {
     width: 210px; min-width: 210px; border-color: rgba(168,85,247,.58);
-    background: linear-gradient(145deg, rgba(168,85,247,.15), rgba(22,19,31,.98));
-    box-shadow: 0 10px 36px rgba(89,42,132,.2);
+    background: linear-gradient(145deg, #241832, #16131f);
+    box-shadow: 0 10px 36px rgba(89,42,132,.2); cursor: pointer;
   }
+  .agent-node.supervisor:hover { border-color: rgba(190,125,255,.9); box-shadow: 0 12px 38px rgba(89,42,132,.3); }
   .agent-node.telegram-node {
     position: absolute; left: calc(50% - 342px); top: 50%; z-index: 2;
     width: 66px; min-width: 66px; height: 66px; padding: 8px;
@@ -739,6 +742,48 @@
   .modal-confirm .modal-desc { font-size: 13px; color: var(--text-mid); line-height: 1.5; margin-bottom: 22px; }
   .modal-confirm .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
 
+  .modal-builtin {
+    position: relative; width: min(620px, 92vw); max-height: min(760px, 88vh);
+    overflow-y: auto; background: var(--bg-panel); border: 1px solid var(--line);
+    border-radius: 18px; padding: 26px; box-shadow: 0 24px 70px rgba(0,0,0,.6);
+    animation: rise .2s ease;
+  }
+  .builtin-modal-close {
+    position: absolute; top: 15px; right: 16px; width: 30px; height: 30px;
+    border: 1px solid var(--line); border-radius: 9px; background: var(--bg);
+    color: var(--text-mid); font-size: 18px; cursor: pointer;
+  }
+  .builtin-modal-close:hover { color: var(--text); border-color: var(--purple-dim); }
+  .builtin-modal-head { display: flex; align-items: center; gap: 13px; padding-right: 34px; }
+  .builtin-modal-icon {
+    width: 42px; height: 42px; flex: 0 0 42px; display: grid; place-items: center;
+    border: 1px solid rgba(168,85,247,.28); border-radius: 12px;
+    background: var(--soft); color: var(--lav); font-size: 14px; font-weight: 700;
+  }
+  .builtin-modal-title { font-size: 16px; font-weight: 600; }
+  .builtin-modal-provider { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+  .builtin-modal-description { margin: 17px 0 20px; color: var(--text-mid); font-size: 12px; line-height: 1.6; }
+  .builtin-modal-section { margin-top: 19px; }
+  .builtin-modal-section h4 {
+    margin-bottom: 9px; color: var(--text-mid); font-size: 9px;
+    text-transform: uppercase; letter-spacing: .08em;
+  }
+  .builtin-capability-list { border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+  .builtin-capability {
+    padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--bg);
+  }
+  .builtin-capability:last-child { border-bottom: 0; }
+  .builtin-capability strong { display: block; color: var(--lav); font-size: 11px; font-weight: 600; }
+  .builtin-capability span { display: block; margin-top: 3px; color: var(--text-dim); font-size: 9px; line-height: 1.45; }
+  .builtin-model-select {
+    width: 100%; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--bg); color: var(--text); font: inherit; outline: none;
+  }
+  .builtin-model-select:focus { border-color: var(--purple); }
+  .builtin-model-hint { margin-top: 6px; color: var(--text-dim); font-size: 9px; line-height: 1.5; }
+  .builtin-modal-feedback { min-height: 16px; margin-top: 10px; color: var(--danger); font-size: 10px; }
+  .builtin-modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
+
   ::-webkit-scrollbar { width: 7px; height: 7px; }
   ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--purple-dim); }
@@ -889,7 +934,7 @@ const TAB_META = {
   heartbeat: { title: 'Heartbeat', labelSingular: '', subtitle: 'Run safe background checks and surface important updates' },
   telegram: { title: 'Telegram', labelSingular: '', subtitle: 'Use your assistant securely from Telegram' },
   profile: { title: 'Profile', labelSingular: 'Profile', subtitle: 'Who the assistant is and who it works for' },
-  models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Language models available to dynamic subagents' },
+  models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Language models used by built-in and dynamic subagents' },
   servers: { title: 'MCP Servers',   labelSingular: 'Server', subtitle: 'External capabilities connected through MCP' },
   agents:  { title: 'Subagents',     labelSingular: 'Subagent', subtitle: 'Dynamic specialists available to the supervisor' },
 };
@@ -1082,7 +1127,7 @@ function renderOverview() {
                 <img src="/images/telegram.svg" alt="">
                 <span class="telegram-node-label">Telegram</span>
               </article>` : ''}
-              <article class="agent-node supervisor" id="node-supervisor">
+              <article class="agent-node supervisor" id="node-supervisor" data-open-supervisor title="View Mounir configuration" role="button" tabindex="0">
                 ${telegramEnabled ? '<span class="node-port input-left"></span>' : ''}
                 <span class="node-port output"></span>
                 <div class="node-head">
@@ -1622,11 +1667,17 @@ async function saveHeartbeatSettings(runNow) {
 function agentNodeHtml(item, kind, nodeId, agentId) {
   const initial = (item.name || '?').trim().charAt(0).toUpperCase();
   const dynamic = kind === 'dynamic';
+  const builtin = kind === 'builtin';
   const icon = dynamic && item.has_icon
     ? `<img src="/api/subagents/${agentId}/icon" alt="">`
     : esc(initial);
+  const behavior = dynamic
+    ? ` data-agent-id="${agentId}" title="Open subagent settings" role="button" tabindex="0"`
+    : builtin
+    ? ` data-builtin-key="${esc(item.key)}" title="View capabilities and model" role="button" tabindex="0"`
+    : '';
   return `
-    <article class="agent-node ${dynamic ? 'dynamic' : ''}" id="node-${nodeId}"${dynamic ? ` data-agent-id="${agentId}" title="Open subagent settings" role="button" tabindex="0"` : ''}>
+    <article class="agent-node ${dynamic ? 'dynamic' : builtin ? 'builtin' : ''}" id="node-${nodeId}"${behavior}>
       <span class="node-port input"></span>
       ${dynamic ? '<svg class="node-open" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>' : ''}
       <div class="node-head">
@@ -1711,7 +1762,7 @@ function renderListItem(item) {
     <div class="list-item" data-id="${item.id}">
       <div class="info">
         <div class="primary">${esc(item.name)}</div>
-        <div class="secondary">${esc(item.model || item.name)}${item.provider ? ' · ' + esc(item.provider) : ''}</div>
+        <div class="secondary">${esc(item.provider || 'No provider')}</div>
       </div>
       <span class="badge">${item.api_key ? 'key set' : 'no key'}</span>
       <button class="del-btn" data-action="delete" title="Remove">
@@ -2745,6 +2796,16 @@ $('content').addEventListener('click', async e => {
     renderTelegram();
     return;
   }
+  const supervisorNode = e.target.closest('[data-open-supervisor]');
+  if (supervisorNode) {
+    openSupervisor();
+    return;
+  }
+  const builtinNode = e.target.closest('[data-builtin-key]');
+  if (builtinNode) {
+    openBuiltinAgent(builtinNode.dataset.builtinKey);
+    return;
+  }
   // Dynamic nodes in the topology open their real subagent configuration.
   const agentNode = e.target.closest('[data-agent-id]');
   if (agentNode) {
@@ -2793,6 +2854,18 @@ $('content').addEventListener('keydown', e => {
   if (telegramNode && (e.key === 'Enter' || e.key === ' ')) {
     e.preventDefault();
     telegramNode.click();
+    return;
+  }
+  const supervisorNode = e.target.closest('[data-open-supervisor]');
+  if (supervisorNode && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault();
+    openSupervisor();
+    return;
+  }
+  const builtinNode = e.target.closest('[data-builtin-key]');
+  if (builtinNode && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault();
+    openBuiltinAgent(builtinNode.dataset.builtinKey);
     return;
   }
   const agentNode = e.target.closest('[data-agent-id]');
@@ -2936,6 +3009,14 @@ async function init() {
 init();
 </script>
 
+<!-- built-in specialist details -->
+<div class="overlay" id="builtinOverlay">
+  <div class="modal-builtin" role="dialog" aria-modal="true" aria-labelledby="builtinModalTitle">
+    <button class="builtin-modal-close" type="button" id="builtinClose" aria-label="Close">×</button>
+    <div id="builtinModalContent"></div>
+  </div>
+</div>
+
 <!-- confirm modal -->
 <div class="overlay" id="confirmOverlay">
   <div class="modal-confirm">
@@ -2954,6 +3035,130 @@ init();
 </div>
 
 <script>
+/* ========== built-in specialist modal ========== */
+const builtinOverlay = $('builtinOverlay');
+
+function closeBuiltinAgent() {
+  builtinOverlay.classList.remove('show');
+  $('builtinModalContent').innerHTML = '';
+}
+
+function openSupervisor() {
+  const supervisor = S.overview.supervisor || {};
+  const capabilities = Array.isArray(supervisor.tools) ? supervisor.tools : [];
+  const options = Array.isArray(supervisor.model_options) ? supervisor.model_options : [];
+  $('builtinModalContent').innerHTML = `
+    <div class="builtin-modal-head">
+      <div class="builtin-modal-icon">${esc((supervisor.name || 'M').charAt(0).toUpperCase())}</div>
+      <div>
+        <div class="builtin-modal-title" id="builtinModalTitle">${esc(supervisor.name || 'Mounir')}</div>
+        <div class="builtin-modal-provider">Supervisor · ${esc(supervisor.provider || 'Not configured')}</div>
+      </div>
+    </div>
+    <div class="builtin-modal-description">${esc(supervisor.description || 'Coordinates requests and delegates focused work to specialists.')}</div>
+    <section class="builtin-modal-section">
+      <h4>Language model</h4>
+      <select class="builtin-model-select" id="supervisorModelSelect">
+        ${options.map(option => `<option value="${option.id}"${+option.id === +supervisor.model_id ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
+      </select>
+      <div class="builtin-model-hint">Mounir supports saved Mistral, Groq, and Ollama models. Changes apply on the next message.</div>
+    </section>
+    <section class="builtin-modal-section">
+      <h4>Capabilities</h4>
+      <div class="builtin-capability-list">
+        ${capabilities.length ? capabilities.map(tool => `
+          <div class="builtin-capability">
+            <strong>${esc(readableToolName(tool.name))}</strong>
+            <span>${esc(tool.description || 'No description provided.')}</span>
+          </div>`).join('') : '<div class="builtin-capability"><span>No tools available.</span></div>'}
+      </div>
+    </section>
+    <div class="builtin-modal-feedback" id="builtinModalFeedback"></div>
+    <div class="builtin-modal-actions">
+      <button class="btn" type="button" id="builtinCancel">Close</button>
+      <button class="btn primary" type="button" id="supervisorSave">Save model</button>
+    </div>`;
+  builtinOverlay.classList.add('show');
+  $('builtinCancel').addEventListener('click', closeBuiltinAgent);
+  $('supervisorSave').addEventListener('click', async event => {
+    event.target.disabled = true;
+    const feedback = $('builtinModalFeedback');
+    feedback.textContent = 'Saving…';
+    try {
+      S.overview.supervisor = await api('PUT', '/api/supervisor', {
+        model_id: Number($('supervisorModelSelect').value),
+      });
+      closeBuiltinAgent();
+      renderOverview();
+    } catch (error) {
+      feedback.textContent = error.message;
+      event.target.disabled = false;
+    }
+  });
+}
+
+function openBuiltinAgent(key) {
+  const agent = (S.overview.builtins || []).find(item => item.key === key);
+  if (!agent) return;
+  const tools = Array.isArray(agent.tools) ? agent.tools : [];
+  const options = Array.isArray(agent.model_options) ? agent.model_options : [];
+  $('builtinModalContent').innerHTML = `
+    <div class="builtin-modal-head">
+      <div class="builtin-modal-icon">${esc((agent.name || '?').charAt(0).toUpperCase())}</div>
+      <div>
+        <div class="builtin-modal-title" id="builtinModalTitle">${esc(agent.name)}</div>
+        <div class="builtin-modal-provider">Built-in specialist · ${esc(agent.provider)}</div>
+      </div>
+    </div>
+    <div class="builtin-modal-description">${esc(agent.description || 'Built-in Mounir specialist.')}</div>
+    <section class="builtin-modal-section">
+      <h4>Capabilities</h4>
+      <div class="builtin-capability-list">
+        ${tools.length ? tools.map(tool => `
+          <div class="builtin-capability">
+            <strong>${esc(readableToolName(tool.name))}</strong>
+            <span>${esc(tool.description || 'No description provided.')}</span>
+          </div>`).join('') : '<div class="builtin-capability"><span>No tools available.</span></div>'}
+      </div>
+    </section>
+    <section class="builtin-modal-section">
+      <h4>Language model</h4>
+      <select class="builtin-model-select" id="builtinModelSelect">
+        ${options.map(option => `<option value="${option.id}"${+option.id === +agent.model_id ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
+      </select>
+      <div class="builtin-model-hint">Only compatible ${esc(agent.provider)} model presets are shown. Create another compatible model in Models to add it here.</div>
+    </section>
+    <div class="builtin-modal-feedback" id="builtinModalFeedback"></div>
+    <div class="builtin-modal-actions">
+      <button class="btn" type="button" id="builtinCancel">Close</button>
+      <button class="btn primary" type="button" id="builtinSave">Save model</button>
+    </div>`;
+  builtinOverlay.classList.add('show');
+  $('builtinCancel').addEventListener('click', closeBuiltinAgent);
+  $('builtinSave').addEventListener('click', async event => {
+    event.target.disabled = true;
+    const feedback = $('builtinModalFeedback');
+    feedback.textContent = 'Saving…';
+    try {
+      const updated = await api('PUT', `/api/builtin-agents/${encodeURIComponent(agent.key)}`, {
+        model_id: Number($('builtinModelSelect').value),
+      });
+      const index = S.overview.builtins.findIndex(item => item.key === agent.key);
+      if (index >= 0) S.overview.builtins[index] = updated;
+      closeBuiltinAgent();
+      renderOverview();
+    } catch (error) {
+      feedback.textContent = error.message;
+      event.target.disabled = false;
+    }
+  });
+}
+
+$('builtinClose').addEventListener('click', closeBuiltinAgent);
+builtinOverlay.addEventListener('click', event => {
+  if (event.target === builtinOverlay) closeBuiltinAgent();
+});
+
 /* ========== confirm modal ========== */
 let _confirmResolve = null;
 const confirmOverlay = $('confirmOverlay');
@@ -2978,6 +3183,10 @@ function closeConfirm(approved) {
 $('confirmOkBtn').addEventListener('click', () => closeConfirm(true));
 $('confirmCancelBtn').addEventListener('click', () => closeConfirm(false));
 window.addEventListener('keydown', e => {
+  if (builtinOverlay.classList.contains('show') && e.key === 'Escape') {
+    closeBuiltinAgent();
+    return;
+  }
   if (!confirmOverlay.classList.contains('show')) return;
   if (e.key === 'Enter') closeConfirm(true);
   if (e.key === 'Escape') closeConfirm(false);

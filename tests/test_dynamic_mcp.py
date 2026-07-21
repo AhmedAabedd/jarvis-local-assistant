@@ -28,6 +28,7 @@ from mounir import (
     db,
     heartbeat as heartbeat_mod,
     langgraph_agent,
+    llm as llm_mod,
     mcp_agents,
     tools as mounir_tools,
 )
@@ -216,6 +217,182 @@ class DatabaseTests(TemporaryDatabaseTest):
             )
         )
 
+    def test_builtin_agent_model_selection_is_persisted_and_provider_scoped(self):
+        db.init()
+        nvidia = db.add_model(
+            "NVIDIA System",
+            "nvidia/test-system-model",
+            "NVIDIA",
+            "https://integrate.api.nvidia.com/v1",
+            "preset-key",
+        )
+        ollama = db.add_model(
+            "Local model",
+            "qwen-local",
+            "Ollama",
+            "http://localhost:11434/v1",
+            "",
+        )
+
+        system = next(
+            agent for agent in db.list_builtin_agents() if agent["key"] == "system"
+        )
+        options = {option["id"] for option in system["model_options"]}
+        self.assertIn(nvidia["id"], options)
+        self.assertNotIn(ollama["id"], options)
+
+        updated = db.update_builtin_agent_model("system", nvidia["id"])
+        self.assertEqual(updated["model"], nvidia["model"])
+        self.assertEqual(updated["model_id"], nvidia["id"])
+        self.assertEqual(
+            db.get_builtin_agent_model("system", "fallback"), nvidia["model"]
+        )
+        runtime = db.get_builtin_agent_runtime(
+            "system",
+            fallback_model="fallback",
+            fallback_base_url="https://fallback.test/v1",
+            fallback_api_key="fallback-key",
+        )
+        self.assertEqual(runtime["base_url"], nvidia["base_url"])
+        self.assertEqual(runtime["api_key"], "preset-key")
+        with self.assertRaisesRegex(ValueError, "configured NVIDIA"):
+            db.update_builtin_agent_model("system", ollama["id"])
+
+    def test_builtin_models_are_seeded_as_manageable_model_records(self):
+        db.init()
+        initial = db.list_models()
+        by_name = {model["name"]: model for model in initial}
+
+        self.assertTrue(
+            {
+                "Media (Built-in)",
+                "Knowledge (Built-in)",
+                "System (Built-in)",
+            }.issubset(by_name),
+        )
+        self.assertEqual(
+            by_name["Media (Built-in)"]["api_key"], "$NVIDIA_API_KEY"
+        )
+        self.assertEqual(
+            by_name["Knowledge (Built-in)"]["api_key"], "$GEMINI_API_KEY"
+        )
+        self.assertEqual(
+            by_name["System (Built-in)"]["api_key"], "$NVIDIA_API_KEY"
+        )
+
+        agents = {agent["key"]: agent for agent in db.list_builtin_agents()}
+        self.assertEqual(
+            agents["media"]["model_id"], by_name["Media (Built-in)"]["id"]
+        )
+        self.assertEqual(
+            agents["knowledge"]["model_id"],
+            by_name["Knowledge (Built-in)"]["id"],
+        )
+        self.assertEqual(
+            agents["system"]["model_id"], by_name["System (Built-in)"]["id"]
+        )
+
+        db.init()
+        self.assertEqual(len(db.list_models()), len(initial))
+
+    def test_assigned_builtin_model_is_managed_through_models_registry(self):
+        db.init()
+        system = next(
+            agent for agent in db.list_builtin_agents() if agent["key"] == "system"
+        )
+
+        updated = db.update_model(
+            system["model_id"],
+            model="nvidia/replacement-system-model",
+            base_url="https://models.example.test/v1",
+            api_key="replacement-key",
+        )
+        self.assertEqual(updated["model"], "nvidia/replacement-system-model")
+        self.assertEqual(
+            db.get_builtin_agent_model("system"),
+            "nvidia/replacement-system-model",
+        )
+        runtime = db.get_builtin_agent_runtime(
+            "system",
+            fallback_model="fallback",
+            fallback_base_url="https://fallback.test/v1",
+            fallback_api_key="fallback-key",
+        )
+        self.assertEqual(runtime["base_url"], "https://models.example.test/v1")
+        self.assertEqual(runtime["api_key"], "replacement-key")
+        self.assertFalse(db.delete_model(system["model_id"]))
+        with self.assertRaisesRegex(ValueError, "must remain a NVIDIA model"):
+            db.update_model(system["model_id"], provider="Ollama")
+
+    def test_supervisor_model_is_seeded_selectable_and_used_at_runtime(self):
+        with (
+            patch.object(config, "USE_MISTRAL", True),
+            patch.object(config, "MISTRAL_MODEL", "mistral-small-latest"),
+            patch.object(config, "MISTRAL_BASE_URL", "https://api.mistral.ai/v1"),
+        ):
+            db.init()
+
+        supervisor = db.get_supervisor_config()
+        seeded = db.get_model(supervisor["model_id"])
+        self.assertEqual(seeded["name"], "Mounir (Supervisor)")
+        self.assertEqual(seeded["provider"], "Mistral")
+        self.assertEqual(seeded["model"], "mistral-small-latest")
+        self.assertEqual(seeded["api_key"], "$MISTRAL_API_KEY")
+
+        alternate = db.add_model(
+            "Mistral Large",
+            "mistral-large-latest",
+            "Mistral",
+            "https://mistral.example.test/v1",
+            "alternate-key",
+        )
+        updated = db.update_supervisor_model(alternate["id"])
+        self.assertEqual(updated["model_id"], alternate["id"])
+        runtime = db.get_supervisor_runtime("fallback")
+        self.assertEqual(runtime["model"], "mistral-large-latest")
+        self.assertEqual(runtime["base_url"], "https://mistral.example.test/v1")
+        self.assertEqual(runtime["api_key"], "alternate-key")
+        self.assertFalse(db.delete_model(alternate["id"]))
+        with self.assertRaisesRegex(ValueError, "assigned to Mounir"):
+            db.update_model(alternate["id"], provider="NVIDIA")
+
+    def test_supervisor_chat_dispatch_uses_selected_mistral_record(self):
+        with patch.object(
+            llm_mod, "_mistral_stream", return_value=iter(["ready"])
+        ) as mistral_stream:
+            output = list(
+                llm_mod.chat_stream(
+                    [{"role": "user", "content": "hello"}],
+                    model="mistral-test",
+                    provider="Mistral",
+                    base_url="https://mistral.example.test/v1",
+                    api_key="test-key",
+                )
+            )
+
+        self.assertEqual(output, ["ready"])
+        self.assertEqual(mistral_stream.call_args.kwargs["model"], "mistral-test")
+        self.assertEqual(
+            mistral_stream.call_args.kwargs["base_url"],
+            "https://mistral.example.test/v1",
+        )
+        self.assertEqual(mistral_stream.call_args.kwargs["api_key"], "test-key")
+
+        with patch.object(
+            llm_mod, "_ollama_stream", return_value=iter(["cloud-ready"])
+        ) as ollama_stream:
+            output = list(
+                llm_mod.chat_stream(
+                    [{"role": "user", "content": "hello"}],
+                    model="cloud-model",
+                    provider="Ollama Cloud",
+                    base_url="https://ollama.com/v1",
+                    api_key="ollama-key",
+                )
+            )
+        self.assertEqual(output, ["cloud-ready"])
+        self.assertEqual(ollama_stream.call_args.kwargs["api_key"], "ollama-key")
+
     def test_builtin_specialist_enforces_heartbeat_tool_allowlist(self):
         calls = []
         replies = iter(
@@ -236,8 +413,8 @@ class DatabaseTests(TemporaryDatabaseTest):
             ]
         )
 
-        def fake_chat(messages, tools=None, model=None):
-            calls.append(tools)
+        def fake_chat(messages, tools=None, model=None, **kwargs):
+            calls.append({"tools": tools, "model": model, **kwargs})
             return next(replies)
 
         with (
@@ -252,9 +429,10 @@ class DatabaseTests(TemporaryDatabaseTest):
 
         self.assertEqual(report, "Nothing needs attention.")
         self.assertEqual(
-            [schema["function"]["name"] for schema in calls[0]],
+            [schema["function"]["name"] for schema in calls[0]["tools"]],
             ["system_status"],
         )
+        self.assertEqual(calls[0]["model"], config.SYSTEM_MODEL)
         dispatch.assert_not_called()
 
     def test_heartbeat_runner_dispatches_selected_builtin(self):
@@ -394,6 +572,12 @@ class DatabaseTests(TemporaryDatabaseTest):
             tool_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_server_tools'"
             ).fetchone()
+            builtin_settings_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'builtin_agent_settings'"
+            ).fetchone()
+            supervisor_settings_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'supervisor_settings'"
+            ).fetchone()
             heartbeat_tables = {
                 row["name"]
                 for row in conn.execute(
@@ -422,6 +606,8 @@ class DatabaseTests(TemporaryDatabaseTest):
             <= agent_columns
         )
         self.assertIsNotNone(tool_table)
+        self.assertIsNotNone(builtin_settings_table)
+        self.assertIsNotNone(supervisor_settings_table)
         self.assertTrue(
             {
                 "heartbeat_settings", "heartbeat_tools", "heartbeat_runs",
@@ -1149,6 +1335,16 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(overview["supervisor"]["name"], "Mounir")
                 self.assertEqual(len(overview["builtins"]), 3)
                 self.assertTrue(overview["supervisor"]["model"])
+                self.assertTrue(overview["supervisor"]["provider"])
+                self.assertTrue(overview["supervisor"]["description"])
+                supervisor_tools = {
+                    tool["name"] for tool in overview["supervisor"]["tools"]
+                }
+                self.assertIn("read_file", supervisor_tools)
+                self.assertFalse(
+                    any(name.startswith("delegate_to_") for name in supervisor_tools)
+                )
+                self.assertTrue(overview["supervisor"]["model_options"])
 
                 profile_response = await client.put(
                     "/api/profile",

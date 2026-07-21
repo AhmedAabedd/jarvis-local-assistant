@@ -110,6 +110,13 @@ def _supervisor(
     delegates: dict[str, str],
     dynamic: list[dict],
 ) -> Command:
+    supervisor_runtime = db.get_supervisor_runtime(model)
+    chat_runtime = {
+        "model": supervisor_runtime["model"],
+        "provider": supervisor_runtime["provider"],
+        "base_url": supervisor_runtime["base_url"],
+        "api_key": supervisor_runtime["api_key"],
+    }
     schemas = list(tools.SCHEMAS) if use_tools else []
     # Registered MCP agents each contribute one delegate schema — the only
     # thing the supervisor ever sees of them.
@@ -126,7 +133,8 @@ def _supervisor(
         tool_calls: list = []
         parts: list[str] = []
         for chunk in llm.chat_stream(
-            convo, model=model, tools=schemas or None, tool_calls_out=tool_calls
+            convo, tools=schemas or None, tool_calls_out=tool_calls,
+            **chat_runtime,
         ):
             parts.append(chunk)
             if stream_q is not None:
@@ -208,7 +216,7 @@ def _supervisor(
 
     # Tool-round cap hit — force a final, tool-free answer.
     parts = []
-    for chunk in llm.chat_stream(convo, model=model, tools=None):
+    for chunk in llm.chat_stream(convo, tools=None, **chat_runtime):
         parts.append(chunk)
         if stream_q is not None:
             stream_q.put(chunk)

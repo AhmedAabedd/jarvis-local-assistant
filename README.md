@@ -179,8 +179,15 @@ SQLite DB at `~/.mounir/mounir.db`:
 
 1. **Models** — reusable LLM presets: name, provider, base URL, and an optional
    API key entered directly in the admin form. The endpoint must implement OpenAI-compatible
-   `/chat/completions` including function/tool calls; the provider field is a
-   display label, not a separate provider adapter.
+   `/chat/completions` including function/tool calls. The provider field remains
+   a label rather than a separate adapter, but Agent Studio also uses it to show
+   compatible presets in built-in specialist model selectors. On first run,
+   Mounir, Media, Knowledge, and System receive normal Model records based on
+   their current configuration. Their keys are saved as environment references
+   such as `$MISTRAL_API_KEY`, `$NVIDIA_API_KEY`, or `$GEMINI_API_KEY` rather
+   than copied secrets. Editing one of these
+   records changes that specialist's runtime configuration; an assigned record
+   cannot be deleted until the specialist is switched to another compatible model.
 2. **MCP servers** — reusable connections with an editable description. Use `stdio` for a local server
    process, Streamable HTTP for a remote server, or the deprecated HTTP+SSE
    transport only when an older server requires it. The admin form provides
@@ -429,7 +436,8 @@ from the old built-in specialists.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `USE_MISTRAL` / `MISTRAL_API_KEY` / `MISTRAL_MODEL` | `false` / – / `mistral-small-latest` | Run the supervisor on Mistral |
+| `USE_MISTRAL` / `MISTRAL_API_KEY` / `MISTRAL_MODEL` | `false` / – / `mistral-small-latest` | Initial supervisor Mistral configuration imported into Models |
+| `MISTRAL_BASE_URL` | `https://api.mistral.ai/v1` | Initial Mistral endpoint imported into the supervisor Model record |
 | `USE_GROQ` / `GROQ_API_KEY` / `GROQ_MODEL` | `false` / – / `qwen/qwen3-32b` | Run the supervisor on Groq |
 
 ### Telegram
@@ -512,6 +520,15 @@ Two separate pages, both served by `server.py`:
   name, location, and preferred response language. Changes are stored in SQLite
   and are picked up by the supervisor and every specialist on the next message,
   without restarting the app.
+- The supervisor and built-in specialist nodes in the overview are clickable.
+  The supervisor view shows its active provider, model, and direct tool list,
+  hides internal delegation tools, and lets you select a saved Mistral, Groq,
+  or Ollama model. Each
+  specialist view explains its capabilities and lets you choose a compatible saved model;
+  Media and System use NVIDIA presets, while Knowledge uses Gemini presets.
+  The selection is persisted by Model record ID and used by the specialist on
+  its next run, including later endpoint, model ID, and credential edits made
+  from the Models screen.
 - **Telegram** in the admin sidebar provides the complete bot setup: private
   token storage, live connection testing, enable/disable control, status, and
   secure one-time account pairing without manually entering a chat id.
@@ -640,8 +657,9 @@ persisted status and proactive dashboard alerts.
 - `tools.request_confirmation()` gates outward-facing actions. Its
   request-scoped handler routes approval to the interface that started the
   turn; `tools.confirm_fn` remains the fallback used by standalone CLIs.
-- API keys for built-in specialists come from environment variables. Dynamic
-  model and MCP credentials are entered through the admin UI and stored in the
+- The seeded built-in Model records initially reference API keys from environment
+  variables. They can later be managed like other Model records in Agent Studio.
+  Dynamic model and MCP credentials entered in the UI are stored in the
   user-only SQLite database.
 
 ### Adding a built-in specialist

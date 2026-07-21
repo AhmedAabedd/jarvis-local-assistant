@@ -8,24 +8,76 @@ from __future__ import annotations
 
 from importlib import import_module
 
+from . import config
+
 
 _BUILTINS = {
     "media": {
         "name": "Media",
         "module": "mounir.specialists.media",
+        "provider": "NVIDIA",
+        "default_model": config.MEDIA_MODEL,
+        "description": "Understands images, PDFs, audio, and video files on this computer.",
         "safe_tools": {"load_media", "sample_frames", "find_media"},
     },
     "knowledge": {
         "name": "Knowledge",
         "module": "mounir.specialists.knowledge",
+        "provider": "Gemini",
+        "default_model": config.KNOWLEDGE_MODEL,
+        "description": "Reads and maintains Mounir's structured long-term knowledge.",
         "safe_tools": {"list_knowledge", "read_knowledge", "search_knowledge"},
     },
     "system": {
         "name": "System",
         "module": "mounir.specialists.system",
+        "provider": "NVIDIA",
+        "default_model": config.SYSTEM_MODEL,
+        "description": "Observes and controls computer hardware, connectivity, media, and power.",
         "safe_tools": {"system_status"},
     },
 }
+
+
+def definitions() -> list[dict]:
+    """Return lightweight metadata without importing specialist modules."""
+    return [
+        {
+            "key": key,
+            "id": f"builtin:{key}",
+            "name": definition["name"],
+            "provider": definition["provider"],
+            "default_model": definition["default_model"],
+            "description": definition["description"],
+        }
+        for key, definition in _BUILTINS.items()
+    ]
+
+
+def definition(key: str) -> dict | None:
+    normalized = str(key or "").removeprefix("builtin:").strip()
+    item = _BUILTINS.get(normalized)
+    if item is None:
+        return None
+    return {
+        "key": normalized,
+        "id": f"builtin:{normalized}",
+        "name": item["name"],
+        "provider": item["provider"],
+        "default_model": item["default_model"],
+        "description": item["description"],
+    }
+
+
+def provider_matches(key: str, provider: str) -> bool:
+    """Match the organizational provider label to the built-in adapter."""
+    item = definition(key)
+    if item is None:
+        return False
+    candidate = str(provider or "").strip().lower()
+    if item["provider"] == "NVIDIA":
+        return "nvidia" in candidate
+    return "gemini" in candidate or "google" in candidate
 
 
 def capabilities() -> list[dict]:
@@ -54,6 +106,9 @@ def capabilities() -> list[dict]:
                 "builtin_key": key,
                 "kind": "builtin",
                 "name": definition["name"],
+                "provider": definition["provider"],
+                "default_model": definition["default_model"],
+                "description": definition["description"],
                 "connection_status": "built_in",
                 "tools": tools,
             }

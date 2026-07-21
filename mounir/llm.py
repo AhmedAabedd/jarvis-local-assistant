@@ -17,7 +17,8 @@ def active_model(default: str) -> str:
     return default
 
 def nvidia_chat(messages, tools=None, model=None, *, disable_thinking=False,
-                temperature=0.2, max_tokens=8192) -> dict:
+                temperature=0.2, max_tokens=8192, base_url=None,
+                api_key=None) -> dict:
     """One non-streaming NVIDIA chat-completion (OpenAI-compatible).
 
     Returns the assistant message dict ({content, tool_calls}). Used by fixed
@@ -38,11 +39,11 @@ def nvidia_chat(messages, tools=None, model=None, *, disable_thinking=False,
     if disable_thinking:  # only for reasoning models (e.g. minimax)
         payload["chat_template_kwargs"] = {"thinking_mode": "disabled"}
     headers = {
-        "Authorization": f"Bearer {config.NVIDIA_API_KEY}",
+        "Authorization": f"Bearer {config.NVIDIA_API_KEY if api_key is None else api_key}",
         "Accept": "application/json",
     }
     resp = requests.post(
-        f"{config.NVIDIA_BASE_URL}/chat/completions",
+        f"{(base_url or config.NVIDIA_BASE_URL).rstrip('/')}/chat/completions",
         headers=headers,
         json=payload,
         timeout=180,
@@ -51,7 +52,7 @@ def nvidia_chat(messages, tools=None, model=None, *, disable_thinking=False,
     return resp.json()["choices"][0]["message"]
 
 def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
-                max_tokens=8192) -> dict:
+                max_tokens=8192, base_url=None, api_key=None) -> dict:
     """One non-streaming Gemini chat-completion via Google's OpenAI-compatible
     endpoint — same message/tool format as nvidia_chat, no extra SDK needed.
 
@@ -70,14 +71,14 @@ def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
     if tools:
         payload["tools"] = tools
     headers = {
-        "Authorization": f"Bearer {config.GEMINI_API_KEY}",
+        "Authorization": f"Bearer {config.GEMINI_API_KEY if api_key is None else api_key}",
         "Accept": "application/json",
     }
     # Gemini flash returns transient 429/5xx (overload) fairly often — retry a
     # couple of times with a short backoff before giving up.
     for attempt in range(3):
         resp = requests.post(
-            f"{config.GEMINI_BASE_URL}/chat/completions",
+            f"{(base_url or config.GEMINI_BASE_URL).rstrip('/')}/chat/completions",
             headers=headers,
             json=payload,
             timeout=120,
@@ -220,21 +221,50 @@ def chat_stream(
     think: bool | None = None,
     tools: list | None = None,
     tool_calls_out: list | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> Iterator[str]:
-    if config.USE_MISTRAL:
-        yield from _mistral_stream(messages, tools=tools, tool_calls_out=tool_calls_out)
-    elif config.USE_GROQ:
-        yield from _groq_stream(messages, tools=tools, tool_calls_out=tool_calls_out)
+    selected_provider = str(provider or "").strip().lower()
+    if not selected_provider:
+        selected_provider = (
+            "mistral" if config.USE_MISTRAL
+            else "groq" if config.USE_GROQ
+            else "ollama"
+        )
+    if "mistral" in selected_provider:
+        yield from _mistral_stream(
+            messages, tools=tools, tool_calls_out=tool_calls_out,
+            model=model, base_url=base_url, api_key=api_key,
+        )
+    elif "groq" in selected_provider:
+        yield from _groq_stream(
+            messages, tools=tools, tool_calls_out=tool_calls_out,
+            model=model, base_url=base_url, api_key=api_key,
+        )
+    elif "ollama" in selected_provider:
+        yield from _ollama_stream(
+            messages, model=model, think=think, tools=tools,
+            tool_calls_out=tool_calls_out, base_url=base_url, api_key=api_key,
+        )
     else:
-        yield from _ollama_stream(messages, model=model, think=think, tools=tools, tool_calls_out=tool_calls_out)
+        raise OllamaError(
+            f"Unsupported supervisor model provider: {provider or 'unknown'}"
+        )
 
-def _mistral_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
+def _mistral_stream(
+    messages, *, tools, tool_calls_out, model=None, base_url=None, api_key=None
+) -> Iterator[str]:
     try:
         from mistralai.client import Mistral
 
         # Hard timeout: without it a throttled/stalled Mistral request hangs
         # the whole turn forever with no error surfacing anywhere.
-        client = Mistral(api_key=config.MISTRAL_API_KEY, timeout_ms=120_000)
+        client = Mistral(
+            api_key=config.MISTRAL_API_KEY if api_key is None else api_key,
+            server_url=base_url or None,
+            timeout_ms=120_000,
+        )
 
         # Clean up messages: Mistral expects tool messages with specific shape
         clean_messages = []
@@ -265,7 +295,7 @@ def _mistral_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
                 clean_messages.append({"role": m["role"], "content": m.get("content") or ""})
 
         kwargs = dict(
-            model=config.MISTRAL_MODEL,
+            model=model or config.MISTRAL_MODEL,
             messages=clean_messages,
             stream=True,
         )
@@ -311,13 +341,21 @@ def _wrap_tool_call(name: str, arguments: dict):
     tc.function = fn
     return tc
 
-def _ollama_stream(messages, *, model, think, tools, tool_calls_out) -> Iterator[str]:
+def _ollama_stream(
+    messages, *, model, think, tools, tool_calls_out, base_url=None, api_key=None
+) -> Iterator[str]:
     try:
         kwargs = dict(model=model, messages=messages, stream=True, options={"num_ctx": 32768},
                       think=config.THINK if think is None else think)
         if tools:
             kwargs["tools"] = tools
-        stream = ollama.chat(**kwargs)
+        client_options = {}
+        if base_url:
+            client_options["host"] = base_url.removesuffix("/v1")
+        if api_key:
+            client_options["headers"] = {"Authorization": f"Bearer {api_key}"}
+        client = ollama.Client(**client_options) if client_options else ollama
+        stream = client.chat(**kwargs)
         for chunk in stream:
             message = chunk.message
             if message.content:
@@ -327,11 +365,16 @@ def _ollama_stream(messages, *, model, think, tools, tool_calls_out) -> Iterator
     except Exception as exc:
         raise OllamaError(f"Ollama call failed (model {model}): {exc}") from exc
 
-def _groq_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
+def _groq_stream(
+    messages, *, tools, tool_calls_out, model=None, base_url=None, api_key=None
+) -> Iterator[str]:
     try:
         from groq import Groq
 
-        client = Groq(api_key=config.GROQ_API_KEY)
+        client = Groq(
+            api_key=config.GROQ_API_KEY if api_key is None else api_key,
+            base_url=base_url or None,
+        )
 
         clean_messages = []
         last_tool_call_ids: list[str] = []  # ids generated for the most recent assistant tool_calls
@@ -368,7 +411,7 @@ def _groq_stream(messages, *, tools, tool_calls_out) -> Iterator[str]:
             clean_messages.append(entry)
 
         kwargs = dict(
-            model=config.GROQ_MODEL,
+            model=model or config.GROQ_MODEL,
             messages=clean_messages,
             stream=True,
         )

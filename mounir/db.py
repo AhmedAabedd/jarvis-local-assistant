@@ -160,6 +160,19 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS builtin_agent_settings (
+            agent_key TEXT PRIMARY KEY,
+            model TEXT NOT NULL,
+            model_id INTEGER REFERENCES models(id),
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS supervisor_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            model_id INTEGER NOT NULL REFERENCES models(id),
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS heartbeat_settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -255,6 +268,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         """,
         (_now(),),
     )
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO builtin_agent_settings
+            (agent_key, model, updated_at)
+        VALUES (?, ?, ?)
+        """,
+        [
+            (item["key"], item["default_model"], _now())
+            for item in builtin_agents.definitions()
+        ],
+    )
     telegram_token = cfg.TELEGRAM_BOT_TOKEN.strip()
     telegram_chat = cfg.TELEGRAM_CHAT_ID.strip()
     telegram_enabled = bool(cfg.TELEGRAM_ENABLED and telegram_token)
@@ -280,6 +304,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # migrations explicit so upgrading an earlier feature-branch DB works.
     migrations = {
         "models": {"model": "TEXT"},
+        "builtin_agent_settings": {
+            "model_id": "INTEGER REFERENCES models(id)",
+        },
         "mcp_servers": {
             "description": "TEXT NOT NULL DEFAULT ''",
             "setup_type": "TEXT NOT NULL DEFAULT ''",
@@ -365,6 +392,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 "UPDATE models SET base_url = ? WHERE id = ?",
                 (normalized, row["id"]),
             )
+    _seed_builtin_models(conn)
+    _seed_supervisor_model(conn)
     conn.commit()
 
 
@@ -522,6 +551,174 @@ def _unique_name(conn: sqlite3.Connection, table: str, preferred: str) -> str:
         candidate = f"{preferred} {suffix}"
         suffix += 1
     return candidate
+
+
+def _seed_builtin_models(conn: sqlite3.Connection) -> None:
+    """Create manageable model presets for the built-in specialists.
+
+    Existing compatible presets are reused.  Secrets remain environment
+    references so initializing the database never copies API keys into it.
+    """
+    provider_defaults = {
+        "NVIDIA": (cfg.NVIDIA_BASE_URL, "$NVIDIA_API_KEY"),
+        "Gemini": (cfg.GEMINI_BASE_URL, "$GEMINI_API_KEY"),
+    }
+    all_models = [dict(row) for row in conn.execute("SELECT * FROM models")]
+
+    for definition in builtin_agents.definitions():
+        key = definition["key"]
+        setting = conn.execute(
+            """
+            SELECT agent_key, model, model_id
+            FROM builtin_agent_settings
+            WHERE agent_key = ?
+            """,
+            (key,),
+        ).fetchone()
+        linked = None
+        if setting and setting["model_id"] is not None:
+            linked = next(
+                (
+                    model for model in all_models
+                    if int(model["id"]) == int(setting["model_id"])
+                    and builtin_agents.provider_matches(
+                        key, model.get("provider", "")
+                    )
+                ),
+                None,
+            )
+        if linked is None and setting:
+            linked = next(
+                (
+                    model for model in all_models
+                    if model["model"] == setting["model"]
+                    and builtin_agents.provider_matches(
+                        key, model.get("provider", "")
+                    )
+                ),
+                None,
+            )
+        if linked is None:
+            base_url, api_key = provider_defaults[definition["provider"]]
+            normalized_base_url = _normalize_model_base_url(base_url)
+            linked = next(
+                (
+                    model for model in all_models
+                    if model["model"] == definition["default_model"]
+                    and builtin_agents.provider_matches(
+                        key, model.get("provider", "")
+                    )
+                    and str(model["base_url"]).rstrip("/")
+                        == normalized_base_url
+                ),
+                None,
+            )
+            if linked is None:
+                preset_name = _unique_name(
+                    conn, "models", f"{definition['name']} (Built-in)"
+                )
+                cursor = conn.execute(
+                    """
+                    INSERT INTO models
+                        (name, model, provider, base_url, api_key, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        preset_name,
+                        definition["default_model"],
+                        definition["provider"],
+                        normalized_base_url,
+                        api_key,
+                        _now(),
+                    ),
+                )
+                linked = {
+                    "id": cursor.lastrowid,
+                    "name": preset_name,
+                    "model": definition["default_model"],
+                    "provider": definition["provider"],
+                    "base_url": normalized_base_url,
+                    "api_key": api_key,
+                }
+                all_models.append(linked)
+        conn.execute(
+            """
+            UPDATE builtin_agent_settings
+            SET model = ?, model_id = ?, updated_at = ?
+            WHERE agent_key = ?
+            """,
+            (linked["model"], linked["id"], _now(), key),
+        )
+
+
+def _active_supervisor_model_defaults() -> dict:
+    if cfg.USE_MISTRAL:
+        return {
+            "provider": "Mistral",
+            "model": cfg.MISTRAL_MODEL,
+            "base_url": cfg.MISTRAL_BASE_URL,
+            "api_key": "$MISTRAL_API_KEY",
+        }
+    if cfg.USE_GROQ:
+        return {
+            "provider": "Groq",
+            "model": cfg.GROQ_MODEL,
+            "base_url": cfg.GROQ_BASE_URL,
+            "api_key": "$GROQ_API_KEY",
+        }
+    return {
+        "provider": "Ollama (local)",
+        "model": cfg.MODEL,
+        "base_url": "http://localhost:11434/v1",
+        "api_key": "",
+    }
+
+
+def _supervisor_provider_supported(provider: str) -> bool:
+    normalized = str(provider or "").strip().lower()
+    return any(name in normalized for name in ("mistral", "groq", "ollama"))
+
+
+def _seed_supervisor_model(conn: sqlite3.Connection) -> None:
+    """Link Mounir to a normal Model record on the first upgraded run."""
+    current = conn.execute(
+        """
+        SELECT s.model_id
+        FROM supervisor_settings s
+        JOIN models m ON m.id = s.model_id
+        WHERE s.id = 1
+        """
+    ).fetchone()
+    if current:
+        return
+
+    defaults = _active_supervisor_model_defaults()
+    preset_name = _unique_name(conn, "models", "Mounir (Supervisor)")
+    cursor = conn.execute(
+        """
+        INSERT INTO models
+            (name, model, provider, base_url, api_key, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            preset_name,
+            defaults["model"],
+            defaults["provider"],
+            _normalize_model_base_url(defaults["base_url"]),
+            defaults["api_key"],
+            _now(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO supervisor_settings (id, model_id, updated_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            model_id = excluded.model_id,
+            updated_at = excluded.updated_at
+        """,
+        (cursor.lastrowid, _now()),
+    )
 
 
 def _migrate_builtin_email(conn: sqlite3.Connection) -> None:
@@ -968,6 +1165,225 @@ def clear_telegram_pairing() -> dict:
         )
         conn.commit()
     return get_telegram_settings()
+
+
+# -----------------------------------------------------------------------------
+# Supervisor and built-in specialist configuration
+# -----------------------------------------------------------------------------
+
+def get_supervisor_runtime(fallback_model: str = "") -> dict:
+    """Return the database-managed runtime used by Mounir's supervisor."""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT m.id AS model_id, m.model, m.provider,
+                       m.base_url, m.api_key
+                FROM supervisor_settings s
+                JOIN models m ON m.id = s.model_id
+                WHERE s.id = 1
+                """
+            ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row:
+        return {
+            "model_id": row["model_id"],
+            "model": row["model"],
+            "provider": row["provider"],
+            "base_url": row["base_url"],
+            "api_key": _resolve_key(row["api_key"] or ""),
+        }
+
+    defaults = _active_supervisor_model_defaults()
+    secret = ""
+    if defaults["provider"] == "Mistral":
+        secret = cfg.MISTRAL_API_KEY
+    elif defaults["provider"] == "Groq":
+        secret = cfg.GROQ_API_KEY
+    return {
+        "model_id": None,
+        "model": defaults["model"] or fallback_model,
+        "provider": defaults["provider"],
+        "base_url": defaults["base_url"],
+        "api_key": secret,
+    }
+
+
+def get_supervisor_config() -> dict:
+    runtime = get_supervisor_runtime(cfg.MODEL)
+    options = [
+        {
+            "id": model["id"],
+            "model": model["model"],
+            "label": f"{model['name']} — {model['model']}",
+        }
+        for model in list_models()
+        if _supervisor_provider_supported(model.get("provider", ""))
+    ]
+    return {
+        "model_id": runtime["model_id"],
+        "model": runtime["model"],
+        "provider": runtime["provider"],
+        "model_options": options,
+    }
+
+
+def update_supervisor_model(model_id: int) -> dict:
+    try:
+        requested_id = int(model_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("choose a model") from exc
+    selected = get_model(requested_id)
+    if selected is None or not _supervisor_provider_supported(
+        selected.get("provider", "")
+    ):
+        raise ValueError("choose a configured Mistral, Groq, or Ollama model")
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO supervisor_settings (id, model_id, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                model_id = excluded.model_id,
+                updated_at = excluded.updated_at
+            """,
+            (requested_id, _now()),
+        )
+        conn.commit()
+    return get_supervisor_config()
+
+def get_builtin_agent_model(agent_key: str, fallback: str = "") -> str:
+    key = str(agent_key or "").removeprefix("builtin:").strip()
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(m.model, s.model) AS model
+                FROM builtin_agent_settings s
+                LEFT JOIN models m ON m.id = s.model_id
+                WHERE s.agent_key = ?
+                """,
+                (key,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return fallback
+    return (row["model"] or fallback) if row else fallback
+
+
+def get_builtin_agent_runtime(
+    agent_key: str,
+    *,
+    fallback_model: str,
+    fallback_base_url: str,
+    fallback_api_key: str,
+) -> dict:
+    """Resolve the assigned Model record, falling back to the native adapter."""
+    key = str(agent_key or "").removeprefix("builtin:").strip()
+    try:
+        with _connect() as conn:
+            selected = conn.execute(
+                """
+                SELECT m.model, m.base_url, m.api_key
+                FROM builtin_agent_settings s
+                JOIN models m ON m.id = s.model_id
+                WHERE s.agent_key = ?
+                """,
+                (key,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        selected = None
+    if selected:
+        return {
+            "model": selected["model"],
+            "base_url": selected["base_url"],
+            "api_key": _resolve_key(selected["api_key"] or ""),
+        }
+    return {
+        "model": fallback_model,
+        "base_url": fallback_base_url,
+        "api_key": fallback_api_key,
+    }
+
+
+def list_builtin_agents() -> list[dict]:
+    capabilities = {
+        item["builtin_key"]: item for item in builtin_agents.capabilities()
+    }
+    models = list_models()
+    result = []
+    for definition in builtin_agents.definitions():
+        key = definition["key"]
+        compatible = [
+            model for model in models
+            if builtin_agents.provider_matches(key, model.get("provider", ""))
+        ]
+        options = [
+            {
+                "id": model["id"],
+                "model": model["model"],
+                "label": f"{model['name']} — {model['model']}",
+            }
+            for model in compatible
+        ]
+        with _connect() as conn:
+            setting = conn.execute(
+                """
+                SELECT s.model_id, COALESCE(m.model, s.model) AS model
+                FROM builtin_agent_settings s
+                LEFT JOIN models m ON m.id = s.model_id
+                WHERE s.agent_key = ?
+                """,
+                (key,),
+            ).fetchone()
+        capability = capabilities[key]
+        result.append(
+            {
+                **definition,
+                "model_id": setting["model_id"] if setting else None,
+                "model": (
+                    setting["model"] if setting else definition["default_model"]
+                ),
+                "model_options": options,
+                "tools": capability["tools"],
+            }
+        )
+    return result
+
+
+def update_builtin_agent_model(agent_key: str, model_id: int) -> dict:
+    definition = builtin_agents.definition(agent_key)
+    if definition is None:
+        raise ValueError("built-in specialist was not found")
+    try:
+        requested_id = int(model_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("choose a model")
+    selected = get_model(requested_id)
+    if selected is None or not builtin_agents.provider_matches(
+        definition["key"], selected.get("provider", "")
+    ):
+        raise ValueError(
+            f"choose a configured {definition['provider']} model"
+        )
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO builtin_agent_settings
+                (agent_key, model, model_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(agent_key) DO UPDATE SET
+                model = excluded.model,
+                model_id = excluded.model_id,
+                updated_at = excluded.updated_at
+            """,
+            (definition["key"], selected["model"], requested_id, _now()),
+        )
+        conn.commit()
+    return next(
+        agent for agent in list_builtin_agents()
+        if agent["key"] == definition["key"]
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1526,12 +1942,59 @@ def update_model(model_id: int, **kwargs) -> dict | None:
     if "base_url" in fields:
         fields["base_url"] = _normalize_model_base_url(fields["base_url"])
     with _connect() as conn:
+        current = conn.execute(
+            "SELECT * FROM models WHERE id = ?", (model_id,)
+        ).fetchone()
+        if current is None:
+            return None
+        resulting_provider = fields.get("provider", current["provider"])
+        assigned = conn.execute(
+            """
+            SELECT agent_key FROM builtin_agent_settings
+            WHERE model_id = ?
+            """,
+            (model_id,),
+        ).fetchall()
+        incompatible = [
+            builtin_agents.definition(row["agent_key"])
+            for row in assigned
+            if not builtin_agents.provider_matches(
+                row["agent_key"], resulting_provider
+            )
+        ]
+        incompatible = [item for item in incompatible if item is not None]
+        if incompatible:
+            names = ", ".join(item["name"] for item in incompatible)
+            expected = incompatible[0]["provider"]
+            raise ValueError(
+                f"This model is assigned to {names} and must remain a {expected} model."
+            )
+        supervisor_assigned = conn.execute(
+            "SELECT 1 FROM supervisor_settings WHERE model_id = ?",
+            (model_id,),
+        ).fetchone()
+        if supervisor_assigned and not _supervisor_provider_supported(
+            resulting_provider
+        ):
+            raise ValueError(
+                "This model is assigned to Mounir and must remain a Mistral, "
+                "Groq, or Ollama model."
+            )
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
             conn.execute(
                 f"UPDATE models SET {sets} WHERE id = ?",
                 (*fields.values(), model_id),
             )
+            if "model" in fields:
+                conn.execute(
+                    """
+                    UPDATE builtin_agent_settings
+                    SET model = ?, updated_at = ?
+                    WHERE model_id = ?
+                    """,
+                    (fields["model"], _now(), model_id),
+                )
         except sqlite3.IntegrityError as exc:
             raise _friendly_integrity_error(exc) from exc
         conn.commit()

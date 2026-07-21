@@ -350,8 +350,15 @@ def _dispatch(name: str, arguments: dict) -> tuple[str, list[dict]]:
 
 def run(task: str, allowed_tools: list[str] | None = None) -> str:
     """Run the media analyst on a task. Returns a plain-text report."""
-    if not config.NVIDIA_API_KEY:
-        return "Media agent failed: NVIDIA_API_KEY is not set."
+    from .. import db
+    runtime = db.get_builtin_agent_runtime(
+        "media",
+        fallback_model=config.MEDIA_MODEL,
+        fallback_base_url=config.NVIDIA_BASE_URL,
+        fallback_api_key=config.NVIDIA_API_KEY,
+    )
+    if not runtime["api_key"]:
+        return "Media agent failed: its NVIDIA API key is not set."
 
     allowed = (
         {str(name) for name in allowed_tools}
@@ -371,7 +378,11 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
             message = llm.nvidia_chat(
-                messages, tools=tool_schemas or None, model=config.MEDIA_MODEL
+                messages,
+                tools=tool_schemas or None,
+                model=runtime["model"],
+                base_url=runtime["base_url"],
+                api_key=runtime["api_key"],
             )
         except Exception as exc:
             return f"Media agent failed: {exc}"
