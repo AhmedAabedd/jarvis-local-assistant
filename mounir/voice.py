@@ -7,7 +7,7 @@ recording is captured: Enter key vs. wake word + voice-activity detection.
 
 from __future__ import annotations
 
-from . import audio, config, stt, tts
+from . import audio, config, db, stt, tts
 from .agent import Agent
 from .sentences import iter_sentences
 
@@ -19,9 +19,9 @@ def _handle_utterance(agent: Agent, wav) -> None:
         print("[heard nothing]\n")
         return
     print(f"you ({lang}) ▸ {text}")
-    print("mounir ▸ ", end="", flush=True)
+    print(f"{db.get_profile()['assistant_name'].lower()} ▸ ", end="", flush=True)
     try:
-        for sentence in iter_sentences(agent.respond(text)):
+        for sentence in iter_sentences(agent.respond(text, voice=True)):
             print(sentence, end=" ", flush=True)
             tts.speak(sentence)
     except Exception as exc:  # keep the loop alive on a single failure
@@ -32,7 +32,7 @@ def _handle_utterance(agent: Agent, wav) -> None:
 def run_voice_loop(agent: Agent | None = None) -> None:
     """Push-to-talk: press Enter to start/stop each recording."""
     agent = agent or Agent()
-    print(f"Mounir voice online — model '{agent.model}'.")
+    print(f"{db.get_profile()['assistant_name']} voice online — model '{agent.model}'.")
     print("Press Enter to talk, Ctrl-C to quit.\n")
 
     while True:
@@ -50,7 +50,7 @@ def run_hands_free_loop(agent: Agent | None = None) -> None:
     from . import wakeword  # lazy: pulls openwakeword only in this mode
 
     agent = agent or Agent()
-    print(f"Mounir hands-free — model '{agent.model}'.")
+    print(f"{db.get_profile()['assistant_name']} hands-free — model '{agent.model}'.")
     print(f"Say the wake word ('{config.WAKE_WORD}') to talk. Ctrl-C to quit.\n")
 
     while True:
