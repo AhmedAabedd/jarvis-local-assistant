@@ -3,7 +3,6 @@ FastAPI backend for the Mounir web UI.
 
 Serves:
   - GET  /                 -> the dashboard (index.html)
-  - GET  /api/stats        -> live CPU/RAM/network stats (psutil)
   - WS   /ws/chat          -> text chat, streams Mounir's reply token by token
   - POST /api/voice        -> upload audio, returns transcript + spoken reply (base64 wav)
 
@@ -31,7 +30,6 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -216,11 +214,6 @@ app = FastAPI(title="Mounir", lifespan=_lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 app.mount("/images", StaticFiles(directory=ROOT_DIR / "images"), name="images")
 
-# --- network rate tracking ---------------------------------------------------
-_last_net = psutil.net_io_counters()
-_last_net_time = time.time()
-
-
 def _read_html(filename: str) -> str:
     with (ROOT_DIR / filename).open("r", encoding="utf-8") as f:
         return f.read()
@@ -234,28 +227,6 @@ async def root():
 @app.get("/admin", response_class=HTMLResponse)
 async def admin():
     return _read_html("admin.html")
-
-
-@app.get("/api/stats")
-async def stats():
-    global _last_net, _last_net_time
-
-    cpu = psutil.cpu_percent(interval=0.1)
-    ram = psutil.virtual_memory().percent
-
-    now = psutil.net_io_counters()
-    t = time.time()
-    dt = max(t - _last_net_time, 0.01)
-    down_kbs = (now.bytes_recv - _last_net.bytes_recv) / 1024 / dt
-    up_kbs = (now.bytes_sent - _last_net.bytes_sent) / 1024 / dt
-    _last_net, _last_net_time = now, t
-
-    return JSONResponse({
-        "cpu": cpu,
-        "ram": ram,
-        "net_down": max(down_kbs, 0),
-        "net_up": max(up_kbs, 0),
-    })
 
 
 @app.get("/api/conversation")

@@ -378,6 +378,25 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
         self.assertEqual(mistral_stream.call_args.kwargs["api_key"], "test-key")
 
+        with patch("mistralai.client.Mistral") as mistral_client:
+            mistral_client.return_value.chat.stream.return_value = []
+            self.assertEqual(
+                list(
+                    llm_mod.chat_stream(
+                        [{"role": "user", "content": "hello"}],
+                        model="mistral-test",
+                        provider="Mistral",
+                        base_url="https://api.mistral.ai/v1",
+                        api_key="test-key",
+                    )
+                ),
+                [],
+            )
+        self.assertEqual(
+            mistral_client.call_args.kwargs["server_url"],
+            "https://api.mistral.ai",
+        )
+
         with patch.object(
             llm_mod, "_ollama_stream", return_value=iter(["cloud-ready"])
         ) as ollama_stream:

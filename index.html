@@ -125,29 +125,7 @@
     display: flex; align-items: center; gap: 8px;
   }
   .panel-title::after { content: ''; flex: 1; height: 1px; background: var(--line); }
-  .panel-title + .panel-title, .stat + .panel-title { margin-top: 28px; }
-
-  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 22px; }
-  .stat-box {
-    border: 1px solid var(--line); border-radius: 10px; padding: 13px 14px;
-    background: linear-gradient(180deg, var(--soft), transparent);
-  }
-  .stat-box .num { font-size: 22px; font-weight: 600; color: var(--text); }
-  .stat-box .lbl { font-size: 10px; color: var(--text-dim); letter-spacing: 0.06em; margin-top: 3px; text-transform: uppercase; }
-
-  .stat { margin-bottom: 18px; }
-  .stat-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 7px; }
-  .stat-label { font-size: 11px; color: var(--text-mid); letter-spacing: 0.04em; }
-  .stat-value { font-size: 13px; font-weight: 500; color: var(--text); }
-  .stat-value.accent { color: var(--lav); }
-  .bar-track { height: 4px; background: var(--line); border-radius: 3px; overflow: hidden; }
-  .bar-fill {
-    height: 100%; border-radius: 3px;
-    background: linear-gradient(90deg, var(--purple-dim), var(--purple));
-    box-shadow: 0 0 10px var(--glow);
-    transition: width 0.6s ease;
-  }
-  .spark { width: 100%; height: 30px; margin-top: 8px; }
+  .panel-title + .panel-title { margin-top: 28px; }
 
   /* ---------- activity log ---------- */
   .log-entry {
@@ -325,29 +303,8 @@
     </div>
   </div>
 
-  <!-- LEFT: system vitals -->
+  <!-- LEFT: Agent Studio entry -->
   <div class="panel left">
-    <div class="panel-title">System</div>
-    <div class="stat-grid">
-      <div class="stat-box"><div class="num mono" id="cpuNum">—%</div><div class="lbl">CPU</div></div>
-      <div class="stat-box"><div class="num mono" id="ramNum">—%</div><div class="lbl">Memory</div></div>
-    </div>
-
-    <div class="stat">
-      <div class="stat-head"><span class="stat-label">CPU LOAD</span><span class="stat-value mono accent" id="cpuVal">0%</span></div>
-      <div class="bar-track"><div class="bar-fill" id="cpuBar" style="width:0%"></div></div>
-      <svg class="spark" id="cpuSpark" viewBox="0 0 280 30" preserveAspectRatio="none"></svg>
-    </div>
-    <div class="stat">
-      <div class="stat-head"><span class="stat-label">MEMORY</span><span class="stat-value mono accent" id="ramVal">0%</span></div>
-      <div class="bar-track"><div class="bar-fill" id="ramBar" style="width:0%"></div></div>
-      <svg class="spark" id="ramSpark" viewBox="0 0 280 30" preserveAspectRatio="none"></svg>
-    </div>
-
-    <div class="panel-title">Network</div>
-    <div class="stat"><div class="stat-head"><span class="stat-label">↓ DOWN</span><span class="stat-value mono" id="netDown">0 KB/s</span></div></div>
-    <div class="stat"><div class="stat-head"><span class="stat-label">↑ UP</span><span class="stat-value mono" id="netUp">0 KB/s</span></div></div>
-
     <a class="studio-entry" href="/admin">
       <span class="studio-entry-icon">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="8.5" y="14" width="7" height="7" rx="2"/><path d="M6.5 10v1.5a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V10M12 13.5V14"/></svg>
@@ -422,34 +379,6 @@ function tickClock(){
   document.getElementById('clock').innerHTML = `${p(d.getHours())}:${p(d.getMinutes())}<b>:${p(d.getSeconds())}</b>`;
 }
 setInterval(tickClock, 1000); tickClock();
-
-/* ---------------- sparklines ---------------- */
-function makeSpark(svg, color){
-  const data = new Array(40).fill(0);
-  return { push(v){
-    data.shift(); data.push(v);
-    const w=280,h=30,step=w/(data.length-1);
-    let d=''; data.forEach((val,i)=>{ const x=i*step, y=h-(val/100)*h; d+=(i===0?`M${x},${y}`:` L${x},${y}`); });
-    svg.innerHTML = `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.9"/>`;
-  }};
-}
-const cpuSpark = makeSpark(document.getElementById('cpuSpark'), '#a855f7');
-const ramSpark = makeSpark(document.getElementById('ramSpark'), '#c4b5fd');
-
-/* ---------------- system stats ---------------- */
-async function pollStats(){
-  let data;
-  try { data = await (await fetch('/api/stats')).json(); }
-  catch(e){ data = { cpu:15+Math.random()*25, ram:40+Math.random()*15, net_down:Math.random()*120, net_up:Math.random()*40 }; }
-  const set = (id,v)=>document.getElementById(id).textContent=v;
-  set('cpuNum',Math.round(data.cpu)+'%'); set('ramNum',Math.round(data.ram)+'%');
-  set('cpuVal',Math.round(data.cpu)+'%'); set('ramVal',Math.round(data.ram)+'%');
-  document.getElementById('cpuBar').style.width=data.cpu+'%';
-  document.getElementById('ramBar').style.width=data.ram+'%';
-  set('netDown',Math.round(data.net_down)+' KB/s'); set('netUp',Math.round(data.net_up)+' KB/s');
-  cpuSpark.push(data.cpu); ramSpark.push(data.ram);
-}
-setInterval(pollStats, 1500); pollStats();
 
 /* ---------------- chat helpers ---------------- */
 const transcript = document.getElementById('transcript');

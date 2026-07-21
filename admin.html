@@ -1837,7 +1837,6 @@ function buildRecordDetailsHtml(item) {
     const languages = { auto: 'Automatic', en: 'English', fr: 'French', ar: 'Arabic' };
     return `
       <section class="record-card">
-        <div class="record-card-title">Profile information</div>
         <div class="record-grid">
           ${recordFieldHtml('User name', item.user_name)}
           ${recordFieldHtml('Assistant name', item.assistant_name)}

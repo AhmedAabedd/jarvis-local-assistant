@@ -512,8 +512,8 @@ For Arabic TTS, grab an `ar_*` Piper voice and set `MOUNIR_PIPER_MODEL` to it.
 
 Two separate pages, both served by `server.py`:
 
-- **`/`** — the chat dashboard: voice orb, transcript, live CPU/RAM/network
-  stats, tool-confirmation modal. It talks to the same shared `Agent`
+- **`/`** — the chat dashboard: voice orb, transcript, text fallback, and
+  tool-confirmation modal. It talks to the same shared `Agent`
   instance over a WebSocket (`/ws/chat`).
 - **`/admin`** — the management UI for models, MCP servers, dynamic subagents,
   and the local profile. The **Profile** view sets the user name, assistant

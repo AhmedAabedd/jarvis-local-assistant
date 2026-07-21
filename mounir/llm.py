@@ -260,9 +260,14 @@ def _mistral_stream(
 
         # Hard timeout: without it a throttled/stalled Mistral request hangs
         # the whole turn forever with no error surfacing anywhere.
+        # Model records use the common OpenAI-compatible base form ending in
+        # /v1.  The Mistral SDK appends its own /v1 route, so it expects the
+        # server root here; passing the stored value unchanged produces
+        # /v1/v1/chat/completions and a 404.
+        mistral_server = (base_url or "").rstrip("/").removesuffix("/v1")
         client = Mistral(
             api_key=config.MISTRAL_API_KEY if api_key is None else api_key,
-            server_url=base_url or None,
+            server_url=mistral_server or None,
             timeout_ms=120_000,
         )
 
