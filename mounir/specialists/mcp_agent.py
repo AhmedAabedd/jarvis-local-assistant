@@ -422,6 +422,13 @@ def run(
 ) -> str:
     """Run one dynamic MCP subagent on a task. Returns its plain-text report."""
     name = spec.get("name", "MCP")
+    # Re-check immediately before the async MCP path. This closes the race
+    # where an agent is disabled after its graph was compiled and guarantees
+    # no stdio process or HTTP session is opened for an inactive agent.
+    if spec.get("id") is not None:
+        from .. import db
+        if not db.is_subagent_enabled(spec["id"]):
+            return f"The {name} agent is inactive and cannot be used."
     api_key = spec.get("api_key") or ""
     if not (spec.get("connection") or "").strip():
         return (

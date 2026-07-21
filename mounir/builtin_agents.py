@@ -118,9 +118,14 @@ def capabilities() -> list[dict]:
 
 def run(key: str, task: str, allowed_tools: list[str]) -> str:
     """Run one built-in specialist with a code-enforced tool allowlist."""
-    definition = _BUILTINS.get(str(key or "").strip())
+    normalized = str(key or "").removeprefix("builtin:").strip()
+    definition = _BUILTINS.get(normalized)
     if definition is None:
         raise ValueError(f"unknown built-in specialist: {key}")
+    # Lazy import avoids the db -> builtin_agents catalog import cycle.
+    from . import db
+    if not db.is_builtin_agent_enabled(normalized):
+        raise ValueError(f"{definition['name']} agent is inactive")
     safe = definition["safe_tools"]
     selected = [name for name in allowed_tools if name in safe]
     if not selected:

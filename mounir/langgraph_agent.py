@@ -122,6 +122,16 @@ def _supervisor(
         "api_key": supervisor_runtime["api_key"],
     }
     schemas = list(tools.SCHEMAS) if use_tools else []
+    # Built-in delegation schemas are static definitions, but availability is
+    # user-controlled. Never advertise a delegate that is absent from this
+    # turn's executable graph.
+    schemas = [
+        schema for schema in schemas
+        if not str((schema.get("function") or {}).get("name") or "").startswith(
+            "delegate_to_"
+        )
+        or str((schema.get("function") or {}).get("name") or "") in delegates
+    ]
     # Registered MCP agents each contribute one delegate schema — the only
     # thing the supervisor ever sees of them.
     if use_tools:
@@ -264,7 +274,10 @@ def _media(state: TurnState) -> Command:
     trace.node("media")
     trace.block("received  ← supervisor", task)
 
-    report = run_media(task).strip() if task else "No task was provided to the media agent."
+    if not db.is_builtin_agent_enabled("media"):
+        report = "The Media agent is inactive and cannot be used."
+    else:
+        report = run_media(task).strip() if task else "No task was provided to the media agent."
 
     trace.block("returned  → supervisor", report)
     trace.gap()  # breathing room before the supervisor's reply streams in
@@ -292,7 +305,10 @@ def _knowledge(state: TurnState) -> Command:
     trace.node("knowledge")
     trace.block("received  ← supervisor", task)
 
-    report = run_knowledge(task).strip() if task else "No task was provided to the knowledge agent."
+    if not db.is_builtin_agent_enabled("knowledge"):
+        report = "The Knowledge agent is inactive and cannot be used."
+    else:
+        report = run_knowledge(task).strip() if task else "No task was provided to the knowledge agent."
 
     trace.block("returned  → supervisor", report)
     trace.gap()  # breathing room before the supervisor's reply streams in
@@ -320,7 +336,10 @@ def _system(state: TurnState) -> Command:
     trace.node("system")
     trace.block("received  ← supervisor", task)
 
-    report = run_system(task).strip() if task else "No task was provided to the system agent."
+    if not db.is_builtin_agent_enabled("system"):
+        report = "The System agent is inactive and cannot be used."
+    else:
+        report = run_system(task).strip() if task else "No task was provided to the system agent."
 
     trace.block("returned  → supervisor", report)
     trace.gap()  # breathing room before the supervisor's reply streams in
@@ -365,11 +384,14 @@ def _make_mcp_node(
         trace.node(spec["name"])
         trace.block("received  ← supervisor", task)
 
-        report = (
-            run_mcp_agent(task, spec, protected_attempts).strip()
-            if task
-            else f"No task was provided to the {spec['name']} agent."
-        )
+        if not db.is_subagent_enabled(spec["id"]):
+            report = f"The {spec['name']} agent is inactive and cannot be used."
+        else:
+            report = (
+                run_mcp_agent(task, spec, protected_attempts).strip()
+                if task
+                else f"No task was provided to the {spec['name']} agent."
+            )
 
         trace.block(f"returned  → {parent}", report)
         trace.gap()  # breathing room before the parent's reply streams in
@@ -405,7 +427,12 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
     one node per agent, one delegate tool per agent in the merged map.
     """
     dynamic = mcp_agents.load()
-    delegates = dict(_DELEGATES)
+    enabled_builtins = db.enabled_builtin_agent_keys()
+    delegates = {
+        name: node
+        for name, node in _DELEGATES.items()
+        if node == "coder" or node in enabled_builtins
+    }
     for spec in dynamic:
         delegates[mcp_agents.delegate_tool_name(spec["name"])] = mcp_agents.node_name(spec["name"])
 
@@ -415,9 +442,12 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
         lambda state: _supervisor(state, stream_q, model, use_tools, delegates, dynamic),
     )
     graph.add_node("coder", _coder)
-    graph.add_node("media", _media)
-    graph.add_node("knowledge", _knowledge)
-    graph.add_node("system", _system)
+    if "media" in enabled_builtins:
+        graph.add_node("media", _media)
+    if "knowledge" in enabled_builtins:
+        graph.add_node("knowledge", _knowledge)
+    if "system" in enabled_builtins:
+        graph.add_node("system", _system)
     # Today only the supervisor is a valid parent: a specialist node re-extracts
     # its OWN delegate call on entry, so routing a child's report into another
     # specialist would arrive with no matching call. Nested parents (subagent

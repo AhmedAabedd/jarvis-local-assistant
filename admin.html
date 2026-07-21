@@ -386,6 +386,21 @@
   .agent-node.dynamic:hover { border-color: rgba(91,156,245,.72); box-shadow: 0 10px 28px rgba(0,0,0,.28); }
   .agent-node.builtin { cursor: pointer; }
   .agent-node.builtin:hover { border-color: rgba(168,85,247,.58); box-shadow: 0 10px 28px rgba(0,0,0,.28); }
+  .agent-node.inactive,
+  .agent-node.inactive:hover {
+    border-color: rgba(239,91,91,.82); background: rgba(30,20,25,.94);
+    box-shadow: 0 8px 25px rgba(0,0,0,.18);
+  }
+  .agent-node.inactive .node-head,
+  .agent-node.inactive .node-model,
+  .agent-node.inactive .node-open,
+  .agent-node.inactive .node-port { opacity: .34; filter: grayscale(1); }
+  .workflow-links .inactive-link {
+    stroke: rgba(198,75,82,.62); opacity: .58;
+  }
+  .workflow-links .inactive-end {
+    stroke: rgba(218,82,89,.78); stroke-width: 1.4; opacity: .72;
+  }
   .node-open {
     position: absolute; top: 9px; right: 9px; color: #78aef8;
     opacity: .55; transition: opacity .15s;
@@ -558,7 +573,17 @@
     background: var(--bg); color: var(--text-mid); font-size: 11px;
     overflow-wrap: anywhere;
   }
-  .record-agent-heading { display: flex; align-items: center; gap: 14px; }
+  .record-agent-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+  .record-agent-identity { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .agent-availability { display: flex; align-items: center; gap: 11px; }
+  .agent-availability-copy { text-align: right; }
+  .agent-availability-copy strong { display: block; color: var(--text); font-size: 10px; }
+  .agent-availability-copy span { display: block; margin-top: 2px; color: var(--text-dim); font-size: 8px; }
+  .agent-availability-feedback { min-height: 14px; margin-top: 8px; color: var(--danger); font-size: 9px; text-align: right; }
+  .agent-state-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 7px rgba(95,180,135,.35); }
+  .agent-state-dot.inactive { background: var(--danger); box-shadow: none; }
+  .list-item.agent-inactive .list-agent-icon,
+  .list-item.agent-inactive .info { opacity: .46; filter: grayscale(1); }
   .record-agent-icon {
     width: 48px; height: 48px; flex: 0 0 48px; display: grid; place-items: center;
     border: 1px solid rgba(91,156,245,.28); border-radius: 12px;
@@ -1172,7 +1197,7 @@ function renderOverview() {
         <div class="workflow-toolbar">
           <div class="workflow-title"><span class="live-dot"></span><span>Configured topology</span></div>
           <div class="workflow-tools">
-            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>Dynamic MCP</span>${telegramEnabled ? '<span><i class="legend-dot input"></i>Input channel</span>' : ''}</div>
+            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>Dynamic MCP</span><span><i class="legend-dot" style="background:var(--danger)"></i>Inactive</span>${telegramEnabled ? '<span><i class="legend-dot input"></i>Input channel</span>' : ''}</div>
             <div class="zoom-controls" aria-label="Graph zoom controls">
               <button class="zoom-control" type="button" data-zoom="out" aria-label="Zoom out">−</button>
               <button class="zoom-control value" type="button" data-zoom="reset" id="zoomValue" aria-label="Reset zoom">100%</button>
@@ -1846,16 +1871,17 @@ function agentNodeHtml(item, kind, nodeId, agentId) {
   const initial = (item.name || '?').trim().charAt(0).toUpperCase();
   const dynamic = kind === 'dynamic';
   const builtin = kind === 'builtin';
+  const inactive = item.enabled === false || Number(item.enabled) === 0;
   const icon = dynamic && item.has_icon
     ? `<img src="/api/subagents/${agentId}/icon" alt="">`
     : esc(initial);
   const behavior = dynamic
-    ? ` data-agent-id="${agentId}" title="Open subagent settings" role="button" tabindex="0"`
+    ? ` data-agent-id="${agentId}" title="${inactive ? 'Inactive — open subagent settings' : 'Open subagent settings'}" role="button" tabindex="0"`
     : builtin
-    ? ` data-builtin-key="${esc(item.key)}" title="View capabilities and model" role="button" tabindex="0"`
+    ? ` data-builtin-key="${esc(item.key)}" title="${inactive ? 'Inactive — open specialist settings' : 'View capabilities and model'}" role="button" tabindex="0"`
     : '';
   return `
-    <article class="agent-node ${dynamic ? 'dynamic' : builtin ? 'builtin' : ''}" id="node-${nodeId}"${behavior}>
+    <article class="agent-node ${dynamic ? 'dynamic' : builtin ? 'builtin' : ''}${inactive ? ' inactive' : ''}" id="node-${nodeId}"${behavior}>
       <span class="node-port input"></span>
       ${dynamic ? '<svg class="node-open" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>' : ''}
       <div class="node-head">
@@ -1897,7 +1923,11 @@ function drawWorkflowLinks() {
     const tx = (rect.left + rect.width / 2 - canvasRect.left) / canvasZoom;
     const ty = (rect.top - canvasRect.top) / canvasZoom;
     const bend = sy + Math.max(28, (ty - sy) * .54);
-    paths.push(`<path class="specialist-link" d="M ${sx} ${sy} C ${sx} ${bend}, ${tx} ${bend}, ${tx} ${ty}"/><circle cx="${tx}" cy="${ty}" r="2.5"/>`);
+    const inactive = target.classList.contains('inactive');
+    const endpoint = inactive
+      ? `<path class="inactive-end" d="M ${tx - 3} ${ty - 3} L ${tx + 3} ${ty + 3} M ${tx + 3} ${ty - 3} L ${tx - 3} ${ty + 3}"/>`
+      : `<circle cx="${tx}" cy="${ty}" r="2.5"/>`;
+    paths.push(`<path class="specialist-link${inactive ? ' inactive-link' : ''}" d="M ${sx} ${sy} C ${sx} ${bend}, ${tx} ${bend}, ${tx} ${ty}"/>${endpoint}`);
   });
   svg.setAttribute('viewBox', `0 0 ${canvasRect.width / canvasZoom} ${canvasRect.height / canvasZoom}`);
   svg.innerHTML = paths.join('');
@@ -1966,13 +1996,15 @@ function renderListItem(item) {
   const icon = item.has_icon
     ? `<img class="list-agent-icon" src="/api/subagents/${item.id}/icon" alt="">`
     : `<div class="list-agent-icon fallback">${esc(initial)}</div>`;
+  const inactive = item.enabled === false || Number(item.enabled) === 0;
   return `
-    <div class="list-item" data-id="${item.id}">
+    <div class="list-item${inactive ? ' agent-inactive' : ''}" data-id="${item.id}">
       ${icon}
       <div class="info">
         <div class="primary">${esc(item.name)}</div>
         <div class="secondary">${esc(item.description)}</div>
       </div>
+      <span class="agent-state-dot${inactive ? ' inactive' : ''}" role="status" aria-label="${inactive ? 'Inactive' : 'Active'}" title="${inactive ? 'Inactive' : 'Active'}"></span>
       <span class="badge mono">delegate_to_${slug(item.name)}</span>
       <button class="del-btn" data-action="delete" title="Remove">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -2126,12 +2158,26 @@ function buildRecordDetailsHtml(item) {
   const icon = item.has_icon
     ? `<div class="record-agent-icon has-image"><img src="/api/subagents/${item.id}/icon" alt=""></div>`
     : `<div class="record-agent-icon">${esc(initial)}</div>`;
+  const enabled = !(item.enabled === false || Number(item.enabled) === 0);
   return `
     <section class="record-card">
       <div class="record-agent-heading">
-        ${icon}
-        <div class="record-agent-name">${esc(item.name)}</div>
+        <div class="record-agent-identity">
+          ${icon}
+          <div class="record-agent-name">${esc(item.name)}</div>
+        </div>
+        <div class="agent-availability">
+          <div class="agent-availability-copy">
+            <strong>${enabled ? 'Active' : 'Inactive'}</strong>
+            <span>${enabled ? 'Available to Mounir' : 'Saved, but unavailable at runtime'}</span>
+          </div>
+          <label class="switch" title="${enabled ? 'Deactivate subagent' : 'Activate subagent'}">
+            <input type="checkbox" data-subagent-enabled="${item.id}"${enabled ? ' checked' : ''}>
+            <span class="switch-track"></span>
+          </label>
+        </div>
       </div>
+      <div class="agent-availability-feedback" id="agentAvailabilityFeedback"></div>
     </section>
     <section class="record-card">
       <div class="record-card-title">Agent configuration</div>
@@ -3074,6 +3120,28 @@ $('content').addEventListener('keydown', e => {
   agentNode.click();
 });
 
+$('content').addEventListener('change', async e => {
+  const toggle = e.target.closest('[data-subagent-enabled]');
+  if (!toggle) return;
+  const id = Number(toggle.dataset.subagentEnabled);
+  const requested = Boolean(toggle.checked);
+  const feedback = $('agentAvailabilityFeedback');
+  toggle.disabled = true;
+  if (feedback) feedback.textContent = 'Saving…';
+  try {
+    const updated = await api('PUT', API.agents.update(id), { enabled: requested });
+    try { S.heartbeat = await api('GET', '/api/heartbeat'); } catch (_) {}
+    const index = S.agents.findIndex(item => item.id === id);
+    if (index >= 0) S.agents[index] = updated;
+    S.editing = updated;
+    renderForm();
+  } catch (error) {
+    toggle.checked = !requested;
+    toggle.disabled = false;
+    if (feedback) feedback.textContent = error.message;
+  }
+});
+
 $('content').addEventListener('wheel', e => {
   const viewport = e.target.closest('#workflowCanvas');
   if (!viewport || (!e.ctrlKey && !e.metaKey)) return;
@@ -3307,6 +3375,7 @@ function openBuiltinAgent(key) {
   if (!agent) return;
   const tools = Array.isArray(agent.tools) ? agent.tools : [];
   const options = Array.isArray(agent.model_options) ? agent.model_options : [];
+  const enabled = agent.enabled !== false && Number(agent.enabled) !== 0;
   $('builtinModalContent').innerHTML = `
     <div class="builtin-modal-head">
       <div class="builtin-modal-icon">${esc((agent.name || '?').charAt(0).toUpperCase())}</div>
@@ -3316,6 +3385,19 @@ function openBuiltinAgent(key) {
       </div>
     </div>
     <div class="builtin-modal-description">${esc(agent.description || 'Built-in Mounir specialist.')}</div>
+    <section class="builtin-modal-section">
+      <h4>Availability</h4>
+      <div class="agent-availability" style="justify-content:space-between">
+        <div class="agent-availability-copy" style="text-align:left">
+          <strong id="builtinAvailabilityLabel">${enabled ? 'Active' : 'Inactive'}</strong>
+          <span>Inactive specialists remain configured but cannot be delegated to or run by heartbeat.</span>
+        </div>
+        <label class="switch" title="${enabled ? 'Deactivate specialist' : 'Activate specialist'}">
+          <input type="checkbox" id="builtinEnabled"${enabled ? ' checked' : ''}>
+          <span class="switch-track"></span>
+        </label>
+      </div>
+    </section>
     <section class="builtin-modal-section">
       <h4>Capabilities</h4>
       <div class="builtin-capability-list">
@@ -3345,6 +3427,28 @@ function openBuiltinAgent(key) {
     </div>`;
   builtinOverlay.classList.add('show');
   $('builtinCancel').addEventListener('click', closeBuiltinAgent);
+  $('builtinEnabled').addEventListener('change', async event => {
+    const requested = Boolean(event.target.checked);
+    event.target.disabled = true;
+    const feedback = $('builtinModalFeedback');
+    feedback.textContent = 'Saving…';
+    try {
+      const updated = await api('PUT', `/api/builtin-agents/${encodeURIComponent(agent.key)}`, {
+        enabled: requested,
+      });
+      try { S.heartbeat = await api('GET', '/api/heartbeat'); } catch (_) {}
+      const index = S.overview.builtins.findIndex(item => item.key === agent.key);
+      if (index >= 0) S.overview.builtins[index] = updated;
+      $('builtinAvailabilityLabel').textContent = requested ? 'Active' : 'Inactive';
+      feedback.textContent = '';
+      event.target.disabled = false;
+      renderOverview();
+    } catch (error) {
+      event.target.checked = !requested;
+      event.target.disabled = false;
+      feedback.textContent = error.message;
+    }
+  });
   $('builtinSave').addEventListener('click', async event => {
     event.target.disabled = true;
     const feedback = $('builtinModalFeedback');

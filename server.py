@@ -573,7 +573,11 @@ async def update_supervisor(req: dict):
 @app.put("/api/builtin-agents/{agent_key}")
 async def update_builtin_agent(agent_key: str, req: dict):
     try:
-        return db.update_builtin_agent_model(agent_key, req.get("model_id"))
+        return db.update_builtin_agent(
+            agent_key,
+            model_id=req.get("model_id") if "model_id" in req else None,
+            enabled=req.get("enabled") if "enabled" in req else None,
+        )
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -970,6 +974,7 @@ async def create_subagent(req: dict):
             parent="supervisor",
             confirm_tools=req.get("confirm_tools"),
             dedupe_tools=req.get("dedupe_tools"),
+            enabled=req.get("enabled", True),
             **icon,
         )
     except (ValueError, TypeError) as exc:

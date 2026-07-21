@@ -746,7 +746,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertTrue(
             {
                 "description", "icon_data", "icon_mime",
-                "confirm_tool_calls", "confirm_tools", "dedupe_tools",
+                "confirm_tool_calls", "confirm_tools", "dedupe_tools", "enabled",
             }
             <= agent_columns
         )
@@ -777,6 +777,10 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(db.get_model(1)["model"], "qwen3:4b")
         self.assertEqual(db.get_model(1)["base_url"], "http://localhost:11434/v1")
         self.assertEqual(json.loads(db.get_subagent(1)["confirm_tools"]), [])
+        self.assertEqual(db.get_subagent(1)["enabled"], 1)
+        self.assertTrue(
+            all(agent["enabled"] for agent in db.list_builtin_agents())
+        )
         self.assertEqual(stat.S_IMODE(db.DB_PATH.stat().st_mode), 0o600)
 
     def test_resolved_spec_preserves_transport_model_and_permissions(self):
@@ -811,6 +815,134 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(spec["dedupe_tools"], ["dangerous_action"])
         self.assertEqual(agent["confirm_tool_calls"], 1)
         self.assertEqual(agent["confirm_tools"], '["dangerous_action"]')
+
+    def test_dynamic_subagent_activation_controls_runtime_and_mcp_connection(self):
+        db.init()
+        model = db.add_model(
+            "Activation model", "activation/model", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Activation server", "fake-mcp-server")
+        active = db.add_subagent(
+            "Active helper", "Handles active tasks.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        disabled = db.add_subagent(
+            "Disabled helper", "Handles disabled tasks.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        stale_spec = next(
+            spec for spec in db.build_specs() if spec["id"] == disabled["id"]
+        )
+
+        updated = db.update_subagent(disabled["id"], enabled=False)
+        self.assertEqual(updated["enabled"], 0)
+        self.assertFalse(db.is_subagent_enabled(disabled["id"]))
+        self.assertEqual(
+            [spec["id"] for spec in db.build_specs()], [active["id"]]
+        )
+
+        graph_nodes = set(langgraph_agent.build_graph().get_graph().nodes)
+        self.assertIn("mcp_active_helper", graph_nodes)
+        self.assertNotIn("mcp_disabled_helper", graph_nodes)
+        with patch.object(mcp_agent, "_run_async") as connect:
+            result = mcp_agent.run("Do the task", stale_spec)
+        self.assertIn("inactive", result)
+        connect.assert_not_called()
+
+        restored = db.update_subagent(disabled["id"], enabled=True)
+        self.assertEqual(restored["enabled"], 1)
+        self.assertTrue(db.is_subagent_enabled(disabled["id"]))
+        self.assertIn(
+            "mcp_disabled_helper",
+            set(langgraph_agent.build_graph().get_graph().nodes),
+        )
+
+    def test_builtin_activation_removes_delegate_and_blocks_direct_runs(self):
+        db.init()
+        updated = db.update_builtin_agent("media", enabled=False)
+        self.assertFalse(updated["enabled"])
+        self.assertFalse(db.is_builtin_agent_enabled("media"))
+        self.assertNotIn(
+            "media", set(langgraph_agent.build_graph().get_graph().nodes)
+        )
+
+        advertised = []
+
+        def fake_chat_stream(messages, tools=None, **kwargs):
+            advertised.extend(
+                schema["function"]["name"] for schema in (tools or [])
+            )
+            yield "ok"
+
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat_stream),
+            patch.object(langgraph_agent, "run_media") as run_media,
+        ):
+            list(langgraph_agent.Agent().respond("What tools are available?"))
+            self.assertIn("inactive", mounir_tools.delegate_to_media("read x"))
+        self.assertNotIn("delegate_to_media", advertised)
+        run_media.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "inactive"):
+            heartbeat_mod.builtin_agents.run(
+                "media", "Inspect media", ["find_media"]
+            )
+        stale_state = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "stale_media",
+                            "function": {
+                                "name": "delegate_to_media",
+                                "arguments": '{"task":"Inspect media"}',
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+        with patch.object(langgraph_agent, "run_media") as stale_media:
+            langgraph_agent._media(stale_state)
+        stale_media.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            langgraph_agent.db.update_heartbeat_settings(
+                selected_tools=[
+                    {"agent_key": "builtin:media", "tool_name": "find_media"}
+                ]
+            )
+
+        db.update_builtin_agent("media", enabled=True)
+        self.assertTrue(db.is_builtin_agent_enabled("media"))
+        self.assertIn("media", set(langgraph_agent.build_graph().get_graph().nodes))
+
+    def test_inactive_dynamic_subagent_is_excluded_from_heartbeat(self):
+        db.init()
+        agent = self._create_email_fixture()
+        db.save_server_tools(
+            agent["mcp_server_id"],
+            [{"name": "search_emails", "description": "Read email", "input_schema": {}}],
+        )
+        selection = [
+            {"subagent_id": agent["id"], "tool_name": "search_emails"}
+        ]
+        db.update_heartbeat_settings(selected_tools=selection)
+        self.assertEqual(len(db.get_heartbeat_targets()), 1)
+
+        db.update_subagent(agent["id"], enabled=False)
+        self.assertFalse(
+            any(
+                item["key"] == f"mcp:{agent['id']}"
+                for item in db.get_heartbeat_capabilities()
+            )
+        )
+        self.assertEqual(db.get_heartbeat_targets(), [])
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            db.update_heartbeat_settings(selected_tools=selection)
+
+        db.update_subagent(agent["id"], enabled=True)
+        self.assertEqual(len(db.get_heartbeat_targets()), 1)
 
     def test_fresh_graph_has_no_automatic_dynamic_agents(self):
         from mounir.langgraph_agent import build_graph
@@ -1547,6 +1679,63 @@ class AdminApiTests(TemporaryDatabaseTest):
                     ],
                 )
                 web_server.agent.conversation.reset()
+
+        asyncio.run(exercise_api())
+
+
+    def test_admin_api_toggles_dynamic_and_builtin_availability(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+        model = db.add_model(
+            "Toggle model", "toggle/model", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        mcp_server = db.add_server("Toggle server", "fake-mcp-server")
+        subagent = db.add_subagent(
+            "Toggle helper", "Handles toggle tests.", "",
+            model["id"], mcp_server["id"],
+        )
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                disabled = await client.put(
+                    f"/api/subagents/{subagent['id']}",
+                    json={"enabled": False},
+                )
+                self.assertEqual(disabled.status_code, 200)
+                self.assertEqual(disabled.json()["enabled"], 0)
+                listed = await client.get("/api/subagents")
+                self.assertEqual(len(listed.json()), 1)
+                self.assertEqual(listed.json()[0]["enabled"], 0)
+
+                invalid = await client.put(
+                    f"/api/subagents/{subagent['id']}",
+                    json={"enabled": "sometimes"},
+                )
+                self.assertEqual(invalid.status_code, 400)
+
+                builtin = await client.put(
+                    "/api/builtin-agents/media", json={"enabled": False}
+                )
+                self.assertEqual(builtin.status_code, 200)
+                self.assertFalse(builtin.json()["enabled"])
+                overview = await client.get("/api/agent-overview")
+                media = next(
+                    item for item in overview.json()["builtins"]
+                    if item["key"] == "media"
+                )
+                self.assertFalse(media["enabled"])
+
+                restored = await client.put(
+                    f"/api/subagents/{subagent['id']}",
+                    json={"enabled": True},
+                )
+                self.assertEqual(restored.json()["enabled"], 1)
 
         asyncio.run(exercise_api())
 

@@ -28,17 +28,26 @@ def delegate_to_coder(task: str, context: str = "") -> str:
 
 def delegate_to_knowledge(task: str) -> str:
     """Hand a knowledge-folder change to the knowledge agent; returns its report."""
+    from . import db
+    if not db.is_builtin_agent_enabled("knowledge"):
+        return "The Knowledge agent is inactive and cannot be used."
     from .specialists.knowledge import run
     return run(task)
 
 def delegate_to_media(task: str) -> str:
     """Ask the media agent to read an image, PDF, audio clip, or video."""
+    from . import db
+    if not db.is_builtin_agent_enabled("media"):
+        return "The Media agent is inactive and cannot be used."
     from .specialists.media import run
     return run(task)
 
 
 def delegate_to_system(task: str) -> str:
     """Hand a hardware/system control task to the system agent; returns its report."""
+    from . import db
+    if not db.is_builtin_agent_enabled("system"):
+        return "The System agent is inactive and cannot be used."
     from .specialists.system import run
     return run(task)
 

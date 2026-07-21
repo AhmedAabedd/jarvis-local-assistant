@@ -142,6 +142,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
             confirm_tools TEXT NOT NULL DEFAULT '["*"]',
             dedupe_tools TEXT NOT NULL DEFAULT '[]',
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
             parent TEXT DEFAULT 'supervisor',
             created_at TEXT
         );
@@ -179,6 +180,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             agent_key TEXT PRIMARY KEY,
             model TEXT NOT NULL,
             model_id INTEGER REFERENCES models(id),
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
             updated_at TEXT NOT NULL
         );
 
@@ -343,6 +345,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         "models": {"model": "TEXT"},
         "builtin_agent_settings": {
             "model_id": "INTEGER REFERENCES models(id)",
+            "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
         },
         "mcp_servers": {
             "description": "TEXT NOT NULL DEFAULT ''",
@@ -362,6 +365,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "confirm_tool_calls": "INTEGER NOT NULL DEFAULT 1",
             "confirm_tools": "TEXT NOT NULL DEFAULT '[\"*\"]'",
             "dedupe_tools": "TEXT NOT NULL DEFAULT '[]'",
+            "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
         },
         "heartbeat_settings": {
             "interval_minutes": "INTEGER NOT NULL DEFAULT 30",
@@ -1331,7 +1335,8 @@ def list_builtin_agents() -> list[dict]:
         with _connect() as conn:
             setting = conn.execute(
                 """
-                SELECT s.model_id, COALESCE(m.model, s.model) AS model
+                SELECT s.model_id, s.enabled,
+                       COALESCE(m.model, s.model) AS model
                 FROM builtin_agent_settings s
                 LEFT JOIN models m ON m.id = s.model_id
                 WHERE s.agent_key = ?
@@ -1346,6 +1351,7 @@ def list_builtin_agents() -> list[dict]:
                 "model": (
                     setting["model"] if setting else definition["default_model"]
                 ),
+                "enabled": bool(setting["enabled"]) if setting else True,
                 "model_options": options,
                 "tools": capability["tools"],
             }
@@ -1353,39 +1359,83 @@ def list_builtin_agents() -> list[dict]:
     return result
 
 
-def update_builtin_agent_model(agent_key: str, model_id: int) -> dict:
+def update_builtin_agent(
+    agent_key: str,
+    *,
+    model_id: int | None = None,
+    enabled: bool | None = None,
+) -> dict:
     definition = builtin_agents.definition(agent_key)
     if definition is None:
         raise ValueError("built-in specialist was not found")
-    try:
-        requested_id = int(model_id)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("choose a model")
-    selected = get_model(requested_id)
-    if selected is None or not builtin_agents.provider_matches(
-        definition["key"], selected.get("provider", "")
-    ):
-        raise ValueError(
-            f"choose a configured {definition['provider']} model"
-        )
+    if model_id is None and enabled is None:
+        raise ValueError("provide a model or availability change")
+    selected = None
+    requested_id = None
+    if model_id is not None:
+        try:
+            requested_id = int(model_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("choose a model") from exc
+        selected = get_model(requested_id)
+        if selected is None or not builtin_agents.provider_matches(
+            definition["key"], selected.get("provider", "")
+        ):
+            raise ValueError(
+                f"choose a configured {definition['provider']} model"
+            )
+    normalized_enabled = (
+        int(_bool(enabled, "enabled")) if enabled is not None else None
+    )
     with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO builtin_agent_settings
-                (agent_key, model, model_id, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(agent_key) DO UPDATE SET
-                model = excluded.model,
-                model_id = excluded.model_id,
-                updated_at = excluded.updated_at
-            """,
-            (definition["key"], selected["model"], requested_id, _now()),
-        )
+        if selected is not None:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET model = ?, model_id = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (selected["model"], requested_id, _now(), definition["key"]),
+            )
+        if normalized_enabled is not None:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET enabled = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (normalized_enabled, _now(), definition["key"]),
+            )
         conn.commit()
     return next(
         agent for agent in list_builtin_agents()
         if agent["key"] == definition["key"]
     )
+
+
+def update_builtin_agent_model(agent_key: str, model_id: int) -> dict:
+    """Backward-compatible model-only update used by existing callers."""
+    return update_builtin_agent(agent_key, model_id=model_id)
+
+
+def is_builtin_agent_enabled(agent_key: str) -> bool:
+    key = str(agent_key or "").removeprefix("builtin:").strip()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT enabled FROM builtin_agent_settings WHERE agent_key = ?",
+            (key,),
+        ).fetchone()
+    return bool(row and row["enabled"])
+
+
+def enabled_builtin_agent_keys() -> set[str]:
+    with _connect() as conn:
+        return {
+            str(row["agent_key"])
+            for row in conn.execute(
+                "SELECT agent_key FROM builtin_agent_settings WHERE enabled = 1"
+            )
+        }
 
 
 # -----------------------------------------------------------------------------
@@ -1487,6 +1537,7 @@ def update_heartbeat_settings(
                     SELECT s.id AS subagent_id, t.name
                     FROM subagents s
                     JOIN mcp_server_tools t ON t.mcp_server_id = s.mcp_server_id
+                    WHERE s.enabled = 1
                     """
                 )
             }
@@ -1494,9 +1545,15 @@ def update_heartbeat_settings(
                 f"mcp:{int(row['id'])}": set(
                     json.loads(row["confirm_tools"] or "[]")
                 )
-                for row in conn.execute("SELECT id, confirm_tools FROM subagents")
+                for row in conn.execute(
+                    "SELECT id, confirm_tools FROM subagents WHERE enabled = 1"
+                )
             }
-            builtin_capabilities = builtin_agents.capabilities()
+            active_builtin_keys = enabled_builtin_agent_keys()
+            builtin_capabilities = [
+                agent for agent in builtin_agents.capabilities()
+                if agent["builtin_key"] in active_builtin_keys
+            ]
             for agent in builtin_capabilities:
                 confirmation_rules[agent["key"]] = {
                     tool["name"]
@@ -1605,6 +1662,7 @@ def get_heartbeat_capabilities() -> list[dict]:
                    ms.connection_status
             FROM subagents s
             JOIN mcp_servers ms ON ms.id = s.mcp_server_id
+            WHERE s.enabled = 1
             ORDER BY s.name
             """
         ).fetchall()
@@ -1613,6 +1671,7 @@ def get_heartbeat_capabilities() -> list[dict]:
             SELECT s.id AS subagent_id, t.name, t.description, t.position
             FROM subagents s
             JOIN mcp_server_tools t ON t.mcp_server_id = s.mcp_server_id
+            WHERE s.enabled = 1
             ORDER BY s.name, t.position, t.id
             """
         ).fetchall()
@@ -1652,7 +1711,11 @@ def get_heartbeat_capabilities() -> list[dict]:
                 "tools": tools,
             }
         )
-    builtins = builtin_agents.capabilities()
+    active_builtin_keys = enabled_builtin_agent_keys()
+    builtins = [
+        agent for agent in builtin_agents.capabilities()
+        if agent["builtin_key"] in active_builtin_keys
+    ]
     for agent in builtins:
         for tool in agent["tools"]:
             tool["selected"] = (
@@ -1676,6 +1739,7 @@ def get_heartbeat_targets() -> list[dict]:
             JOIN mcp_server_tools t
               ON t.mcp_server_id = s.mcp_server_id
              AND t.name = ht.tool_name
+            WHERE s.enabled = 1
             ORDER BY ht.subagent_id, ht.tool_name
             """
         ):
@@ -1691,7 +1755,10 @@ def get_heartbeat_targets() -> list[dict]:
                 row["tool_name"]
             )
     targets = []
+    active_builtin_keys = enabled_builtin_agent_keys()
     for agent in builtin_agents.capabilities():
+        if agent["builtin_key"] not in active_builtin_keys:
+            continue
         chosen = selected_builtins.get(agent["key"], [])
         safe_names = {
             tool["name"]
@@ -2278,6 +2345,7 @@ def _add_subagent(
     icon_data: bytes = b"",
     icon_mime: str = "",
     dedupe_tools=None,
+    enabled: bool = True,
 ) -> int:
     try:
         selected_model_id = int(model_id)
@@ -2306,8 +2374,8 @@ def _add_subagent(
             INSERT INTO subagents
                 (name, description, system_prompt, icon_data, icon_mime,
                  model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
-                 dedupe_tools, parent, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 dedupe_tools, enabled, parent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
@@ -2320,6 +2388,7 @@ def _add_subagent(
                 int(has_confirmations),
                 confirm_tools_json,
                 dedupe_tools_json,
+                int(_bool(enabled, "enabled")),
                 (parent or "supervisor").strip() or "supervisor",
                 _now(),
             ),
@@ -2342,12 +2411,13 @@ def add_subagent(
     icon_data: bytes = b"",
     icon_mime: str = "",
     dedupe_tools=None,
+    enabled: bool = True,
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
             confirm_tool_calls, parent, confirm_tools, icon_data, icon_mime,
-            dedupe_tools,
+            dedupe_tools, enabled,
         )
         return get_subagent(aid)
 
@@ -2355,7 +2425,7 @@ def add_subagent(
 _SUBAGENT_SELECT = """
     SELECT s.id, s.name, s.description, s.system_prompt,
            s.model_id, s.mcp_server_id, s.confirm_tool_calls, s.confirm_tools,
-           s.dedupe_tools,
+           s.dedupe_tools, s.enabled,
            s.parent, s.created_at,
            CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
            m.name AS model_name, m.model, m.provider, m.base_url, m.api_key,
@@ -2409,7 +2479,7 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     allowed = {
         "name", "description", "system_prompt", "model_id",
         "mcp_server_id", "confirm_tool_calls", "confirm_tools", "parent",
-        "icon_data", "icon_mime", "dedupe_tools",
+        "icon_data", "icon_mime", "dedupe_tools", "enabled",
     }
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
@@ -2445,6 +2515,8 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
         fields["dedupe_tools"] = _json_string_list(
             fields["dedupe_tools"], "duplicate protection tools"
         )
+    if "enabled" in fields:
+        fields["enabled"] = int(_bool(fields["enabled"], "enabled"))
     with _connect() as conn:
         if "model_id" in fields and conn.execute(
             "SELECT 1 FROM models WHERE id = ?", (fields["model_id"],)
@@ -2477,6 +2549,18 @@ def delete_subagent(subagent_id: int) -> bool:
             )
         conn.commit()
         return cur.rowcount > 0
+
+
+def is_subagent_enabled(subagent_id: int) -> bool:
+    try:
+        requested_id = int(subagent_id)
+    except (TypeError, ValueError):
+        return False
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT enabled FROM subagents WHERE id = ?", (requested_id,)
+        ).fetchone()
+    return bool(row and row["enabled"])
 
 
 # -----------------------------------------------------------------------------
@@ -2524,6 +2608,8 @@ def build_specs() -> list[dict]:
     """
     specs = []
     for s in list_subagents():
+        if not s.get("enabled"):
+            continue
         specs.append(
             {
                 "id": s["id"],

@@ -201,6 +201,14 @@ its short report crosses back; the server's own tools never enter the
 supervisor's context. Subagents are loaded when each turn compiles, so a new
 one is live from your next message.
 
+Dynamic and built-in subagents can be deactivated without deleting their saved
+configuration. Inactive agents remain visible as muted, red-outlined topology
+nodes, but their delegation schema and executable graph node are omitted. A
+last-moment runtime guard also prevents a stale turn or heartbeat run from
+starting the specialist or opening its MCP connection. Reactivating it restores
+availability on the next turn. Explicit admin connection tests remain available
+while an agent is inactive.
+
 Every specialist receives the same capability-boundary system instruction. If
 a task is outside its available tools, it must state that it cannot complete
 the request, give one short reason, and list what it can do instead. Its own
@@ -224,7 +232,8 @@ not to retry it automatically.
   all paginated tools the server advertises, loops with `llm.openai_chat`, and
   returns a short report.
 - `mounir/langgraph_agent.py` adds one node per registered subagent at graph
-  compile time and extends the delegate map so the supervisor can route to it.
+  compile time and extends the delegate map so the supervisor can route to it;
+  inactive agents are excluded before the graph reaches the orchestrator.
 
 ### Management
 
@@ -305,6 +314,9 @@ python -m mounir.mcp_agents agents add --name "Web Search" \
   --description "Search the web with Brave. Use for any lookup." \
   --prompt "You are a web search specialist..." \
   --model-id 1 --server-id 1
+
+# Keep the record and configuration, but remove it from runtime delegation:
+python -m mounir.mcp_agents agents update --id 1 --no-enabled
 ```
 
 The first time the new code runs, any existing `~/.mounir/mcp_agents.json` is
@@ -524,11 +536,13 @@ Two separate pages, both served by `server.py`:
   The supervisor view shows its active provider, model, and direct tool list,
   hides internal delegation tools, and lets you select a saved Mistral, Groq,
   or Ollama model. Each
-  specialist view explains its capabilities and lets you choose a compatible saved model;
+  specialist view explains its capabilities, lets you choose a compatible saved model,
+  and provides an availability switch;
   Media and System use NVIDIA presets, while Knowledge uses Gemini presets.
   The selection is persisted by Model record ID and used by the specialist on
   its next run, including later endpoint, model ID, and credential edits made
-  from the Models screen.
+  from the Models screen. Dynamic subagent read views provide the same
+  activation control without requiring deletion or entering edit mode.
 - **Telegram** in the admin sidebar provides the complete bot setup: private
   token storage, live connection testing, enable/disable control, status, and
   secure one-time account pairing without manually entering a chat id.
@@ -669,7 +683,8 @@ persisted status and proactive dashboard alerts.
    pattern (extract delegate task, call `run`, trace, return `Command`).
 3. Add the delegate tool name → node name mapping to `_DELEGATES`.
 4. Add the schema to `tools.py` so the supervisor is offered the tool.
-5. Mention it in `config.SYSTEM_PROMPT` so the model knows when to use it.
+5. Give its tool schema a clear routing description; the supervisor treats the
+   delegation tools supplied for the current turn as its authoritative specialist list.
 6. Update this README's agents table.
 
 Build its runtime system message with `config.specialist_system_prompt(...)` so

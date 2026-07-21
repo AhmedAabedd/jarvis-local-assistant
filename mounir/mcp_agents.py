@@ -170,7 +170,7 @@ def _servers_cmd(args):
 def _agents_cmd(args):
     if args.action == "list":
         rows = db.list_subagents()
-        _print_table(rows, ["id", "name", "model_name", "server_name", "parent"])
+        _print_table(rows, ["id", "name", "enabled", "model_name", "server_name", "parent"])
     elif args.action == "show":
         if not args.name:
             raise ValueError("--name is required when showing an agent.")
@@ -201,6 +201,7 @@ def _agents_cmd(args):
                 if args.confirm_tools is not None
                 else None
             ),
+            enabled=args.enabled is not False,
         )
         print(f"Added agent {a['id']}: {a['name']} ({delegate_tool_name(a['name'])})")
     elif args.action == "update":
@@ -224,6 +225,8 @@ def _agents_cmd(args):
             fields["confirm_tools"] = [
                 name.strip() for name in args.confirm_tools.split(",") if name.strip()
             ]
+        if args.enabled is not None:
+            fields["enabled"] = args.enabled
         a = db.update_subagent(args.id, **fields)
         print(f"Updated agent {a['id']}: {a['name']}" if a else "Agent not found.")
     elif args.action == "remove":
@@ -294,6 +297,12 @@ def _main() -> int:
     p_ag.add_argument(
         "--confirm-tools",
         help="Comma-separated MCP tool names that require confirmation; overrides --confirm-tool-calls.",
+    )
+    p_ag.add_argument(
+        "--enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Make the subagent available or unavailable to the orchestrator.",
     )
     p_ag.set_defaults(func=_agents_cmd)
 
