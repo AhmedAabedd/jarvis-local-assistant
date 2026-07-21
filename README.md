@@ -210,7 +210,8 @@ not to retry it automatically.
 
 ### How it is wired
 
-- `mounir/db.py` owns the SQLite schema and CRUD.
+- `mounir/db.py` owns the SQLite schema and CRUD, including server-linked cached
+  tool metadata and connection-test status.
 - `mounir/mcp_agents.py` is the registry layer: slug helpers, schema building,
   and a management CLI. The server/CLI/runtime initialize the schema when used
   and migrate any legacy `~/.mounir/mcp_agents.json` without import-time writes.
@@ -229,10 +230,28 @@ Manage everything at **`http://localhost:8000/admin`**:
 2. Create an MCP server and choose **Local server**, **Remote HTTP**, or
    **Legacy SSE**.
 3. Paste the command or endpoint provided by the MCP server.
-4. Choose the authentication method. Paste a bearer token/API key, or add the
-   named credentials listed by a local server's instructions.
+4. For a remote server, choose **No authentication**, **Access token or API
+   key**, or **Advanced custom headers**. When using a token/key, choose the
+   delivery format stated by the provider: `Authorization: Bearer <value>` or a
+   named header such as `X-API-Key`. For a local server, add the credential
+   names listed by its instructions.
 5. Save it and click **Test Connection** to see its advertised tools.
 6. Create a subagent that links the model and server.
+
+The first successful connection test saves the server's advertised tool names,
+descriptions, and input schemas in `mcp_server_tools`. Opening a saved server
+reads that snapshot from SQLite immediately instead of reconnecting. Existing
+servers with no snapshot are tested automatically once on their first form
+open; after that, **Test Connection** is an explicit refresh. Agent Studio shows
+green for a successful latest test, amber when untested or changed since the
+test, and red when the latest test failed. A failed refresh preserves the last
+successful tool snapshot.
+
+Subagent confirmation rules use this saved metadata: choosing **Ask only for
+selected tools** displays the selected MCP server's actual tools as checkboxes,
+so users do not have to copy exact tool names into a text field. If a previously
+selected tool later disappears from the server, it remains visible as a stale
+selection until the user removes it.
 
 For the seeded **Gmail MCP** server, its saved setup capability provides OAuth-file
 upload and a **Connect account** button. The admin UI renders these setup actions
@@ -471,6 +490,15 @@ Two separate pages, both served by `server.py`:
   name, location, and preferred response language. Changes are stored in SQLite
   and are picked up by the supervisor and every specialist on the next message,
   without restarting the app.
+- **Heartbeat** in the admin sidebar runs optional periodic checks while the web
+  server is active. Choose an interval, describe what deserves an alert, and
+  select the cached MCP tools it may use. Heartbeat runs each selected subagent
+  in an isolated context with only those tools exposed. Tools configured to
+  require confirmation are unavailable to heartbeat, and every run is told to
+  observe only and never change external state. `HEARTBEAT_OK` results remain
+  silent; meaningful alerts are stored in the conversation and pushed to the
+  open dashboard. The setting is disabled by default, recent run state is
+  persisted in SQLite, and **Run now** tests the same path on demand.
 
 If the local `mounir` Ollama model was built from an older checkout whose
 Modelfile contained fixed personal names, rebuild it once with
@@ -529,7 +557,8 @@ mounir/
   llm.py                provider clients (Ollama stream, Mistral, Groq, NVIDIA, generic OpenAI)
   tools.py              supervisor tools (files, bash, browser, delegation)
   default_agents.py     one-time presets for migrated dynamic agents such as Email and Researcher
-  db.py                 SQLite persistence: profile, models, MCP servers, subagents
+  db.py                 SQLite persistence: profile, MCP registry, tool cache, heartbeat
+  heartbeat.py          safe periodic MCP checks + application-owned scheduler
   mcp_agents.py         registry layer + management CLI (uses db.py)
   memory.py             conversation history + full-turn persistence + JSON save
   trace.py              the purple, Claude-Code-style terminal renderer
@@ -558,6 +587,8 @@ subagents including Email and the Playwright Researcher registered at runtime (l
 Streamable HTTP, and legacy SSE), full-turn memory, voice
 (push-to-talk + hands-free), Telegram bridge, web dashboard, profile settings,
 default-browser control, MCP timeouts, and admin UI.
+The web runtime also supports configurable, isolated heartbeat checks with
+persisted status and proactive dashboard alerts.
 
 **Ongoing / future:**
 - Custom "Hey Mounir" wake word

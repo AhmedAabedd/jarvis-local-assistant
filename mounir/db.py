@@ -1,11 +1,13 @@
-"""SQLite persistence for Mounir's dynamic agent layer.
+"""SQLite persistence for Mounir's local configuration and dynamic agents.
 
-Three tables:
+Core tables include:
 
 - ``models``       reusable LLM presets (name, provider, base_url, api_key)
 - ``mcp_servers``  reusable MCP server connections (transport + command/URL)
 - ``subagents``    the actual agents the supervisor can delegate to
                    (name, system_prompt, model_id, mcp_server_id, parent)
+- ``mcp_server_tools`` cached MCP capability metadata
+- ``heartbeat_*`` heartbeat permissions, schedule, state, and bounded run log
 
 On first run, if ``~/.mounir/mcp_agents.json`` exists it is migrated into the
 DB; after that the JSON file is ignored.
@@ -21,7 +23,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config as cfg, default_agents
@@ -29,6 +31,10 @@ from . import config as cfg, default_agents
 DB_PATH: Path = cfg.DATA_DIR / "mounir.db"
 LEGACY_REGISTRY: Path = cfg.DATA_DIR / "mcp_agents.json"
 MCP_TRANSPORTS = {"stdio", "streamable_http", "sse"}
+HEARTBEAT_DEFAULT_INSTRUCTIONS = (
+    "Check my connected services for new items that genuinely need my attention. "
+    "Ignore routine or unchanged information."
+)
 
 
 def _now() -> str:
@@ -97,8 +103,31 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             -- }
             env TEXT NOT NULL DEFAULT '{}',
 
+            -- none | bearer | header | custom (UI metadata; runtime uses headers)
+            auth_scheme TEXT NOT NULL DEFAULT '',
+
+            -- untested | connected | stale | failed
+            connection_status TEXT NOT NULL DEFAULT 'untested',
+            last_tested_at TEXT,
+            last_error TEXT NOT NULL DEFAULT '',
+
             created_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS mcp_server_tools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mcp_server_id INTEGER NOT NULL
+                REFERENCES mcp_servers(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            input_schema TEXT NOT NULL DEFAULT '{}',
+            position INTEGER NOT NULL DEFAULT 0,
+            discovered_at TEXT NOT NULL,
+            UNIQUE (mcp_server_id, name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mcp_server_tools_server_position
+            ON mcp_server_tools (mcp_server_id, position);
 
         CREATE TABLE IF NOT EXISTS subagents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +158,47 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             preferred_language TEXT NOT NULL DEFAULT 'auto',
             updated_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS heartbeat_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+            interval_minutes INTEGER NOT NULL DEFAULT 30,
+            instructions TEXT NOT NULL DEFAULT '',
+            next_run_at TEXT,
+            last_run_at TEXT,
+            last_status TEXT NOT NULL DEFAULT 'never',
+            last_message TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS heartbeat_tools (
+            subagent_id INTEGER NOT NULL
+                REFERENCES subagents(id) ON DELETE CASCADE,
+            tool_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (subagent_id, tool_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS heartbeat_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT NOT NULL DEFAULT 'running',
+            message TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS heartbeat_agent_state (
+            subagent_id INTEGER PRIMARY KEY
+                REFERENCES subagents(id) ON DELETE CASCADE,
+            last_report TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_started
+            ON heartbeat_runs (started_at DESC);
         """
     )
     conn.execute(
@@ -145,6 +215,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             _now(),
         ),
     )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO heartbeat_settings (id, enabled, updated_at)
+        VALUES (1, 0, ?)
+        """,
+        (_now(),),
+    )
     # CREATE TABLE does not add columns to an existing SQLite table. Keep the
     # migrations explicit so upgrading an earlier feature-branch DB works.
     migrations = {
@@ -155,6 +232,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "transport": "TEXT NOT NULL DEFAULT 'stdio'",
             "headers": "TEXT NOT NULL DEFAULT '{}'",
             "env": "TEXT NOT NULL DEFAULT '{}'",
+            "auth_scheme": "TEXT NOT NULL DEFAULT ''",
+            "connection_status": "TEXT NOT NULL DEFAULT 'untested'",
+            "last_tested_at": "TEXT",
+            "last_error": "TEXT NOT NULL DEFAULT ''",
         },
         "subagents": {
             "description": "TEXT NOT NULL DEFAULT ''",
@@ -163,6 +244,15 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "confirm_tool_calls": "INTEGER NOT NULL DEFAULT 1",
             "confirm_tools": "TEXT NOT NULL DEFAULT '[\"*\"]'",
             "dedupe_tools": "TEXT NOT NULL DEFAULT '[]'",
+        },
+        "heartbeat_settings": {
+            "interval_minutes": "INTEGER NOT NULL DEFAULT 30",
+            "instructions": "TEXT NOT NULL DEFAULT ''",
+            "next_run_at": "TEXT",
+            "last_run_at": "TEXT",
+            "last_status": "TEXT NOT NULL DEFAULT 'never'",
+            "last_message": "TEXT NOT NULL DEFAULT ''",
+            "last_error": "TEXT NOT NULL DEFAULT ''",
         },
     }
     added_columns: set[tuple[str, str]] = set()
@@ -174,6 +264,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 added_columns.add((table, column))
+    conn.execute(
+        """
+        UPDATE heartbeat_settings SET instructions = ?
+        WHERE instructions IS NULL OR trim(instructions) = ''
+        """,
+        (HEARTBEAT_DEFAULT_INSTRUCTIONS,),
+    )
     # Earlier versions inferred every URL as legacy SSE and had no transport
     # column. A URL cannot be a valid stdio command, so migrate it to the
     # current remote default; users can explicitly switch old servers to SSE.
@@ -645,6 +742,363 @@ def update_profile(**kwargs) -> dict:
 
 
 # -----------------------------------------------------------------------------
+# Heartbeat configuration
+# -----------------------------------------------------------------------------
+
+def get_heartbeat_settings() -> dict:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM heartbeat_settings WHERE id = 1"
+        ).fetchone()
+    if row is None:
+        return {
+            "enabled": False,
+            "interval_minutes": 30,
+            "instructions": HEARTBEAT_DEFAULT_INSTRUCTIONS,
+            "next_run_at": None,
+            "last_run_at": None,
+            "last_status": "never",
+            "last_message": "",
+            "last_error": "",
+            "updated_at": None,
+        }
+    return {
+        "enabled": bool(row["enabled"]),
+        "interval_minutes": int(row["interval_minutes"] or 30),
+        "instructions": row["instructions"] or HEARTBEAT_DEFAULT_INSTRUCTIONS,
+        "next_run_at": row["next_run_at"],
+        "last_run_at": row["last_run_at"],
+        "last_status": row["last_status"] or "never",
+        "last_message": row["last_message"] or "",
+        "last_error": row["last_error"] or "",
+        "updated_at": row["updated_at"],
+    }
+
+
+def update_heartbeat_settings(
+    *,
+    enabled: bool | None = None,
+    interval_minutes: int | None = None,
+    instructions: str | None = None,
+    selected_tools: list[dict] | None = None,
+) -> dict:
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ValueError("enabled must be true or false")
+    if interval_minutes is not None:
+        if isinstance(interval_minutes, bool) or not isinstance(interval_minutes, int):
+            raise ValueError("interval must be a whole number of minutes")
+        if not 5 <= interval_minutes <= 1440:
+            raise ValueError("interval must be between 5 and 1440 minutes")
+    if instructions is not None:
+        instructions = str(instructions or "").strip()
+        if not instructions:
+            raise ValueError("heartbeat instructions are required")
+        if len(instructions) > 2000:
+            raise ValueError("heartbeat instructions must be 2000 characters or fewer")
+
+    normalized_tools: list[tuple[int, str]] | None = None
+    if selected_tools is not None:
+        if not isinstance(selected_tools, list):
+            raise ValueError("selected_tools must be a list")
+        normalized_tools = []
+        seen: set[tuple[int, str]] = set()
+        for entry in selected_tools:
+            if not isinstance(entry, dict):
+                raise ValueError("each heartbeat tool selection must be an object")
+            try:
+                subagent_id = int(entry.get("subagent_id"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("heartbeat tool selection has an invalid subagent") from exc
+            tool_name = str(entry.get("tool_name") or "").strip()
+            if not tool_name:
+                raise ValueError("heartbeat tool selection has no tool name")
+            key = (subagent_id, tool_name)
+            if key not in seen:
+                seen.add(key)
+                normalized_tools.append(key)
+
+    now = _now()
+    with _connect() as conn:
+        current = conn.execute(
+            "SELECT * FROM heartbeat_settings WHERE id = 1"
+        ).fetchone()
+        active = bool(current["enabled"]) if enabled is None else enabled
+        interval = (
+            int(current["interval_minutes"] or 30)
+            if interval_minutes is None
+            else interval_minutes
+        )
+        if normalized_tools is not None:
+            valid = {
+                (int(row["subagent_id"]), row["name"])
+                for row in conn.execute(
+                    """
+                    SELECT s.id AS subagent_id, t.name
+                    FROM subagents s
+                    JOIN mcp_server_tools t ON t.mcp_server_id = s.mcp_server_id
+                    """
+                )
+            }
+            unknown = [key for key in normalized_tools if key not in valid]
+            if unknown:
+                raise ValueError("one or more selected heartbeat tools are unavailable")
+            confirmation_rules = {
+                int(row["id"]): set(json.loads(row["confirm_tools"] or "[]"))
+                for row in conn.execute("SELECT id, confirm_tools FROM subagents")
+            }
+            protected = [
+                (agent_id, name)
+                for agent_id, name in normalized_tools
+                if "*" in confirmation_rules.get(agent_id, {"*"})
+                or name in confirmation_rules.get(agent_id, {"*"})
+            ]
+            if protected:
+                raise ValueError(
+                    "tools that require confirmation cannot run in the heartbeat"
+                )
+            conn.execute("DELETE FROM heartbeat_tools")
+            conn.executemany(
+                """
+                INSERT INTO heartbeat_tools (subagent_id, tool_name, created_at)
+                VALUES (?, ?, ?)
+                """,
+                [(agent_id, name, now) for agent_id, name in normalized_tools],
+            )
+        fields = {"updated_at": now}
+        if enabled is not None:
+            fields["enabled"] = int(enabled)
+        if interval_minutes is not None:
+            fields["interval_minutes"] = interval_minutes
+        if instructions is not None:
+            fields["instructions"] = instructions
+        # Saving an active schedule starts a fresh interval; disabling it
+        # removes the due time so a stale wake-up cannot launch a run.
+        fields["next_run_at"] = (
+            (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
+            if active
+            else None
+        )
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE heartbeat_settings SET {sets} WHERE id = 1",
+            tuple(fields.values()),
+        )
+        conn.commit()
+    return get_heartbeat_settings()
+
+
+def get_heartbeat_capabilities() -> list[dict]:
+    """Return cached MCP tools grouped by subagent for heartbeat configuration."""
+    with _connect() as conn:
+        selected = {
+            (int(row["subagent_id"]), row["tool_name"])
+            for row in conn.execute("SELECT subagent_id, tool_name FROM heartbeat_tools")
+        }
+        agents = conn.execute(
+            """
+            SELECT s.id, s.name, s.confirm_tools, s.mcp_server_id,
+                   ms.connection_status
+            FROM subagents s
+            JOIN mcp_servers ms ON ms.id = s.mcp_server_id
+            ORDER BY s.name
+            """
+        ).fetchall()
+        tool_rows = conn.execute(
+            """
+            SELECT s.id AS subagent_id, t.name, t.description, t.position
+            FROM subagents s
+            JOIN mcp_server_tools t ON t.mcp_server_id = s.mcp_server_id
+            ORDER BY s.name, t.position, t.id
+            """
+        ).fetchall()
+    grouped: dict[int, list[dict]] = {}
+    for row in tool_rows:
+        grouped.setdefault(int(row["subagent_id"]), []).append(
+            {
+                "name": row["name"],
+                "description": row["description"] or "",
+                "selected": (int(row["subagent_id"]), row["name"]) in selected,
+            }
+        )
+    result = []
+    for row in agents:
+        try:
+            protected = set(json.loads(row["confirm_tools"] or "[]"))
+        except (json.JSONDecodeError, TypeError):
+            protected = {"*"}
+        tools = grouped.get(int(row["id"]), [])
+        for tool in tools:
+            tool["requires_confirmation"] = (
+                "*" in protected or tool["name"] in protected
+            )
+        result.append(
+            {
+                "id": int(row["id"]),
+                "name": row["name"],
+                "connection_status": row["connection_status"] or "untested",
+                "tools": tools,
+            }
+        )
+    return result
+
+
+def get_heartbeat_targets() -> list[dict]:
+    """Return resolved subagent specs with only their selected safe tools."""
+    selected: dict[int, list[str]] = {}
+    with _connect() as conn:
+        for row in conn.execute(
+            """
+            SELECT ht.subagent_id, ht.tool_name
+            FROM heartbeat_tools ht
+            JOIN subagents s ON s.id = ht.subagent_id
+            JOIN mcp_server_tools t
+              ON t.mcp_server_id = s.mcp_server_id
+             AND t.name = ht.tool_name
+            ORDER BY ht.subagent_id, ht.tool_name
+            """
+        ):
+            selected.setdefault(int(row["subagent_id"]), []).append(row["tool_name"])
+    targets = []
+    for spec in build_specs():
+        chosen = selected.get(int(spec["id"]), [])
+        protected = set(spec.get("confirm_tools") or [])
+        safe = [name for name in chosen if "*" not in protected and name not in protected]
+        if safe:
+            target = dict(spec)
+            target["allowed_tools"] = safe
+            targets.append(target)
+    return targets
+
+
+def get_heartbeat_agent_report(subagent_id: int) -> str:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT last_report FROM heartbeat_agent_state WHERE subagent_id = ?",
+            (subagent_id,),
+        ).fetchone()
+    return (row["last_report"] or "") if row else ""
+
+
+def set_heartbeat_agent_report(subagent_id: int, report: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO heartbeat_agent_state (subagent_id, last_report, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(subagent_id) DO UPDATE SET
+                last_report = excluded.last_report,
+                updated_at = excluded.updated_at
+            """,
+            (subagent_id, str(report or "").strip()[:8000], _now()),
+        )
+        conn.commit()
+
+
+def begin_heartbeat_run(trigger: str) -> int:
+    started = _now()
+    settings = get_heartbeat_settings()
+    next_run = (
+        datetime.now(timezone.utc)
+        + timedelta(minutes=int(settings["interval_minutes"]))
+    ).isoformat()
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO heartbeat_runs (trigger, started_at, status)
+            VALUES (?, ?, 'running')
+            """,
+            (trigger, started),
+        )
+        conn.execute(
+            """
+            UPDATE heartbeat_settings
+            SET last_run_at = ?, last_status = 'running', last_message = '',
+                last_error = '', next_run_at = ?
+            WHERE id = 1
+            """,
+            (started, next_run),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def recover_interrupted_heartbeat_runs() -> None:
+    """Close runs left in progress by a previous process shutdown or crash."""
+    finished = _now()
+    error = "The previous heartbeat check was interrupted before it finished."
+    with _connect() as conn:
+        running = conn.execute(
+            "SELECT 1 FROM heartbeat_runs WHERE status = 'running' LIMIT 1"
+        ).fetchone()
+        if not running:
+            return
+        conn.execute(
+            """
+            UPDATE heartbeat_runs
+            SET finished_at = ?, status = 'error', error = ?
+            WHERE status = 'running'
+            """,
+            (finished, error),
+        )
+        conn.execute(
+            """
+            UPDATE heartbeat_settings
+            SET last_status = 'error', last_error = ?
+            WHERE id = 1
+            """,
+            (error,),
+        )
+        conn.commit()
+
+
+def finish_heartbeat_run(
+    run_id: int, *, status: str, message: str = "", error: str = ""
+) -> dict:
+    if status not in {"quiet", "alert", "error", "skipped"}:
+        raise ValueError("invalid heartbeat run status")
+    finished = _now()
+    message = str(message or "").strip()[:8000]
+    error = " ".join(str(error or "").split())[:2000]
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE heartbeat_runs
+            SET finished_at = ?, status = ?, message = ?, error = ?
+            WHERE id = ?
+            """,
+            (finished, status, message, error, run_id),
+        )
+        conn.execute(
+            """
+            UPDATE heartbeat_settings
+            SET last_status = ?, last_message = ?, last_error = ?
+            WHERE id = 1
+            """,
+            (status, message, error),
+        )
+        # Keep bounded local diagnostics rather than growing forever.
+        conn.execute(
+            """
+            DELETE FROM heartbeat_runs
+            WHERE id NOT IN (
+                SELECT id FROM heartbeat_runs ORDER BY id DESC LIMIT 100
+            )
+            """
+        )
+        conn.commit()
+    return get_heartbeat_settings()
+
+
+def list_heartbeat_runs(limit: int = 10) -> list[dict]:
+    limit = max(1, min(int(limit), 100))
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM heartbeat_runs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+# -----------------------------------------------------------------------------
 # Models
 # -----------------------------------------------------------------------------
 
@@ -751,14 +1205,19 @@ def _add_server(
     env="{}",
     description: str = "",
     setup_type: str = "",
+    auth_scheme: str = "",
 ) -> int:
     transport, connection = _validate_transport(transport, connection)
+    auth_scheme = str(auth_scheme or "").strip()
+    if auth_scheme not in {"", "none", "bearer", "header", "custom"}:
+        raise ValueError("authentication method is not supported")
     try:
         cur = conn.execute(
             """
             INSERT INTO mcp_servers
-                (name, description, setup_type, transport, connection, headers, env, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (name, description, setup_type, transport, connection, headers, env,
+                 auth_scheme, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
@@ -768,6 +1227,7 @@ def _add_server(
                 connection,
                 _json_object(headers, "headers"),
                 _json_object(env, "environment"),
+                auth_scheme,
                 _now(),
             ),
         )
@@ -784,6 +1244,7 @@ def add_server(
     headers="{}",
     env="{}",
     description: str = "",
+    auth_scheme: str = "",
 ) -> dict:
     with _connect() as conn:
         sid = _add_server(
@@ -794,6 +1255,7 @@ def add_server(
             headers,
             env,
             description,
+            auth_scheme=auth_scheme,
         )
         return get_server(sid)
 
@@ -819,6 +1281,7 @@ def update_server(server_id: int, **kwargs) -> dict | None:
         "headers",
         "env",
         "description",
+        "auth_scheme",
     }
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
@@ -841,6 +1304,18 @@ def update_server(server_id: int, **kwargs) -> dict | None:
         fields["env"] = _json_object(fields["env"], "environment")
     if "description" in fields:
         fields["description"] = (fields["description"] or "").strip()
+    if "auth_scheme" in fields:
+        fields["auth_scheme"] = str(fields["auth_scheme"] or "").strip()
+        if fields["auth_scheme"] not in {"", "none", "bearer", "header", "custom"}:
+            raise ValueError("authentication method is not supported")
+    connection_fields = {"transport", "connection", "headers", "env"}
+    connection_changed = any(
+        key in fields and fields[key] != current.get(key)
+        for key in connection_fields
+    )
+    if connection_changed:
+        fields["connection_status"] = "stale"
+        fields["last_error"] = ""
     with _connect() as conn:
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
@@ -862,6 +1337,107 @@ def delete_server(server_id: int) -> bool:
             return cur.rowcount > 0
         except sqlite3.IntegrityError:
             return False
+
+
+def get_server_tools_state(server_id: int) -> dict | None:
+    """Return cached discovery state without contacting the MCP server."""
+    server = get_server(server_id)
+    if server is None:
+        return None
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT name, description, input_schema, discovered_at
+            FROM mcp_server_tools
+            WHERE mcp_server_id = ?
+            ORDER BY position, id
+            """,
+            (server_id,),
+        ).fetchall()
+    tools = []
+    for row in rows:
+        try:
+            input_schema = json.loads(row["input_schema"] or "{}")
+        except json.JSONDecodeError:
+            input_schema = {}
+        tools.append(
+            {
+                "name": row["name"],
+                "description": row["description"],
+                "input_schema": input_schema,
+            }
+        )
+    return {
+        "server_id": server_id,
+        "status": server.get("connection_status") or "untested",
+        "last_tested_at": server.get("last_tested_at"),
+        "last_error": server.get("last_error") or "",
+        "tools": tools,
+    }
+
+
+def save_server_tools(server_id: int, tools: list[dict]) -> dict:
+    """Atomically replace a server's cached tool snapshot after a successful test."""
+    if get_server(server_id) is None:
+        raise ValueError("Server not found")
+    discovered_at = _now()
+    normalized = []
+    seen = set()
+    for position, tool in enumerate(tools):
+        name = _required((tool or {}).get("name"), "tool name")
+        if name in seen:
+            continue
+        seen.add(name)
+        schema = (tool or {}).get("input_schema") or {}
+        if not isinstance(schema, dict):
+            schema = {}
+        normalized.append(
+            (
+                server_id,
+                name,
+                str((tool or {}).get("description") or ""),
+                json.dumps(schema, ensure_ascii=False, sort_keys=True),
+                position,
+                discovered_at,
+            )
+        )
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM mcp_server_tools WHERE mcp_server_id = ?", (server_id,)
+        )
+        conn.executemany(
+            """
+            INSERT INTO mcp_server_tools
+                (mcp_server_id, name, description, input_schema, position, discovered_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            normalized,
+        )
+        conn.execute(
+            """
+            UPDATE mcp_servers
+            SET connection_status = 'connected', last_tested_at = ?, last_error = ''
+            WHERE id = ?
+            """,
+            (discovered_at, server_id),
+        )
+        conn.commit()
+    return get_server_tools_state(server_id)
+
+
+def record_server_test_failure(server_id: int, error: str) -> dict | None:
+    """Record a failed test while preserving the last successful tool snapshot."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE mcp_servers
+            SET connection_status = 'failed', last_tested_at = ?, last_error = ?
+            WHERE id = ?
+            """,
+            (_now(), " ".join(str(error or "Connection failed").split())[:1000], server_id),
+        )
+        conn.commit()
+    return get_server_tools_state(server_id)
 
 
 # -----------------------------------------------------------------------------

@@ -94,6 +94,98 @@
   .sidebar-footer strong { display: block; font-size: 11px; font-weight: 600; color: var(--text); }
   .sidebar-footer small { display: block; margin-top: 2px; font-size: 9px; color: var(--text-dim); }
 
+  /* ---- heartbeat ---- */
+  .heartbeat-view { max-width: 820px; display: flex; flex-direction: column; gap: 14px; }
+  .heartbeat-card {
+    padding: 22px; border: 1px solid var(--line);
+    border-radius: 16px; background: var(--bg-panel);
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center; gap: 14px 24px;
+  }
+  .heartbeat-info { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
+  .heartbeat-icon {
+    width: 40px; height: 40px; flex: 0 0 40px; border-radius: 12px;
+    display: grid; place-items: center; color: var(--lav); background: var(--soft);
+  }
+  .heartbeat-info h3 { margin: 1px 0 6px; font-size: 14px; font-weight: 600; }
+  .heartbeat-info p { margin: 0; color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+  .heartbeat-control { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
+  .heartbeat-state { font-size: 11px; font-weight: 600; color: var(--text-dim); }
+  .heartbeat-state.enabled { color: var(--ok); }
+  .heartbeat-toggle-feedback {
+    display: none; grid-column: 1 / -1; padding-top: 12px;
+    border-top: 1px solid var(--line); color: var(--danger);
+    font-size: 10px; line-height: 1.5;
+  }
+  .heartbeat-toggle-feedback.show { display: block; }
+  .heartbeat-config {
+    padding: 22px; border: 1px solid var(--line); border-radius: 16px;
+    background: var(--bg-panel); display: flex; flex-direction: column; gap: 20px;
+  }
+  .heartbeat-config h3 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
+  .heartbeat-config p { margin: 0; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
+  .heartbeat-fields { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 14px; }
+  .heartbeat-field { display: flex; flex-direction: column; gap: 7px; }
+  .heartbeat-field span { color: var(--text-mid); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+  .heartbeat-field select, .heartbeat-field textarea {
+    width: 100%; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--bg); color: var(--text); font: inherit; outline: none;
+  }
+  .heartbeat-field textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
+  .heartbeat-field select:focus, .heartbeat-field textarea:focus { border-color: var(--purple); }
+  .heartbeat-capabilities { display: flex; flex-direction: column; gap: 10px; }
+  .heartbeat-agent {
+    border: 1px solid var(--line); border-radius: 10px; background: var(--bg); overflow: hidden;
+  }
+  .heartbeat-agent-head {
+    padding: 10px 12px; display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; color: var(--text-mid); font-size: 11px; font-weight: 600;
+  }
+  .heartbeat-agent-tools { border-top: 1px solid var(--line); }
+  .heartbeat-tool {
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start;
+    gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  .heartbeat-tool:last-child { border-bottom: 0; }
+  .heartbeat-tool:hover { background: var(--bg-elev); }
+  .heartbeat-tool.locked { cursor: not-allowed; opacity: .58; }
+  .heartbeat-tool input { width: 15px; height: 15px; margin-top: 2px; accent-color: var(--purple); }
+  .heartbeat-tool-name { color: var(--lav); font-size: 11px; font-weight: 600; }
+  .heartbeat-tool-description { margin-top: 2px; color: var(--text-dim); font-size: 9px; line-height: 1.4; }
+  .heartbeat-tool-lock { color: var(--warn); font-size: 9px; white-space: nowrap; }
+  .heartbeat-empty {
+    padding: 13px; color: var(--text-dim); font-size: 10px; line-height: 1.5;
+    border: 1px dashed var(--line); border-radius: 9px;
+  }
+  .heartbeat-actions { display: flex; align-items: center; gap: 9px; }
+  .heartbeat-feedback { min-height: 16px; color: var(--text-dim); font-size: 10px; }
+  .heartbeat-feedback.error { color: var(--danger); }
+  .heartbeat-feedback.ok { color: var(--ok); }
+  .heartbeat-last {
+    padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--bg-panel); display: grid; grid-template-columns: auto 1fr; gap: 10px 14px;
+  }
+  .heartbeat-last-label { color: var(--text-dim); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+  .heartbeat-last-value { color: var(--text-mid); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+  .heartbeat-run-status { font-weight: 600; text-transform: capitalize; }
+  .heartbeat-run-status.alert { color: var(--warn); }
+  .heartbeat-run-status.quiet { color: var(--ok); }
+  .heartbeat-run-status.error { color: var(--danger); }
+  .switch { position: relative; width: 42px; height: 24px; cursor: pointer; }
+  .switch input { position: absolute; opacity: 0; pointer-events: none; }
+  .switch-track {
+    position: absolute; inset: 0; border-radius: 999px; background: var(--bg-elev);
+    border: 1px solid var(--line); transition: background .18s, border-color .18s;
+  }
+  .switch-track::after {
+    content: ''; position: absolute; width: 18px; height: 18px; left: 2px; top: 2px;
+    border-radius: 50%; background: var(--text-mid); transition: transform .18s, background .18s;
+  }
+  .switch input:checked + .switch-track { background: var(--purple-dim); border-color: var(--purple); }
+  .switch input:checked + .switch-track::after { transform: translateX(18px); background: white; }
+  .switch input:focus-visible + .switch-track { outline: 2px solid var(--lav); outline-offset: 2px; }
+  .switch input:disabled + .switch-track { opacity: .55; cursor: wait; }
+
   /* ---- main ---- */
   .main {
     flex: 1;
@@ -316,6 +408,10 @@
   }
   .credential-row { display: grid; grid-template-columns: 1fr 1.5fr auto; gap: 8px; }
   .credential-row input { min-width: 0; }
+  .credential-auth-fields {
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .credential-auth-fields label { min-width: 0; }
   .credential-remove {
     width: 38px; border: 1px solid var(--line); border-radius: 8px;
     color: var(--danger); background: transparent; cursor: pointer; font-size: 18px;
@@ -343,12 +439,34 @@
     padding: 16px 18px; display: flex; align-items: center; justify-content: space-between;
     gap: 12px; border-bottom: 1px solid var(--line);
   }
+  .server-tools-title-row { display: flex; align-items: center; gap: 8px; }
   .server-tools-title { font-size: 14px; font-weight: 600; color: var(--text); }
   .server-tools-subtitle { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
   .server-tools-count {
     min-width: 26px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px;
     color: var(--lav); background: var(--soft); font-size: 10px; text-align: center;
   }
+  .server-tools-meta { display: flex; align-items: center; gap: 8px; }
+  .connection-status {
+    display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim);
+    font-size: 10px; font-weight: 600; white-space: nowrap;
+  }
+  .connection-status::before {
+    content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim);
+  }
+  .connection-status.connected { color: var(--ok); }
+  .connection-status.connected::before { background: var(--ok); box-shadow: 0 0 7px rgba(95,180,135,.45); }
+  .connection-status.failed { color: var(--danger); }
+  .connection-status.failed::before { background: var(--danger); }
+  .connection-status.stale { color: #d7a84b; }
+  .connection-status.stale::before { background: #d7a84b; }
+  .server-list-status { gap: 0; }
+  .server-tools-notice {
+    margin: 10px 0 2px; padding: 9px 10px; border-radius: 8px;
+    color: var(--text-dim); background: var(--bg-elev); font-size: 10px; line-height: 1.45;
+  }
+  .server-tools-notice.failed { color: var(--danger); background: rgba(224,90,90,.08); }
+  .server-tools-notice.stale { color: #d7a84b; background: rgba(215,168,75,.08); }
   .server-tools-list { padding: 6px 18px 14px; overflow-y: auto; }
   .server-tool { padding: 13px 0; border-bottom: 1px solid var(--line); }
   .server-tool:last-child { border-bottom: 0; }
@@ -357,6 +475,30 @@
   .server-tools-state { padding: 28px 18px; color: var(--text-dim); font-size: 12px; line-height: 1.55; }
   .server-tools-state strong { display: block; margin-bottom: 5px; color: var(--text-mid); font-size: 13px; }
   .server-tools-state.loading { color: var(--text-mid); }
+  .server-list-status { padding-left: 7px; padding-right: 7px; }
+
+  .tool-choice-list {
+    margin-top: 8px; max-height: 250px; overflow-y: auto;
+    border: 1px solid var(--line); border-radius: 9px; background: var(--bg);
+  }
+  .tool-choice {
+    display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px;
+    padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  .tool-choice:last-child { border-bottom: 0; }
+  .tool-choice:hover { background: var(--bg-elev); }
+  .tool-choice input {
+    width: 15px; height: 15px; margin-top: 3px; padding: 0;
+    border-radius: 4px; accent-color: var(--purple);
+  }
+  .tool-choice-name { display: block; color: var(--lav); font-size: 12px; font-weight: 600; }
+  .tool-choice-description {
+    margin-top: 3px; color: var(--text-dim); font-size: 10px; line-height: 1.45;
+  }
+  .tool-choice.missing { opacity: .7; }
+  .tool-choice-empty {
+    padding: 13px; color: var(--text-dim); font-size: 11px; line-height: 1.5;
+  }
 
   .agent-icon-field {
     grid-column: 1 / -1; display: flex; align-items: center; gap: 14px;
@@ -447,6 +589,10 @@
     .overview-stats { grid-template-columns: 1fr 1fr; }
     .workflow-stage { padding-left: 18px; padding-right: 18px; }
     .workflow-legend { display: none; }
+    .heartbeat-card { grid-template-columns: 1fr; align-items: flex-start; }
+    .heartbeat-control { align-self: stretch; justify-content: space-between; }
+    .heartbeat-toggle-feedback { grid-column: 1; width: 100%; }
+    .heartbeat-fields { grid-template-columns: 1fr; }
   }
   @media (max-width: 1080px) {
     .form-view.server-form-view { grid-template-columns: 1fr; }
@@ -486,6 +632,10 @@
       </button>
     </nav>
     <div class="sidebar-footer">
+      <button class="nav-item" data-tab="heartbeat">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.2-6 4.2 12 2.2-6H21"/></svg>
+        <span>Heartbeat</span>
+      </button>
       <button class="nav-item" data-tab="profile">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/></svg>
         <span>Profile</span>
@@ -528,16 +678,20 @@ const S = {
   editing: null,       // null | item object (null = create mode)
   formReadonly: true,  // true when viewing an instance, false when creating/modifying
   overview: { supervisor: {}, builtins: [] },
+  heartbeat: { enabled: false },
   profile: {},
   models: [],
   servers: [],
   agents: [],
+  serverToolCache: {},
 };
 let canvasZoom = 1;
 let pendingAgentIcon;
+let pendingConfirmationTools = new Set();
 
 const API = {
   overview: '/api/agent-overview',
+  heartbeat: { update: () => '/api/heartbeat' },
   profile:  { update: () => '/api/profile' },
   models:  { list: '/api/models',  create: '/api/models',  update: id => `/api/models/${id}`,  del: id => `/api/models/${id}` },
   servers: { list: '/api/mcp-servers', create: '/api/mcp-servers', update: id => `/api/mcp-servers/${id}`, del: id => `/api/mcp-servers/${id}` },
@@ -546,6 +700,7 @@ const API = {
 
 const TAB_META = {
   overview: { title: 'Agent Overview', labelSingular: '', subtitle: 'How your assistant is connected' },
+  heartbeat: { title: 'Heartbeat', labelSingular: '', subtitle: 'Run safe background checks and surface important updates' },
   profile: { title: 'Profile', labelSingular: 'Profile', subtitle: 'Who the assistant is and who it works for' },
   models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Language models available to dynamic subagents' },
   servers: { title: 'MCP Servers',   labelSingular: 'Server', subtitle: 'External capabilities connected through MCP' },
@@ -587,17 +742,27 @@ function credentialRowsHtml(entries, readonly) {
     </div>`).join('');
 }
 
-function remoteAuthFromHeaders(headers) {
+function remoteAuthFromHeaders(headers, savedScheme = '') {
   const entries = Object.entries(headers);
-  if (!entries.length) return { mode: 'none', token: '', header: 'X-API-Key', value: '' };
+  const empty = {
+    mode: 'none', method: 'bearer', secret: '', header: 'X-API-Key'
+  };
+  if (!entries.length) return empty;
+  if (savedScheme === 'custom') return { ...empty, mode: 'custom' };
   if (entries.length === 1 && entries[0][0].toLowerCase() === 'authorization') {
     const match = String(entries[0][1]).match(/^Bearer\s+(.+)$/i);
-    if (match) return { mode: 'bearer', token: match[1], header: '', value: '' };
+    if (match) {
+      return {
+        mode: 'credential', method: 'bearer', secret: match[1], header: 'X-API-Key'
+      };
+    }
   }
   if (entries.length === 1) {
-    return { mode: 'api_key', token: '', header: entries[0][0], value: entries[0][1] };
+    return {
+      mode: 'credential', method: 'header', secret: entries[0][1], header: entries[0][0]
+    };
   }
-  return { mode: 'custom', token: '', header: '', value: '' };
+  return { ...empty, mode: 'custom' };
 }
 
 function items() {
@@ -617,14 +782,16 @@ async function api(method, url, body) {
 }
 
 async function loadAll() {
-  const [o, p, m, s, a] = await Promise.all([
+  const [o, h, p, m, s, a] = await Promise.all([
     api('GET', API.overview),
+    api('GET', '/api/heartbeat'),
     api('GET', '/api/profile'),
     api('GET', API.models.list),
     api('GET', API.servers.list),
     api('GET', API.agents.list),
   ]);
   S.overview = o;
+  S.heartbeat = h;
   S.profile = p;
   S.models = m;
   S.servers = s;
@@ -637,6 +804,7 @@ async function loadAll() {
 /* ========== rendering ========== */
 function render() {
   if (S.tab === 'overview') renderOverview();
+  else if (S.tab === 'heartbeat') renderHeartbeat();
   else if (S.tab === 'profile') renderForm();
   else if (S.view === 'list') renderList();
   else renderForm();
@@ -646,6 +814,7 @@ function render() {
 function updateHeader() {
   const meta = TAB_META[S.tab];
   const inOverview = S.tab === 'overview';
+  const inHeartbeat = S.tab === 'heartbeat';
   const inProfile = S.tab === 'profile';
   const inForm = S.view === 'form';
   const editing = inForm && S.editing;
@@ -656,14 +825,14 @@ function updateHeader() {
     : meta.title;
   $('viewSubtitle').textContent = meta.subtitle;
   // Create New: only in list view
-  $('createBtn').style.display = (inOverview || inProfile || inForm) ? 'none' : '';
+  $('createBtn').style.display = (inOverview || inHeartbeat || inProfile || inForm) ? 'none' : '';
   // Delete: only in readonly form view
   $('deleteBtn').style.display = (!inOverview && !inProfile && editing && S.formReadonly) ? '' : 'none';
   $('testBtn').style.display = (S.tab === 'servers' && editing && S.formReadonly) ? '' : 'none';
   // Cancel: in form view but NOT in readonly edit mode
   $('cancelBtn').style.display = (inForm && !(editing && S.formReadonly)) ? '' : 'none';
   // Modify / Save / Create button
-  if (inOverview) {
+  if (inOverview || inHeartbeat) {
     $('modifyBtn').style.display = 'none';
     $('cancelBtn').style.display = 'none';
     $('testBtn').style.display = 'none';
@@ -737,6 +906,178 @@ function renderOverview() {
   $('zoomValue').textContent = `${Math.round(canvasZoom * 100)}%`;
   S.view = 'overview';
   requestAnimationFrame(drawWorkflowLinks);
+}
+
+function renderHeartbeat() {
+  const enabled = Boolean(S.heartbeat.enabled);
+  const capabilities = Array.isArray(S.heartbeat.capabilities) ? S.heartbeat.capabilities : [];
+  const interval = Number(S.heartbeat.interval_minutes || 30);
+  const intervalOptions = [5, 15, 30, 60, 180, 360, 720, 1440];
+  if (!intervalOptions.includes(interval)) intervalOptions.push(interval);
+  intervalOptions.sort((a, b) => a - b);
+  const intervalLabel = minutes => minutes < 60
+    ? `${minutes} minutes`
+    : minutes === 60
+    ? '1 hour'
+    : minutes < 1440
+    ? `${minutes / 60} hours`
+    : '1 day';
+  const capabilityHtml = capabilities.map(agent => {
+    const tools = Array.isArray(agent.tools) ? agent.tools : [];
+    return `
+      <section class="heartbeat-agent">
+        <div class="heartbeat-agent-head">
+          <span>${esc(agent.name)}</span>
+          <span class="connection-status ${esc(agent.connection_status || 'untested')}" title="MCP connection status">${tools.length} tools</span>
+        </div>
+        <div class="heartbeat-agent-tools">
+          ${tools.length ? tools.map(tool => {
+            const locked = Boolean(tool.requires_confirmation);
+            return `
+              <label class="heartbeat-tool${locked ? ' locked' : ''}">
+                <input type="checkbox" data-heartbeat-tool data-subagent-id="${agent.id}" data-tool-name="${esc(tool.name)}"${tool.selected && !locked ? ' checked' : ''}${locked ? ' disabled' : ''}>
+                <span>
+                  <span class="heartbeat-tool-name mono">${esc(tool.name)}</span>
+                  <span class="heartbeat-tool-description">${esc(tool.description || 'No description provided.')}</span>
+                </span>
+                ${locked ? '<span class="heartbeat-tool-lock">Needs confirmation</span>' : ''}
+              </label>`;
+          }).join('') : '<div class="heartbeat-empty">No saved tools. Open this MCP server and test its connection first.</div>'}
+        </div>
+      </section>`;
+  }).join('');
+  const status = S.heartbeat.last_status || 'never';
+  const detail = S.heartbeat.last_error || S.heartbeat.last_message || (
+    status === 'quiet' ? 'Nothing needed your attention.' : 'No heartbeat check has run yet.'
+  );
+  $('content').innerHTML = `
+    <div class="heartbeat-view">
+      <section class="heartbeat-card" aria-labelledby="heartbeatTitle">
+        <div class="heartbeat-info">
+          <div class="heartbeat-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.2-6 4.2 12 2.2-6H21"/></svg>
+          </div>
+          <div>
+            <h3 id="heartbeatTitle">Enable heartbeat</h3>
+            <p>Periodically checks only the MCP capabilities you allow below. Quiet checks stay silent; important updates appear in your conversation.</p>
+          </div>
+        </div>
+        <div class="heartbeat-control">
+          <span class="heartbeat-state${enabled ? ' enabled' : ''}" id="heartbeatState">${enabled ? 'Enabled' : 'Disabled'}</span>
+          <label class="switch" title="Enable or disable heartbeat">
+            <input type="checkbox" id="heartbeatToggle" role="switch" aria-label="Enable heartbeat"${enabled ? ' checked' : ''}>
+            <span class="switch-track"></span>
+          </label>
+        </div>
+        <div class="heartbeat-toggle-feedback" id="heartbeatToggleFeedback" role="alert"></div>
+      </section>
+      <section class="heartbeat-config" aria-labelledby="heartbeatConfigTitle">
+        <div>
+          <h3 id="heartbeatConfigTitle">Background check</h3>
+          <p>Tools that require confirmation cannot be selected because nobody may be present when a scheduled check runs.</p>
+        </div>
+        <div class="heartbeat-fields">
+          <label class="heartbeat-field">
+            <span>Check every</span>
+            <select id="heartbeatInterval">
+              ${intervalOptions.map(value => `<option value="${value}"${value === interval ? ' selected' : ''}>${intervalLabel(value)}</option>`).join('')}
+            </select>
+          </label>
+          <label class="heartbeat-field">
+            <span>What should Mounir watch for?</span>
+            <textarea id="heartbeatInstructions" maxlength="2000" placeholder="For example: Tell me about urgent unread email or failed GitHub checks.">${esc(S.heartbeat.instructions || '')}</textarea>
+          </label>
+        </div>
+        <div>
+          <h3>Allowed checks</h3>
+          <p>Select the read-only capabilities heartbeat may use automatically.</p>
+        </div>
+        <div class="heartbeat-capabilities">
+          ${capabilityHtml || '<div class="heartbeat-empty">No dynamic MCP subagents are available yet.</div>'}
+        </div>
+        <div class="heartbeat-actions">
+          <button class="btn primary" type="button" id="heartbeatSave">Save settings</button>
+          <button class="btn outline" type="button" id="heartbeatRun">Run now</button>
+        </div>
+        <div class="heartbeat-feedback" id="heartbeatFeedback"></div>
+      </section>
+      <section class="heartbeat-last" aria-label="Latest heartbeat status">
+        <div class="heartbeat-last-label">Last check</div>
+        <div class="heartbeat-last-value">${esc(heartbeatTime(S.heartbeat.last_run_at))}</div>
+        <div class="heartbeat-last-label">Result</div>
+        <div class="heartbeat-last-value"><span class="heartbeat-run-status ${esc(status)}">${esc(status)}</span> · ${esc(detail)}</div>
+        <div class="heartbeat-last-label">Next check</div>
+        <div class="heartbeat-last-value">${enabled ? esc(heartbeatTime(S.heartbeat.next_run_at)) : 'Disabled'}</div>
+      </section>
+    </div>`;
+  S.view = 'heartbeat';
+  updateHeader();
+
+  const toggle = $('heartbeatToggle');
+  toggle.addEventListener('change', async () => {
+    const requested = toggle.checked;
+    toggle.disabled = true;
+    try {
+      S.heartbeat = await api('PUT', API.heartbeat.update(), heartbeatFormPayload(requested));
+      renderHeartbeat();
+    } catch (error) {
+      toggle.checked = !requested;
+      const feedback = $('heartbeatToggleFeedback');
+      feedback.textContent = error.message;
+      feedback.classList.add('show');
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+
+  $('heartbeatSave').addEventListener('click', () => saveHeartbeatSettings(false));
+  $('heartbeatRun').addEventListener('click', () => saveHeartbeatSettings(true));
+}
+
+function heartbeatTime(value) {
+  if (!value) return 'Never';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function heartbeatFormPayload(enabled = Boolean(S.heartbeat.enabled)) {
+  const selected_tools = [...document.querySelectorAll('[data-heartbeat-tool]:checked:not(:disabled)')]
+    .map(input => ({
+      subagent_id: Number(input.dataset.subagentId),
+      tool_name: input.dataset.toolName,
+    }));
+  return {
+    enabled,
+    interval_minutes: Number($('heartbeatInterval').value),
+    instructions: $('heartbeatInstructions').value.trim(),
+    selected_tools,
+  };
+}
+
+async function saveHeartbeatSettings(runNow) {
+  const feedback = $('heartbeatFeedback');
+  const save = $('heartbeatSave');
+  const run = $('heartbeatRun');
+  save.disabled = true;
+  run.disabled = true;
+  feedback.className = 'heartbeat-feedback';
+  feedback.textContent = runNow ? 'Saving and running the check…' : 'Saving…';
+  try {
+    const payload = heartbeatFormPayload();
+    if (!payload.selected_tools.length) throw new Error('Select at least one tool for heartbeat checks.');
+    S.heartbeat = await api('PUT', API.heartbeat.update(), payload);
+    if (runNow) S.heartbeat = await api('POST', '/api/heartbeat/run');
+    renderHeartbeat();
+    const updated = $('heartbeatFeedback');
+    updated.textContent = runNow ? 'Check completed.' : 'Settings saved.';
+    updated.className = 'heartbeat-feedback ok';
+  } catch (error) {
+    feedback.textContent = error.message;
+    feedback.className = 'heartbeat-feedback error';
+  } finally {
+    if ($('heartbeatSave')) $('heartbeatSave').disabled = false;
+    if ($('heartbeatRun')) $('heartbeatRun').disabled = false;
+  }
 }
 
 function agentNodeHtml(item, kind, nodeId, agentId) {
@@ -826,17 +1167,21 @@ function renderListItem(item) {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>`;
-  if (S.tab === 'servers') return `
+  if (S.tab === 'servers') {
+    const status = connectionStatusInfo(item.connection_status || 'untested');
+    return `
     <div class="list-item" data-id="${item.id}">
       <div class="info">
         <div class="primary">${esc(item.name)}</div>
         <div class="secondary mono">${esc(item.connection)}</div>
       </div>
       <span class="badge">${esc(item.transport || 'stdio')}</span>
+      <span class="connection-status server-list-status ${status.kind}" role="status" aria-label="${esc(status.label)}" title="${esc(status.label)}"></span>
       <button class="del-btn" data-action="delete" title="Remove">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>`;
+  }
   const initial = (item.name || '?').trim().charAt(0).toUpperCase();
   const icon = item.has_icon
     ? `<img class="list-agent-icon" src="/api/subagents/${item.id}/icon" alt="">`
@@ -859,6 +1204,13 @@ function renderForm() {
   const el = $('content');
   const editing = S.editing;
   pendingAgentIcon = undefined;
+  if (S.tab === 'agents') {
+    const configured = parseStringList(
+      editing?.confirm_tools,
+      !editing || editing.confirm_tool_calls ? ['*'] : []
+    );
+    pendingConfirmationTools = new Set(configured.filter(name => name !== '*'));
+  }
   const formHtml = buildFormHtml(editing, S.formReadonly);
   if (S.tab === 'servers') {
     el.innerHTML = `
@@ -879,14 +1231,20 @@ function renderForm() {
 
 function serverToolsPanelHtml(item) {
   const saved = Boolean(item?.id);
+  const status = connectionStatusInfo(item?.connection_status || 'untested');
   return `
     <aside class="server-tools-panel" id="serverToolsPanel" aria-label="Server tools">
       <div class="server-tools-head">
         <div>
-          <div class="server-tools-title">Available tools</div>
+          <div class="server-tools-title-row">
+            <div class="server-tools-title">Available tools</div>
+            <span class="server-tools-count" id="serverToolsCount">—</span>
+          </div>
           <div class="server-tools-subtitle">What this server lets the agent do</div>
         </div>
-        <span class="server-tools-count" id="serverToolsCount">—</span>
+        <div class="server-tools-meta">
+          <span class="connection-status ${status.kind}" id="serverConnectionStatus">${status.label}</span>
+        </div>
       </div>
       <div class="server-tools-state${saved ? ' loading' : ''}" id="serverToolsContent">
         ${saved ? 'Reading the server’s capabilities…' : '<strong>No tools yet</strong>Save the server first, then its tools will appear here.'}
@@ -900,20 +1258,58 @@ function readableToolName(name) {
     .replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
-function renderServerTools(tools) {
+function connectionStatusInfo(status) {
+  if (status === 'connected') return { kind: 'connected', label: 'Connected' };
+  if (status === 'failed') return { kind: 'failed', label: 'Failed' };
+  if (status === 'stale') return { kind: 'stale', label: 'Needs retest' };
+  return { kind: 'untested', label: 'Not tested' };
+}
+
+function updateLocalServerStatus(serverId, state) {
+  const server = S.servers.find(item => item.id === +serverId);
+  if (server) {
+    server.connection_status = state.status;
+    server.last_tested_at = state.last_tested_at;
+    server.last_error = state.last_error;
+  }
+  if (S.editing?.id === +serverId) Object.assign(S.editing, server || {}, {
+    connection_status: state.status,
+    last_tested_at: state.last_tested_at,
+    last_error: state.last_error,
+  });
+}
+
+function renderServerTools(state) {
   const panel = $('serverToolsPanel');
   const content = $('serverToolsContent');
   const count = $('serverToolsCount');
-  if (!panel || !content || !count) return;
-  const available = Array.isArray(tools) ? tools : [];
+  const statusEl = $('serverConnectionStatus');
+  if (!panel || !content || !count || !statusEl) return;
+  const available = Array.isArray(state?.tools) ? state.tools : [];
+  const status = connectionStatusInfo(state?.status || 'untested');
+  statusEl.className = `connection-status ${status.kind}`;
+  statusEl.textContent = status.label;
   count.textContent = String(available.length);
   if (!available.length) {
     content.className = 'server-tools-state';
-    content.innerHTML = '<strong>No tools advertised</strong>The connection worked, but this server did not provide any tools.';
+    if (state?.status === 'failed') {
+      content.innerHTML = `<strong>Connection failed</strong>${esc(state.last_error || 'Check the server connection and credentials, then test again.')}`;
+    } else if (state?.status === 'untested') {
+      content.innerHTML = '<strong>Testing for the first time…</strong>The discovered tools will be saved here.';
+    } else if (state?.status === 'stale') {
+      content.innerHTML = '<strong>Connection changed</strong>Test the connection to refresh its saved tools.';
+    } else {
+      content.innerHTML = '<strong>No tools advertised</strong>The connection worked, but this server did not provide any tools.';
+    }
     return;
   }
   content.className = 'server-tools-list';
-  content.innerHTML = available.map(tool => `
+  const notice = state?.status === 'failed'
+    ? `<div class="server-tools-notice failed">Latest test failed. Showing the last successful tool list.</div>`
+    : state?.status === 'stale'
+    ? `<div class="server-tools-notice stale">Connection settings changed. Showing cached tools until you test again.</div>`
+    : '';
+  content.innerHTML = notice + available.map(tool => `
     <article class="server-tool">
       <div class="server-tool-name">${esc(readableToolName(tool.name))}</div>
       <div class="server-tool-description">${esc(tool.description || 'No description was provided for this tool.')}</div>
@@ -921,24 +1317,46 @@ function renderServerTools(tools) {
 }
 
 let serverToolsLoad = 0;
-async function loadServerTools() {
+async function loadServerTools(forceTest = false) {
   if (S.tab !== 'servers' || !S.editing?.id) return;
   const requestId = ++serverToolsLoad;
   const content = $('serverToolsContent');
   const count = $('serverToolsCount');
   if (!content || !count) return;
-  content.className = 'server-tools-state loading';
-  content.textContent = 'Reading the server’s capabilities…';
-  count.textContent = '—';
+  if (forceTest) {
+    content.className = 'server-tools-state loading';
+    content.textContent = 'Testing the connection and refreshing tools…';
+    count.textContent = '—';
+  }
   $('testBtn').disabled = true;
   try {
-    const result = await api('POST', `/api/mcp-servers/${S.editing.id}/test`);
+    let result = await api(
+      forceTest ? 'POST' : 'GET',
+      forceTest
+        ? `/api/mcp-servers/${S.editing.id}/test`
+        : `/api/mcp-servers/${S.editing.id}/tools`
+    );
     if (requestId !== serverToolsLoad) return;
-    renderServerTools(result.tools);
+    S.serverToolCache[S.editing.id] = result;
+    updateLocalServerStatus(S.editing.id, result);
+    renderServerTools(result);
+    // Existing servers have no cache after the migration. Discover once on
+    // their first form open; failures are saved and are not retried on reopen.
+    if (!forceTest && result.status === 'untested') {
+      await loadServerTools(true);
+    }
   } catch (error) {
     if (requestId !== serverToolsLoad) return;
-    content.className = 'server-tools-state';
-    content.innerHTML = '<strong>Tools unavailable</strong>Check the server connection and credentials, then try again.';
+    try {
+      const saved = await api('GET', `/api/mcp-servers/${S.editing.id}/tools`);
+      if (requestId !== serverToolsLoad) return;
+      S.serverToolCache[S.editing.id] = saved;
+      updateLocalServerStatus(S.editing.id, saved);
+      renderServerTools(saved);
+    } catch (_) {
+      content.className = 'server-tools-state';
+      content.innerHTML = `<strong>Tools unavailable</strong>${esc(error.message)}`;
+    }
   } finally {
     if (requestId === serverToolsLoad) $('testBtn').disabled = false;
   }
@@ -992,7 +1410,7 @@ function buildFormHtml(item, readonly) {
     const transport = item?.transport || 'stdio';
     const headers = parseObject(item?.headers);
     const environment = parseObject(item?.env);
-    const auth = remoteAuthFromHeaders(headers);
+    const auth = remoteAuthFromHeaders(headers, item?.auth_scheme || '');
     const disabled = readonly ? ' disabled' : '';
     return `
     <form class="form-grid" id="formEl">
@@ -1025,17 +1443,24 @@ function buildFormHtml(item, readonly) {
         <label>Authentication
           <select id="remoteAuthMode"${dis}>
             <option value="none"${auth.mode === 'none' ? ' selected' : ''}>No authentication</option>
-            <option value="bearer"${auth.mode === 'bearer' ? ' selected' : ''}>Bearer token</option>
-            <option value="api_key"${auth.mode === 'api_key' ? ' selected' : ''}>API key header</option>
+            <option value="credential"${auth.mode === 'credential' ? ' selected' : ''}>Access token or API key</option>
             <option value="custom"${auth.mode === 'custom' ? ' selected' : ''}>Advanced custom headers</option>
           </select>
         </label>
-        <label id="bearerFields">Access token
-          <input type="password" id="bearerToken" value="${esc(auth.token)}" placeholder="Paste access token"${ro}>
-        </label>
-        <div id="apiKeyFields" class="credential-row">
-          <label>Header name <input type="text" id="apiKeyHeader" value="${esc(auth.header)}" placeholder="X-API-Key"${ro}></label>
-          <label>API key <input type="password" id="apiKeyValue" value="${esc(auth.value)}" placeholder="Paste API key"${ro}></label>
+        <div id="credentialFields" class="credential-auth-fields">
+          <label>How should it be sent?
+            <select id="credentialDelivery"${dis}>
+              <option value="bearer"${auth.method === 'bearer' ? ' selected' : ''}>Bearer token — Authorization header</option>
+              <option value="header"${auth.method === 'header' ? ' selected' : ''}>Named API key header</option>
+            </select>
+          </label>
+          <label id="credentialHeaderField">Header name
+            <input type="text" id="credentialHeader" value="${esc(auth.header)}" placeholder="Example: X-API-Key"${ro}>
+          </label>
+          <label class="credential-secret-field">Token or API key
+            <span class="hint" id="credentialDeliveryHint"></span>
+            <input type="password" id="credentialSecret" value="${esc(auth.secret)}" placeholder="Paste the value from the provider"${ro}>
+          </label>
         </div>
         <div id="customHeaderFields">
           <div class="hint">Only use this when the provider requires multiple custom headers.</div>
@@ -1063,9 +1488,6 @@ function buildFormHtml(item, readonly) {
   const confirmationMode = confirmationTools.includes('*')
     ? 'all'
     : confirmationTools.length ? 'selected' : 'none';
-  const selectedConfirmationTools = confirmationMode === 'selected'
-    ? confirmationTools.join(', ')
-    : '';
   const duplicateProtectionTools = parseStringList(item?.dedupe_tools).join(', ');
   const agentInitial = (item?.name || '?').trim().charAt(0).toUpperCase();
   const iconPreview = item?.has_icon
@@ -1106,10 +1528,13 @@ function buildFormHtml(item, readonly) {
           <option value="none"${confirmationMode === 'none' ? ' selected' : ''}>Allow tool calls without asking</option>
         </select>
       </label>
-      <label class="full" id="confirmationToolsField">Tools requiring confirmation
-        <span class="hint">Enter the exact MCP tool names, separated by commas. Example: send_email, delete_email</span>
-        <textarea id="confirmationTools" rows="2" placeholder="send_email, delete_email"${ro}>${esc(selectedConfirmationTools)}</textarea>
-      </label>
+      <div class="full" id="confirmationToolsField">
+        <div class="credential-title">Tools requiring confirmation</div>
+        <span class="hint">Select from the tools saved by the server's last successful connection test.</span>
+        <div class="tool-choice-list" id="confirmationToolChoices">
+          <div class="tool-choice-empty">Choose an MCP server to see its saved tools.</div>
+        </div>
+      </div>
       <label class="full">Prevent exact duplicate actions
         <span class="hint">Tool names separated by commas. Use for irreversible actions such as send_email, not repeatable navigation actions such as browser_click.</span>
         <textarea id="dedupeTools" rows="2" placeholder="send_email, create_payment"${ro}>${esc(duplicateProtectionTools)}</textarea>
@@ -1153,15 +1578,75 @@ function updateServerFormVisibility() {
 function updateRemoteAuthVisibility() {
   const mode = $('remoteAuthMode')?.value;
   if (!mode) return;
-  $('bearerFields').style.display = mode === 'bearer' ? '' : 'none';
-  $('apiKeyFields').style.display = mode === 'api_key' ? '' : 'none';
+  $('credentialFields').style.display = mode === 'credential' ? '' : 'none';
   $('customHeaderFields').style.display = mode === 'custom' ? '' : 'none';
+  if (mode !== 'credential') return;
+  const method = $('credentialDelivery').value;
+  $('credentialHeaderField').style.display = method === 'header' ? '' : 'none';
+  $('credentialDeliveryHint').textContent = method === 'bearer'
+    ? 'Mounir sends this automatically as Authorization: Bearer <value>.'
+    : 'Mounir sends this value using the exact header name above.';
 }
 
 function updateConfirmationVisibility() {
   const mode = $('confirmationMode')?.value;
   if (!mode) return;
   $('confirmationToolsField').style.display = mode === 'selected' ? '' : 'none';
+}
+
+function renderConfirmationToolChoices(state) {
+  const container = $('confirmationToolChoices');
+  if (!container) return;
+  const tools = Array.isArray(state?.tools) ? state.tools : [];
+  const advertised = new Set(tools.map(tool => tool.name));
+  const missing = [...pendingConfirmationTools].filter(name => !advertised.has(name));
+  const readonly = S.formReadonly ? ' disabled' : '';
+  const choices = tools.map(tool => `
+    <label class="tool-choice">
+      <input type="checkbox" data-confirmation-tool="${esc(tool.name)}"${pendingConfirmationTools.has(tool.name) ? ' checked' : ''}${readonly}>
+      <span>
+        <span class="tool-choice-name mono">${esc(tool.name)}</span>
+        <span class="tool-choice-description">${esc(tool.description || tool.name)}</span>
+      </span>
+    </label>`).join('');
+  const missingChoices = missing.map(name => `
+    <label class="tool-choice missing">
+      <input type="checkbox" data-confirmation-tool="${esc(name)}" checked${readonly}>
+      <span>
+        <span class="tool-choice-name mono">${esc(name)}</span>
+        <span class="tool-choice-description">No longer advertised by the server's saved tool list.</span>
+      </span>
+    </label>`).join('');
+  if (choices || missingChoices) {
+    container.innerHTML = choices + missingChoices;
+    return;
+  }
+  const status = state?.status || 'untested';
+  const message = status === 'untested'
+    ? 'Test this MCP server once to discover and save its tools.'
+    : status === 'failed'
+    ? 'The server has no saved tools. Fix it and run Test Connection.'
+    : 'This server did not advertise any tools.';
+  container.innerHTML = `<div class="tool-choice-empty">${esc(message)}</div>`;
+}
+
+async function loadAgentToolChoices(resetSelection = false) {
+  const select = $('formEl')?.querySelector('select[name="mcp_server_id"]');
+  const serverId = +(select?.value || 0);
+  if (resetSelection) pendingConfirmationTools.clear();
+  if (!serverId) {
+    renderConfirmationToolChoices(null);
+    return;
+  }
+  try {
+    const state = S.serverToolCache[serverId]
+      || await api('GET', `/api/mcp-servers/${serverId}/tools`);
+    S.serverToolCache[serverId] = state;
+    renderConfirmationToolChoices(state);
+  } catch (error) {
+    const container = $('confirmationToolChoices');
+    if (container) container.innerHTML = `<div class="tool-choice-empty">${esc(error.message)}</div>`;
+  }
 }
 
 function renderServerSetup(data) {
@@ -1284,13 +1769,23 @@ function attachFormEvents() {
   f.addEventListener('submit', onFormSubmit);
   if (S.tab === 'agents') {
     $('confirmationMode').addEventListener('change', updateConfirmationVisibility);
+    const serverSelect = f.querySelector('select[name="mcp_server_id"]');
+    serverSelect.addEventListener('change', () => loadAgentToolChoices(true));
+    $('confirmationToolChoices').addEventListener('change', event => {
+      const checkbox = event.target.closest('[data-confirmation-tool]');
+      if (!checkbox) return;
+      if (checkbox.checked) pendingConfirmationTools.add(checkbox.dataset.confirmationTool);
+      else pendingConfirmationTools.delete(checkbox.dataset.confirmationTool);
+    });
     attachAgentIconEvents();
     updateConfirmationVisibility();
+    loadAgentToolChoices();
     return;
   }
   if (S.tab !== 'servers') return;
   $('serverTransport').addEventListener('change', updateServerFormVisibility);
   $('remoteAuthMode').addEventListener('change', updateRemoteAuthVisibility);
+  $('credentialDelivery').addEventListener('change', updateRemoteAuthVisibility);
   f.addEventListener('click', event => {
     const add = event.target.closest('[data-add-credential]');
     if (add) addCredentialRow(add.dataset.addCredential);
@@ -1375,10 +1870,7 @@ async function onFormSubmit(e) {
     if (mode === 'all') {
       body.confirm_tools = ['*'];
     } else if (mode === 'selected') {
-      body.confirm_tools = $('confirmationTools').value
-        .split(/[\n,]/)
-        .map(name => name.trim())
-        .filter(Boolean);
+      body.confirm_tools = [...pendingConfirmationTools];
       if (!body.confirm_tools.length) {
         errEl.textContent = 'Add at least one tool that requires confirmation.';
         return;
@@ -1397,6 +1889,7 @@ async function onFormSubmit(e) {
     if (S.tab === 'servers') {
       if (body.transport === 'stdio') {
         body.headers = '{}';
+        body.auth_scheme = '';
         body.env = JSON.stringify(
           collectCredentialRows('environmentRows', 'Credential')
         );
@@ -1404,16 +1897,19 @@ async function onFormSubmit(e) {
         body.env = '{}';
         const mode = $('remoteAuthMode').value;
         let headers = {};
-        if (mode === 'bearer') {
-          const token = $('bearerToken').value.trim();
-          if (!token) throw new Error('Access token is required.');
-          headers.Authorization = `Bearer ${token}`;
-        } else if (mode === 'api_key') {
-          const header = $('apiKeyHeader').value.trim();
-          const value = $('apiKeyValue').value;
-          if (!header) throw new Error('API key header name is required.');
-          if (!value) throw new Error('API key is required.');
-          headers[header] = value;
+        body.auth_scheme = mode;
+        if (mode === 'credential') {
+          const method = $('credentialDelivery').value;
+          body.auth_scheme = method;
+          const secret = $('credentialSecret').value.trim();
+          if (!secret) throw new Error('Token or API key is required.');
+          if (method === 'bearer') {
+            headers.Authorization = `Bearer ${secret}`;
+          } else {
+            const header = $('credentialHeader').value.trim();
+            if (!header) throw new Error('API key header name is required.');
+            headers[header] = secret;
+          }
         } else if (mode === 'custom') {
           headers = collectCredentialRows('headerRows', 'Header');
         }
@@ -1557,7 +2053,7 @@ $('testBtn').addEventListener('click', async () => {
   if (S.tab !== 'servers' || !S.editing) return;
   const err = $('formError');
   err.textContent = '';
-  await loadServerTools();
+  await loadServerTools(true);
 });
 
 $('modifyBtn').addEventListener('click', () => {
@@ -1566,7 +2062,7 @@ $('modifyBtn').addEventListener('click', () => {
   if (S.formReadonly) {
     // Enable all fields
     f.querySelectorAll('input[readonly], textarea[readonly]').forEach(el => el.removeAttribute('readonly'));
-    f.querySelectorAll('input[type="file"][disabled]').forEach(el => el.removeAttribute('disabled'));
+    f.querySelectorAll('input[disabled]').forEach(el => el.removeAttribute('disabled'));
     f.querySelectorAll('select[disabled]').forEach(el => el.removeAttribute('disabled'));
     f.querySelectorAll('button[disabled]').forEach(el => el.removeAttribute('disabled'));
     S.formReadonly = false;

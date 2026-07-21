@@ -25,6 +25,7 @@ import shlex
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import psutil
@@ -36,6 +37,7 @@ from mounir.agent import Agent
 from mounir import config as cfg, db, llm
 from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
+from mounir.heartbeat import HeartbeatService
 from mounir.specialists.mcp_agent import discover_tools
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -78,9 +80,6 @@ def _secure_gmail_auth_files() -> None:
 
 _secure_gmail_auth_files()
 
-app = FastAPI(title="Mounir")
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
-
 # Ensure the SQLite DB exists and the legacy JSON file is migrated.
 db.init()
 
@@ -120,6 +119,36 @@ def _web_confirm(action: str) -> bool:
 
 
 tools.confirm_fn = _web_confirm
+
+
+async def _deliver_heartbeat_alert(message: str) -> None:
+    """Persist one proactive alert and deliver it to the live dashboard."""
+    alert = f"Heartbeat update\n\n{message}"
+
+    def persist() -> None:
+        with _agent_lock:
+            agent.conversation.add_assistant(alert)
+
+    await asyncio.to_thread(persist)
+    out = _ui.get("out")
+    if out is not None:
+        out.put_nowait({"type": "heartbeat", "text": alert})
+
+
+heartbeat_service = HeartbeatService(_deliver_heartbeat_alert)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    await heartbeat_service.start()
+    try:
+        yield
+    finally:
+        await heartbeat_service.stop()
+
+
+app = FastAPI(title="Mounir", lifespan=_lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 # --- network rate tracking ---------------------------------------------------
 _last_net = psutil.net_io_counters()
@@ -326,6 +355,53 @@ async def update_profile(req: dict):
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
+
+@app.get("/api/heartbeat")
+async def get_heartbeat():
+    return {
+        **db.get_heartbeat_settings(),
+        "capabilities": db.get_heartbeat_capabilities(),
+        "recent_runs": db.list_heartbeat_runs(),
+    }
+
+
+@app.put("/api/heartbeat")
+async def update_heartbeat(req: dict):
+    try:
+        requested_enabled = req.get("enabled")
+        if requested_enabled is True:
+            selected = req.get("selected_tools")
+            if selected is None:
+                selected = [
+                    {"subagent_id": agent["id"], "tool_name": tool["name"]}
+                    for agent in db.get_heartbeat_capabilities()
+                    for tool in agent["tools"]
+                    if tool["selected"] and not tool["requires_confirmation"]
+                ]
+            if not selected:
+                raise ValueError(
+                    "select at least one non-interactive tool before enabling heartbeat"
+                )
+        db.update_heartbeat_settings(
+            enabled=requested_enabled,
+            interval_minutes=req.get("interval_minutes"),
+            instructions=req.get("instructions"),
+            selected_tools=req.get("selected_tools"),
+        )
+        heartbeat_service.wake()
+        return await get_heartbeat()
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/heartbeat/run")
+async def run_heartbeat_now():
+    try:
+        await heartbeat_service.run_now("manual")
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    return await get_heartbeat()
+
 @app.get("/api/agent-overview")
 async def agent_overview():
     """Return the configured, user-visible agent topology for Agent Studio."""
@@ -417,6 +493,7 @@ async def create_server(req: dict):
             headers=req.get("headers", "{}"),
             env=req.get("env", "{}"),
             description=req.get("description", ""),
+            auth_scheme=req.get("auth_scheme", ""),
         )
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -433,6 +510,14 @@ async def update_server(server_id: int, req: dict):
     return s
 
 
+@app.get("/api/mcp-servers/{server_id}/tools")
+async def cached_server_tools(server_id: int):
+    state = db.get_server_tools_state(server_id)
+    if state is None:
+        return JSONResponse({"error": "Server not found."}, status_code=404)
+    return state
+
+
 @app.post("/api/mcp-servers/{server_id}/test")
 async def test_server(server_id: int):
     spec = db.build_server_spec(server_id)
@@ -441,15 +526,20 @@ async def test_server(server_id: int):
     try:
         tools_found = await asyncio.wait_for(discover_tools(spec), timeout=45)
     except TimeoutError:
+        error = "Connection timed out after 45 seconds."
+        db.record_server_test_failure(server_id, error)
         return JSONResponse(
-            {"error": "Connection timed out after 45 seconds."}, status_code=504
+            {"error": error}, status_code=504
         )
     except Exception as exc:
         # AnyIO transports may wrap connection failures in an ExceptionGroup.
         from mounir.specialists.mcp_agent import _exc_detail
 
-        return JSONResponse({"error": _exc_detail(exc)}, status_code=400)
-    return {"ok": True, "tools": tools_found}
+        error = _exc_detail(exc)
+        db.record_server_test_failure(server_id, error)
+        return JSONResponse({"error": error}, status_code=400)
+    state = db.save_server_tools(server_id, tools_found)
+    return {"ok": True, **state}
 
 
 def _server_setup_type(server: dict | None) -> str:

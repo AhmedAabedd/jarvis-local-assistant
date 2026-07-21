@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +17,14 @@ from unittest.mock import patch
 _IMPORT_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["MOUNIR_DATA_DIR"] = _IMPORT_DATA_DIR.name
 
-from mounir import browser_control, config, db, mcp_agents, tools as mounir_tools
+from mounir import (
+    browser_control,
+    config,
+    db,
+    heartbeat as heartbeat_mod,
+    mcp_agents,
+    tools as mounir_tools,
+)
 from mounir.specialists import mcp_agent
 from mounir.specialists.mcp_agent import _call, _mcp_session, _system_prompt, discover_tools
 
@@ -36,6 +44,28 @@ class TemporaryDatabaseTest(unittest.TestCase):
 
 
 class DatabaseTests(TemporaryDatabaseTest):
+    def test_heartbeat_setting_is_disabled_by_default_and_persisted(self):
+        db.init()
+        initial = db.get_heartbeat_settings()
+        self.assertEqual(initial["enabled"], False)
+        self.assertEqual(initial["interval_minutes"], 30)
+        self.assertEqual(initial["last_status"], "never")
+
+        updated = db.update_heartbeat_settings(
+            enabled=True,
+            interval_minutes=60,
+            instructions="Check for important updates.",
+        )
+
+        self.assertEqual(updated["enabled"], True)
+        self.assertEqual(updated["interval_minutes"], 60)
+        self.assertIsNotNone(updated["next_run_at"])
+        self.assertEqual(db.get_heartbeat_settings()["enabled"], True)
+        with self.assertRaisesRegex(ValueError, "true or false"):
+            db.update_heartbeat_settings(enabled="yes")
+        with self.assertRaisesRegex(ValueError, "between 5 and 1440"):
+            db.update_heartbeat_settings(interval_minutes=2)
+
     def test_profile_is_persisted_and_builds_runtime_prompts(self):
         db.init()
         profile = db.update_profile(
@@ -51,6 +81,118 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertIn("User: Lina", config.build_context_message(profile))
         self.assertIn("Reply in French", config.build_system_prompt(profile))
         self.assertIn("Location: Paris, France", config.profile_instruction(profile))
+
+    def test_heartbeat_uses_only_selected_noninteractive_cached_tools(self):
+        db.init()
+        email = db.get_subagent_by_name("Email")
+        db.save_server_tools(
+            email["mcp_server_id"],
+            [
+                {"name": "search_emails", "description": "Read email", "input_schema": {}},
+                {"name": "send_email", "description": "Send email", "input_schema": {}},
+            ],
+        )
+
+        capabilities = db.get_heartbeat_capabilities()
+        email_tools = {
+            tool["name"]: tool
+            for agent in capabilities
+            if agent["id"] == email["id"]
+            for tool in agent["tools"]
+        }
+        self.assertFalse(email_tools["search_emails"]["requires_confirmation"])
+        self.assertTrue(email_tools["send_email"]["requires_confirmation"])
+
+        with self.assertRaisesRegex(ValueError, "require confirmation"):
+            db.update_heartbeat_settings(
+                selected_tools=[
+                    {"subagent_id": email["id"], "tool_name": "send_email"}
+                ]
+            )
+        db.update_heartbeat_settings(
+            selected_tools=[
+                {"subagent_id": email["id"], "tool_name": "search_emails"}
+            ]
+        )
+        target = next(
+            item for item in db.get_heartbeat_targets() if item["id"] == email["id"]
+        )
+        self.assertEqual(target["allowed_tools"], ["search_emails"])
+
+    def test_heartbeat_runner_suppresses_quiet_checks_and_persists_alerts(self):
+        db.init()
+        email = db.get_subagent_by_name("Email")
+        db.save_server_tools(
+            email["mcp_server_id"],
+            [{"name": "search_emails", "description": "Read email", "input_schema": {}}],
+        )
+        db.update_heartbeat_settings(
+            instructions="Tell me about urgent unread email.",
+            selected_tools=[
+                {"subagent_id": email["id"], "tool_name": "search_emails"}
+            ],
+        )
+
+        with patch.object(heartbeat_mod, "run_mcp_agent", return_value="HEARTBEAT_OK"):
+            self.assertEqual(heartbeat_mod.run_once(), ("quiet", ""))
+        with patch.object(
+            heartbeat_mod,
+            "run_mcp_agent",
+            return_value="An urgent unread message arrived from Lina.",
+        ):
+            status, message = heartbeat_mod.run_once()
+        self.assertEqual(status, "alert")
+        self.assertIn("Email: An urgent unread message", message)
+        with patch.object(
+            heartbeat_mod,
+            "run_mcp_agent",
+            return_value="An urgent unread message arrived from Lina.",
+        ):
+            self.assertEqual(heartbeat_mod.run_once(), ("quiet", ""))
+
+        notices = []
+
+        async def exercise_service():
+            async def notify(text):
+                notices.append(text)
+
+            service = heartbeat_mod.HeartbeatService(
+                notify, runner=lambda: ("alert", "Important update")
+            )
+            state = await service.run_now()
+            self.assertEqual(state["last_status"], "alert")
+
+        asyncio.run(exercise_service())
+        self.assertEqual(notices, ["Important update"])
+        self.assertEqual(db.list_heartbeat_runs()[0]["status"], "alert")
+
+        db.update_heartbeat_settings(enabled=True, interval_minutes=30)
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE heartbeat_settings SET next_run_at = ? WHERE id = 1",
+                ("2000-01-01T00:00:00+00:00",),
+            )
+            conn.commit()
+        scheduled_calls = []
+
+        async def exercise_scheduler():
+            async def notify(_text):
+                return None
+
+            service = heartbeat_mod.HeartbeatService(
+                notify,
+                runner=lambda: (scheduled_calls.append(True) or ("quiet", "")),
+            )
+            await service.start()
+            for _ in range(20):
+                if scheduled_calls:
+                    break
+                await asyncio.sleep(0.01)
+            await service.stop()
+
+        asyncio.run(exercise_scheduler())
+        self.assertEqual(scheduled_calls, [True])
+        self.assertEqual(db.list_heartbeat_runs()[0]["trigger"], "scheduled")
 
     def test_existing_database_is_migrated(self):
         with sqlite3.connect(db.DB_PATH) as conn:
@@ -71,6 +213,11 @@ class DatabaseTests(TemporaryDatabaseTest):
                     confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
                     parent TEXT, created_at TEXT
                 );
+                CREATE TABLE heartbeat_settings (
+                    id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT
+                );
+                INSERT INTO heartbeat_settings (id, enabled) VALUES (1, 0);
                 INSERT INTO mcp_servers (id, name, connection)
                 VALUES (1, 'Old remote', 'https://example.test/mcp');
                 INSERT INTO models (id, name, base_url)
@@ -90,8 +237,27 @@ class DatabaseTests(TemporaryDatabaseTest):
             agent_columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(subagents)")
             }
+            tool_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_server_tools'"
+            ).fetchone()
+            heartbeat_tables = {
+                row["name"]
+                for row in conn.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'table' AND name LIKE 'heartbeat_%'
+                    """
+                )
+            }
+            heartbeat_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(heartbeat_settings)")
+            }
         self.assertTrue(
-            {"description", "setup_type", "transport", "headers", "env"}
+            {
+                "description", "setup_type", "transport", "headers", "env",
+                "auth_scheme",
+            }
             <= server_columns
         )
         self.assertTrue(
@@ -100,6 +266,25 @@ class DatabaseTests(TemporaryDatabaseTest):
                 "confirm_tool_calls", "confirm_tools", "dedupe_tools",
             }
             <= agent_columns
+        )
+        self.assertIsNotNone(tool_table)
+        self.assertTrue(
+            {
+                "heartbeat_settings", "heartbeat_tools", "heartbeat_runs",
+                "heartbeat_agent_state",
+            }
+            <= heartbeat_tables
+        )
+        self.assertTrue(
+            {
+                "interval_minutes", "instructions", "next_run_at",
+                "last_run_at", "last_status", "last_message", "last_error",
+            }
+            <= heartbeat_columns
+        )
+        self.assertTrue(
+            {"connection_status", "last_tested_at", "last_error"}
+            <= server_columns
         )
         self.assertEqual(db.get_server(1)["transport"], "streamable_http")
         self.assertEqual(db.get_model(1)["model"], "qwen3:4b")
@@ -242,10 +427,13 @@ class DatabaseTests(TemporaryDatabaseTest):
             "Remote",
             "https://example.test/mcp",
             transport="streamable_http",
+            headers={"Authorization": "Bearer token"},
+            auth_scheme="bearer",
         )
         updated = db.update_server(server["id"], name="Renamed")
         self.assertEqual(updated["transport"], "streamable_http")
         self.assertEqual(updated["connection"], "https://example.test/mcp")
+        self.assertEqual(updated["auth_scheme"], "bearer")
 
     def test_delegate_slug_collisions_are_rejected(self):
         db.init()
@@ -261,6 +449,69 @@ class DatabaseTests(TemporaryDatabaseTest):
 
 
 class TransportTests(unittest.TestCase):
+    def test_restricted_mcp_run_hides_and_blocks_unselected_tools(self):
+        called = []
+
+        class Tool:
+            def __init__(self, name):
+                self.name = name
+                self.description = name
+                self.inputSchema = {"type": "object", "properties": {}}
+
+        class Session:
+            async def list_tools(self, cursor=None):
+                return type(
+                    "Page",
+                    (),
+                    {"tools": [Tool("safe_read"), Tool("dangerous_write")], "nextCursor": None},
+                )()
+
+            async def call_tool(self, name, args):
+                called.append((name, args))
+                return type("Result", (), {"content": [], "isError": False})()
+
+        @asynccontextmanager
+        async def fake_session(_spec):
+            yield Session()
+
+        responses = [
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "function": {
+                            "name": "dangerous_write",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {"content": "HEARTBEAT_OK", "tool_calls": []},
+        ]
+        spec = {
+            "name": "Restricted helper",
+            "prompt": "",
+            "model": "test-model",
+            "base_url": "http://localhost/v1",
+            "connection": "fake",
+            "confirm_tools": [],
+            "dedupe_tools": [],
+            "allowed_tools": ["safe_read"],
+        }
+        with (
+            patch.object(mcp_agent, "_mcp_session", fake_session),
+            patch.object(mcp_agent.llm, "openai_chat", side_effect=responses) as chat,
+        ):
+            result = asyncio.run(mcp_agent._run_async("check", spec, ""))
+
+        self.assertEqual(result, "HEARTBEAT_OK")
+        self.assertEqual(called, [])
+        advertised = chat.call_args_list[0].kwargs["tools"]
+        self.assertEqual(
+            [tool["function"]["name"] for tool in advertised], ["safe_read"]
+        )
+
     def test_mcp_tool_timeout_reports_unknown_external_state(self):
         class SlowSession:
             async def call_tool(self, name, args):
@@ -628,6 +879,37 @@ class AdminApiTests(TemporaryDatabaseTest):
                     db.build_server_spec(server_response.json()["id"])["env"],
                     {"ECHO_TOKEN": "pasted-in-the-interface"},
                 )
+                remote_auth = await client.post(
+                    "/api/mcp-servers",
+                    json={
+                        "name": "Remote auth",
+                        "transport": "streamable_http",
+                        "connection": "https://example.test/mcp",
+                        "headers": '{"Authorization":"Bearer github-pat"}',
+                        "auth_scheme": "bearer",
+                    },
+                )
+                self.assertEqual(remote_auth.status_code, 200)
+                self.assertEqual(remote_auth.json()["auth_scheme"], "bearer")
+                named_header = await client.put(
+                    f"/api/mcp-servers/{remote_auth.json()['id']}",
+                    json={
+                        "headers": '{"X-API-Key":"service-key"}',
+                        "auth_scheme": "header",
+                    },
+                )
+                self.assertEqual(named_header.status_code, 200)
+                self.assertEqual(named_header.json()["auth_scheme"], "header")
+                self.assertEqual(
+                    json.loads(named_header.json()["headers"]),
+                    {"X-API-Key": "service-key"},
+                )
+                untouched_tools = await client.get(
+                    f"/api/mcp-servers/{server_response.json()['id']}/tools"
+                )
+                self.assertEqual(untouched_tools.status_code, 200)
+                self.assertEqual(untouched_tools.json()["status"], "untested")
+                self.assertEqual(untouched_tools.json()["tools"], [])
                 agent_response = await client.post(
                     "/api/subagents",
                     json={
@@ -667,9 +949,45 @@ class AdminApiTests(TemporaryDatabaseTest):
                         {
                             "name": "echo",
                             "description": "Return the supplied text.",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"text": {"type": "string"}},
+                                "required": ["text"],
+                            },
                         }
                     ],
                 )
+                self.assertEqual(test_response.json()["status"], "connected")
+                cached_tools = await client.get(
+                    f"/api/mcp-servers/{server_response.json()['id']}/tools"
+                )
+                self.assertEqual(cached_tools.status_code, 200)
+                self.assertEqual(cached_tools.json()["tools"], test_response.json()["tools"])
+
+                stale_server = await client.put(
+                    f"/api/mcp-servers/{server_response.json()['id']}",
+                    json={"env": '{"ECHO_TOKEN":"changed"}'},
+                )
+                self.assertEqual(stale_server.status_code, 200)
+                self.assertEqual(stale_server.json()["connection_status"], "stale")
+                stale_tools = await client.get(
+                    f"/api/mcp-servers/{server_response.json()['id']}/tools"
+                )
+                self.assertEqual(stale_tools.json()["status"], "stale")
+                self.assertEqual(stale_tools.json()["tools"], test_response.json()["tools"])
+
+                with patch.object(
+                    web_server, "discover_tools", side_effect=RuntimeError("server offline")
+                ):
+                    failed_test = await client.post(
+                        f"/api/mcp-servers/{server_response.json()['id']}/test"
+                    )
+                self.assertEqual(failed_test.status_code, 400)
+                failed_state = await client.get(
+                    f"/api/mcp-servers/{server_response.json()['id']}/tools"
+                )
+                self.assertEqual(failed_state.json()["status"], "failed")
+                self.assertEqual(failed_state.json()["tools"], test_response.json()["tools"])
                 overview_response = await client.get("/api/agent-overview")
                 self.assertEqual(overview_response.status_code, 200)
                 overview = overview_response.json()
@@ -691,6 +1009,62 @@ class AdminApiTests(TemporaryDatabaseTest):
                 updated_overview = await client.get("/api/agent-overview")
                 self.assertEqual(
                     updated_overview.json()["supervisor"]["name"], "Atlas"
+                )
+
+                heartbeat_response = await client.get("/api/heartbeat")
+                self.assertEqual(heartbeat_response.status_code, 200)
+                self.assertEqual(heartbeat_response.json()["enabled"], False)
+                protected_heartbeat = await client.put(
+                    "/api/heartbeat",
+                    json={
+                        "enabled": False,
+                        "selected_tools": [
+                            {
+                                "subagent_id": agent_response.json()["id"],
+                                "tool_name": "echo",
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(protected_heartbeat.status_code, 400)
+                safe_agent = await client.put(
+                    f"/api/subagents/{agent_response.json()['id']}",
+                    json={"confirm_tools": []},
+                )
+                self.assertEqual(safe_agent.status_code, 200)
+                heartbeat_update = await client.put(
+                    "/api/heartbeat",
+                    json={
+                        "enabled": True,
+                        "interval_minutes": 15,
+                        "instructions": "Check the echo service for important updates.",
+                        "selected_tools": [
+                            {
+                                "subagent_id": agent_response.json()["id"],
+                                "tool_name": "echo",
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(heartbeat_update.status_code, 200)
+                self.assertEqual(heartbeat_update.json()["enabled"], True)
+                self.assertEqual(heartbeat_update.json()["interval_minutes"], 15)
+                echo_capability = next(
+                    item
+                    for item in heartbeat_update.json()["capabilities"]
+                    if item["id"] == agent_response.json()["id"]
+                )
+                self.assertTrue(echo_capability["tools"][0]["selected"])
+                with patch.object(
+                    web_server.heartbeat_service,
+                    "_runner",
+                    return_value=("quiet", ""),
+                ):
+                    heartbeat_run = await client.post("/api/heartbeat/run")
+                self.assertEqual(heartbeat_run.status_code, 200)
+                self.assertEqual(heartbeat_run.json()["last_status"], "quiet")
+                self.assertEqual(
+                    heartbeat_run.json()["recent_runs"][0]["trigger"], "manual"
                 )
 
                 remove_icon = await client.put(

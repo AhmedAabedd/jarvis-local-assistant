@@ -258,10 +258,14 @@ async def _list_tools(session) -> list:
 
 
 async def discover_tools(spec: dict) -> list[dict]:
-    """Connect once and return a small, JSON-safe server capability summary."""
+    """Connect once and return JSON-safe tool metadata suitable for caching."""
     async with _mcp_session(spec) as session:
         return [
-            {"name": tool.name, "description": tool.description or ""}
+            {
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema or {},
+            }
             for tool in await _list_tools(session)
         ]
 
@@ -286,7 +290,14 @@ async def _run_async(
 
     try:
         async with _mcp_session(spec) as session:
-            tools = _openai_tools(await _list_tools(session))
+            advertised_tools = await _list_tools(session)
+            allowed_tools = spec.get("allowed_tools")
+            if allowed_tools is not None:
+                allowed_names = set(allowed_tools)
+                advertised_tools = [
+                    tool for tool in advertised_tools if tool.name in allowed_names
+                ]
+            tools = _openai_tools(advertised_tools)
             try:
                 from .. import db
 
@@ -344,6 +355,20 @@ async def _run_async(
 
                 for tc in tool_calls:
                     name = tc["function"]["name"]
+                    if allowed_tools is not None and name not in allowed_names:
+                        result = (
+                            f"Tool {name} is not allowed in this restricted run. "
+                            "Do not retry it."
+                        )
+                        trace.tool(name, {}, result)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", "call_0"),
+                                "content": result,
+                            }
+                        )
+                        continue
                     try:
                         args = json.loads(tc["function"].get("arguments") or "{}")
                         if not isinstance(args, dict):
