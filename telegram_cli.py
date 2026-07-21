@@ -17,8 +17,8 @@ def main() -> int:
     error = bridge.configuration_error()
     if error:
         print(
-            f"{error}. Get a token from @BotFather, then set\n"
-            'TELEGRAM_BOT_TOKEN="123:abc" before starting the bridge.'
+            f"{error}. Open Agent Studio → Telegram and save the token from "
+            "@BotFather first."
         )
         return 1
     if not llm.is_up():

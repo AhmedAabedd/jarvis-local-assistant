@@ -8,6 +8,7 @@ Core tables include:
                    (name, system_prompt, model_id, mcp_server_id, parent)
 - ``mcp_server_tools`` cached MCP capability metadata
 - ``heartbeat_*`` heartbeat permissions, schedule, state, and bounded run log
+- ``telegram_settings`` private Telegram bot configuration and pairing state
 
 On first run, if ``~/.mounir/mcp_agents.json`` exists it is migrated into the
 DB; after that the JSON file is ignored.
@@ -199,6 +200,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_started
             ON heartbeat_runs (started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS telegram_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+            bot_token TEXT NOT NULL DEFAULT '',
+            chat_id TEXT NOT NULL DEFAULT '',
+            chat_name TEXT NOT NULL DEFAULT '',
+            chat_username TEXT NOT NULL DEFAULT '',
+            bot_username TEXT NOT NULL DEFAULT '',
+            connection_status TEXT NOT NULL DEFAULT 'disabled',
+            last_error TEXT NOT NULL DEFAULT '',
+            last_tested_at TEXT,
+            updated_at TEXT
+        );
         """
     )
     conn.execute(
@@ -221,6 +236,27 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         VALUES (1, 0, ?)
         """,
         (_now(),),
+    )
+    telegram_token = cfg.TELEGRAM_BOT_TOKEN.strip()
+    telegram_chat = cfg.TELEGRAM_CHAT_ID.strip()
+    telegram_enabled = bool(cfg.TELEGRAM_ENABLED and telegram_token)
+    telegram_status = (
+        "disabled" if not telegram_enabled
+        else "configured" if telegram_chat
+        else "waiting_pairing"
+    )
+    # Environment values are a one-time bootstrap for existing installations.
+    # Once this row exists, Agent Studio owns the configuration.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO telegram_settings
+            (id, enabled, bot_token, chat_id, connection_status, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(telegram_enabled), telegram_token, telegram_chat,
+            telegram_status, _now(),
+        ),
     )
     # CREATE TABLE does not add columns to an existing SQLite table. Keep the
     # migrations explicit so upgrading an earlier feature-branch DB works.
@@ -739,6 +775,181 @@ def update_profile(**kwargs) -> dict:
         )
         conn.commit()
     return get_profile()
+
+
+# -----------------------------------------------------------------------------
+# Telegram configuration
+# -----------------------------------------------------------------------------
+
+TELEGRAM_STATUSES = {
+    "disabled", "configured", "connecting", "waiting_pairing", "connected", "error"
+}
+
+
+def get_telegram_settings(*, include_secret: bool = False) -> dict:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM telegram_settings WHERE id = 1"
+        ).fetchone()
+    if row is None:
+        result = {
+            "id": 1,
+            "enabled": False,
+            "bot_token": "",
+            "chat_id": "",
+            "chat_name": "",
+            "chat_username": "",
+            "bot_username": "",
+            "connection_status": "disabled",
+            "last_error": "",
+            "last_tested_at": None,
+            "updated_at": None,
+        }
+    else:
+        result = dict(row)
+        result["enabled"] = bool(result["enabled"])
+    result["token_configured"] = bool(result["bot_token"])
+    result["paired"] = bool(result["chat_id"])
+    if not include_secret:
+        result.pop("bot_token", None)
+        result.pop("chat_id", None)
+    return result
+
+
+def update_telegram_settings(
+    *,
+    enabled: bool | None = None,
+    bot_token: str | None = None,
+    clear_token: bool = False,
+) -> dict:
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ValueError("enabled must be true or false")
+    if bot_token is not None:
+        bot_token = str(bot_token).strip()
+        if not bot_token:
+            raise ValueError("bot token is required")
+        if len(bot_token) > 512:
+            raise ValueError("bot token is too long")
+    current = get_telegram_settings(include_secret=True)
+    fields: dict[str, object] = {}
+    token_changed = bot_token is not None and bot_token != current["bot_token"]
+    if clear_token:
+        fields.update(
+            enabled=0,
+            bot_token="",
+            chat_id="",
+            chat_name="",
+            chat_username="",
+            bot_username="",
+            connection_status="disabled",
+            last_error="",
+            last_tested_at=None,
+        )
+    else:
+        if bot_token is not None:
+            fields["bot_token"] = bot_token
+        if token_changed:
+            # A token identifies one specific bot, so a replacement must never
+            # inherit the previous bot's paired account.
+            fields.update(
+                chat_id="",
+                chat_name="",
+                chat_username="",
+                bot_username="",
+                last_error="",
+                last_tested_at=None,
+            )
+        active = current["enabled"] if enabled is None else enabled
+        resulting_token = "" if clear_token else (bot_token or current["bot_token"])
+        resulting_chat = "" if token_changed else current["chat_id"]
+        if active and not resulting_token:
+            raise ValueError("add a bot token before enabling Telegram")
+        if enabled is not None:
+            fields["enabled"] = int(enabled)
+        fields["connection_status"] = (
+            "disabled" if not active
+            else "configured" if resulting_chat
+            else "waiting_pairing"
+        )
+    fields["updated_at"] = _now()
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE telegram_settings SET {sets} WHERE id = 1",
+            tuple(fields.values()),
+        )
+        conn.commit()
+    return get_telegram_settings()
+
+
+def update_telegram_connection(
+    status: str,
+    *,
+    bot_username: str | None = None,
+    error: str = "",
+    tested: bool = False,
+) -> dict:
+    status = str(status or "").strip()
+    if status not in TELEGRAM_STATUSES:
+        raise ValueError("Telegram connection status is not supported")
+    fields: dict[str, object] = {
+        "connection_status": status,
+        "last_error": str(error or "")[:1000],
+        "updated_at": _now(),
+    }
+    if bot_username is not None:
+        fields["bot_username"] = str(bot_username or "").strip().lstrip("@")[:80]
+    if tested:
+        fields["last_tested_at"] = _now()
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE telegram_settings SET {sets} WHERE id = 1",
+            tuple(fields.values()),
+        )
+        conn.commit()
+    return get_telegram_settings()
+
+
+def pair_telegram_chat(chat_id: int, name: str = "", username: str = "") -> dict:
+    try:
+        normalized_id = str(int(chat_id))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Telegram chat id is invalid") from exc
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE telegram_settings
+            SET chat_id = ?, chat_name = ?, chat_username = ?,
+                connection_status = 'connected', last_error = '', updated_at = ?
+            WHERE id = 1
+            """,
+            (
+                normalized_id,
+                " ".join(str(name or "").split())[:160],
+                str(username or "").strip().lstrip("@")[:80],
+                _now(),
+            ),
+        )
+        conn.commit()
+    return get_telegram_settings()
+
+
+def clear_telegram_pairing() -> dict:
+    current = get_telegram_settings(include_secret=True)
+    status = "waiting_pairing" if current["enabled"] and current["bot_token"] else "disabled"
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE telegram_settings
+            SET chat_id = '', chat_name = '', chat_username = '',
+                connection_status = ?, last_error = '', updated_at = ?
+            WHERE id = 1
+            """,
+            (status, _now()),
+        )
+        conn.commit()
+    return get_telegram_settings()
 
 
 # -----------------------------------------------------------------------------

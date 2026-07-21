@@ -191,6 +191,90 @@
   .switch input:focus-visible + .switch-track { outline: 2px solid var(--lav); outline-offset: 2px; }
   .switch input:disabled + .switch-track { opacity: .55; cursor: wait; }
 
+  /* ---- Telegram setup ---- */
+  .telegram-view { max-width: 760px; display: flex; flex-direction: column; gap: 14px; }
+  .telegram-card {
+    padding: 22px; border: 1px solid var(--line); border-radius: 16px;
+    background: var(--bg-panel);
+  }
+  .telegram-status-card {
+    display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  }
+  .telegram-identity { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .telegram-logo {
+    width: 42px; height: 42px; flex: 0 0 42px; display: grid; place-items: center;
+    border-radius: 13px; color: #8bc7ff; background: rgba(51,144,236,.12);
+    border: 1px solid rgba(51,144,236,.24);
+  }
+  .telegram-identity h3 { margin: 0 0 5px; color: var(--text); font-size: 14px; font-weight: 600; }
+  .telegram-identity p { margin: 0; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
+  .telegram-status {
+    display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto;
+    color: var(--text-dim); font-size: 10px; font-weight: 600;
+  }
+  .telegram-status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+  .telegram-status.connected { color: var(--ok); }
+  .telegram-status.connected::before { background: var(--ok); box-shadow: 0 0 8px rgba(95,180,135,.45); }
+  .telegram-status.error { color: var(--danger); }
+  .telegram-status.error::before { background: var(--danger); }
+  .telegram-status.connecting, .telegram-status.waiting_pairing, .telegram-status.configured { color: #d7a84b; }
+  .telegram-status.connecting::before, .telegram-status.waiting_pairing::before,
+  .telegram-status.configured::before { background: #d7a84b; }
+  .telegram-section-head { margin-bottom: 17px; }
+  .telegram-section-head h3 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
+  .telegram-section-head p { margin: 0; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
+  .telegram-enable-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 20px;
+    padding-bottom: 18px; margin-bottom: 18px; border-bottom: 1px solid var(--line);
+  }
+  .telegram-enable-copy strong { display: block; color: var(--text); font-size: 12px; font-weight: 600; }
+  .telegram-enable-copy span { display: block; margin-top: 4px; color: var(--text-dim); font-size: 10px; }
+  .telegram-fields { display: flex; flex-direction: column; gap: 15px; }
+  .telegram-fields[hidden], .telegram-actions .btn[hidden] { display: none; }
+  .telegram-token-state {
+    display: flex; align-items: center; gap: 10px; padding: 12px 13px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+    color: var(--text-mid); font-size: 10px;
+  }
+  .telegram-token-state::before {
+    content: ''; width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%;
+    background: var(--text-dim);
+  }
+  .telegram-token-state.configured { color: var(--ok); }
+  .telegram-token-state.configured::before {
+    background: var(--ok); box-shadow: 0 0 8px rgba(95,180,135,.4);
+  }
+  .telegram-field { display: flex; flex-direction: column; gap: 7px; }
+  .telegram-field > span {
+    color: var(--text-mid); font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .05em;
+  }
+  .telegram-field input {
+    width: 100%; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--bg); color: var(--text); font: inherit; outline: none;
+  }
+  .telegram-field input:focus { border-color: var(--purple); }
+  .telegram-field .hint { color: var(--text-dim); font-size: 9px; line-height: 1.5; }
+  .telegram-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
+  .telegram-feedback { min-height: 16px; margin-top: 10px; color: var(--text-dim); font-size: 10px; }
+  .telegram-feedback.error { color: var(--danger); }
+  .telegram-feedback.ok { color: var(--ok); }
+  .telegram-pair-state {
+    padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--bg);
+  }
+  .telegram-account { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .telegram-account-name { color: var(--text); font-size: 12px; font-weight: 600; }
+  .telegram-account-user { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+  .telegram-pair-empty { color: var(--text-dim); font-size: 10px; line-height: 1.6; }
+  .telegram-pair-code { text-align: center; }
+  .telegram-pair-code-label { color: var(--text-dim); font-size: 10px; }
+  .telegram-pair-command {
+    display: inline-block; margin: 12px 0 9px; padding: 10px 16px;
+    border: 1px solid rgba(51,144,236,.28); border-radius: 10px;
+    background: rgba(51,144,236,.09); color: #9bcfff; font-size: 17px; font-weight: 600;
+  }
+  .telegram-pair-help { color: var(--text-mid); font-size: 10px; line-height: 1.55; }
+
   /* ---- main ---- */
   .main {
     flex: 1;
@@ -654,6 +738,7 @@
     .heartbeat-toggle-feedback { grid-column: 1; width: 100%; }
     .heartbeat-enable-setting { align-items: flex-start; flex-direction: column; }
     .heartbeat-enable-setting .heartbeat-control { width: 100%; }
+    .telegram-status-card, .telegram-enable-row, .telegram-account { align-items: flex-start; flex-direction: column; }
   }
   @media (max-width: 1080px) {
     .form-view.server-form-view { grid-template-columns: 1fr; }
@@ -694,6 +779,10 @@
       </button>
     </nav>
     <div class="sidebar-footer">
+      <button class="nav-item" data-tab="telegram">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21 3-7.2 18-4.1-7.4L3 9.7 21 3Z"/><path d="m9.7 13.6 4.1-3.8"/></svg>
+        <span>Telegram</span>
+      </button>
       <button class="nav-item" data-tab="heartbeat">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.2-6 4.2 12 2.2-6H21"/></svg>
         <span>Heartbeat</span>
@@ -741,6 +830,7 @@ const S = {
   formReadonly: true,  // true when viewing an instance, false when creating/modifying
   overview: { supervisor: {}, builtins: [] },
   heartbeat: { enabled: false },
+  telegram: { enabled: false },
   profile: {},
   models: [],
   servers: [],
@@ -753,10 +843,13 @@ let pendingConfirmationTools = new Set();
 let pendingDedupeTools = new Set();
 let heartbeatSelectedAgentId = null;
 let heartbeatToolSelections = new Set();
+let telegramPairPoll = null;
+let telegramStatusPoll = null;
 
 const API = {
   overview: '/api/agent-overview',
   heartbeat: { update: () => '/api/heartbeat' },
+  telegram: { update: () => '/api/telegram' },
   profile:  { update: () => '/api/profile' },
   models:  { list: '/api/models',  create: '/api/models',  update: id => `/api/models/${id}`,  del: id => `/api/models/${id}` },
   servers: { list: '/api/mcp-servers', create: '/api/mcp-servers', update: id => `/api/mcp-servers/${id}`, del: id => `/api/mcp-servers/${id}` },
@@ -766,6 +859,7 @@ const API = {
 const TAB_META = {
   overview: { title: 'Agent Overview', labelSingular: '', subtitle: 'How your assistant is connected' },
   heartbeat: { title: 'Heartbeat', labelSingular: '', subtitle: 'Run safe background checks and surface important updates' },
+  telegram: { title: 'Telegram', labelSingular: '', subtitle: 'Use your assistant securely from Telegram' },
   profile: { title: 'Profile', labelSingular: 'Profile', subtitle: 'Who the assistant is and who it works for' },
   models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Language models available to dynamic subagents' },
   servers: { title: 'MCP Servers',   labelSingular: 'Server', subtitle: 'External capabilities connected through MCP' },
@@ -847,9 +941,10 @@ async function api(method, url, body) {
 }
 
 async function loadAll() {
-  const [o, h, p, m, s, a] = await Promise.all([
+  const [o, h, t, p, m, s, a] = await Promise.all([
     api('GET', API.overview),
     api('GET', '/api/heartbeat'),
+    api('GET', '/api/telegram'),
     api('GET', '/api/profile'),
     api('GET', API.models.list),
     api('GET', API.servers.list),
@@ -857,6 +952,7 @@ async function loadAll() {
   ]);
   S.overview = o;
   S.heartbeat = h;
+  S.telegram = t;
   S.profile = p;
   S.models = m;
   S.servers = s;
@@ -870,6 +966,7 @@ async function loadAll() {
 function render() {
   if (S.tab === 'overview') renderOverview();
   else if (S.tab === 'heartbeat') renderHeartbeat();
+  else if (S.tab === 'telegram') renderTelegram();
   else if (S.tab === 'profile') renderForm();
   else if (S.view === 'list') renderList();
   else renderForm();
@@ -880,6 +977,7 @@ function updateHeader() {
   const meta = TAB_META[S.tab];
   const inOverview = S.tab === 'overview';
   const inHeartbeat = S.tab === 'heartbeat';
+  const inTelegram = S.tab === 'telegram';
   const inProfile = S.tab === 'profile';
   const inForm = S.view === 'form';
   const editing = inForm && S.editing;
@@ -890,14 +988,14 @@ function updateHeader() {
     : meta.title;
   $('viewSubtitle').textContent = meta.subtitle;
   // Create New: only in list view
-  $('createBtn').style.display = (inOverview || inHeartbeat || inProfile || inForm) ? 'none' : '';
+  $('createBtn').style.display = (inOverview || inHeartbeat || inTelegram || inProfile || inForm) ? 'none' : '';
   // Delete: only in readonly form view
   $('deleteBtn').style.display = (!inOverview && !inProfile && editing && S.formReadonly) ? '' : 'none';
   $('testBtn').style.display = (S.tab === 'servers' && editing && S.formReadonly) ? '' : 'none';
   // Cancel: in form view but NOT in readonly edit mode
   $('cancelBtn').style.display = (inForm && !(editing && S.formReadonly)) ? '' : 'none';
   // Modify / Save / Create button
-  if (inOverview || inHeartbeat) {
+  if (inOverview || inHeartbeat || inTelegram) {
     $('modifyBtn').style.display = 'none';
     $('cancelBtn').style.display = 'none';
     $('testBtn').style.display = 'none';
@@ -971,6 +1069,269 @@ function renderOverview() {
   $('zoomValue').textContent = `${Math.round(canvasZoom * 100)}%`;
   S.view = 'overview';
   requestAnimationFrame(drawWorkflowLinks);
+}
+
+function stopTelegramPairPolling() {
+  if (telegramPairPoll) clearInterval(telegramPairPoll);
+  telegramPairPoll = null;
+}
+
+function stopTelegramStatusPolling() {
+  if (telegramStatusPoll) clearInterval(telegramStatusPoll);
+  telegramStatusPoll = null;
+}
+
+function startTelegramStatusPolling() {
+  if (telegramStatusPoll) return;
+  telegramStatusPoll = setInterval(async () => {
+    if (S.tab !== 'telegram') {
+      stopTelegramStatusPolling();
+      return;
+    }
+    try {
+      const latest = await api('GET', '/api/telegram');
+      if (latest.connection_status !== 'connecting') {
+        stopTelegramStatusPolling();
+        S.telegram = latest;
+        renderTelegram();
+      }
+    } catch (_) {}
+  }, 1000);
+}
+
+function telegramStatusInfo(status) {
+  const states = {
+    disabled: ['disabled', 'Disabled'],
+    needs_token: ['disabled', 'Token required'],
+    configured: ['configured', 'Configured'],
+    connecting: ['connecting', 'Connecting'],
+    waiting_pairing: ['waiting_pairing', 'Waiting for pairing'],
+    connected: ['connected', 'Connected'],
+    error: ['error', 'Connection error'],
+  };
+  const [kind, label] = states[status] || states.disabled;
+  return { kind, label };
+}
+
+function renderTelegram() {
+  stopTelegramPairPolling();
+  stopTelegramStatusPolling();
+  const state = S.telegram || {};
+  const enabled = Boolean(state.enabled);
+  const configured = Boolean(state.token_configured);
+  const paired = Boolean(state.paired);
+  const status = telegramStatusInfo(state.connection_status);
+  const botName = state.bot_username ? `@${state.bot_username}` : 'Telegram bot';
+  const accountName = state.chat_name || (state.chat_username ? `@${state.chat_username}` : 'Paired account');
+  const statusDetail = state.last_error
+    ? state.last_error
+    : status.kind === 'connected'
+    ? `${botName} is ready to receive your messages.`
+    : status.kind === 'waiting_pairing'
+    ? `${botName} is online and waiting for you to pair an account.`
+    : !configured
+    ? 'Add the token supplied by BotFather to connect your bot.'
+    : !enabled
+    ? 'Your bot is configured. Enable Telegram whenever you want to use it.'
+    : 'Mounir is connecting to Telegram.';
+  const pairingHtml = paired ? `
+    <div class="telegram-account">
+      <div>
+        <div class="telegram-account-name">${esc(accountName)}</div>
+        <div class="telegram-account-user">${state.chat_username ? '@' + esc(state.chat_username) : 'Telegram account connected'}</div>
+      </div>
+      <button class="btn danger" type="button" id="telegramDisconnect">Disconnect account</button>
+    </div>` : !configured ? `
+    <div class="telegram-pair-empty">Save your BotFather token first. Pairing will then connect your personal Telegram account without asking you for a chat ID.</div>` : !enabled ? `
+    <div class="telegram-pair-empty">Enable Telegram to start the bot before pairing your account.</div>` : `
+    <div class="telegram-pair-empty">
+      Generate a temporary code, then send the displayed command to ${esc(botName)} in Telegram.
+      The code works once and expires after ten minutes.
+      <div class="telegram-actions"><button class="btn primary" type="button" id="telegramPair">Generate pairing code</button></div>
+    </div>`;
+
+  $('content').innerHTML = `
+    <div class="telegram-view">
+      <section class="telegram-card telegram-status-card">
+        <div class="telegram-identity">
+          <div class="telegram-logo">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21 3-7.2 18-4.1-7.4L3 9.7 21 3Z"/><path d="m9.7 13.6 4.1-3.8"/></svg>
+          </div>
+          <div>
+            <h3>${esc(botName)}</h3>
+            <p>${esc(statusDetail)}</p>
+          </div>
+        </div>
+        <span class="telegram-status ${status.kind}">${esc(status.label)}</span>
+      </section>
+
+      <section class="telegram-card">
+        <div class="telegram-enable-row">
+          <div class="telegram-enable-copy">
+            <strong>Enable Telegram</strong>
+            <span>Run the bot automatically with the Mounir server.</span>
+          </div>
+          <div class="heartbeat-control">
+            <label class="switch" title="Enable or disable Telegram">
+              <input type="checkbox" id="telegramToggle" role="switch" aria-label="Enable Telegram"${enabled ? ' checked' : ''}>
+              <span class="switch-track"></span>
+            </label>
+          </div>
+        </div>
+        <div class="telegram-section-head">
+          <h3>Bot connection</h3>
+          <p>Create a bot with BotFather, then paste the token it gives you. The saved token is never displayed again.</p>
+        </div>
+        <div class="telegram-token-state${configured ? ' configured' : ''}">
+          ${configured ? 'Token configured and stored securely' : 'No token configured yet'}
+        </div>
+        <div class="telegram-fields" id="telegramTokenEditor" hidden>
+          <label class="telegram-field" style="margin-top:15px">
+            <span>Bot token</span>
+            <input type="password" id="telegramToken" autocomplete="new-password" placeholder="${configured ? 'Paste the new token from BotFather' : 'Paste the token from BotFather'}">
+            <span class="hint">It usually looks like numbers, a colon, and a secret value.</span>
+          </label>
+        </div>
+        <div class="telegram-actions">
+          <button class="btn primary" type="button" id="telegramSaveToken" data-editing="false">${configured ? 'Replace token' : 'Add token'}</button>
+          <button class="btn outline" type="button" id="telegramCancelToken" hidden>Cancel</button>
+          <button class="btn outline" type="button" id="telegramTest"${configured ? '' : ' disabled'}>Test connection</button>
+          ${configured ? '<button class="btn danger" type="button" id="telegramRemoveToken">Remove token</button>' : ''}
+        </div>
+        <div class="telegram-feedback" id="telegramFeedback"></div>
+      </section>
+
+      <section class="telegram-card">
+        <div class="telegram-section-head">
+          <h3>Personal account</h3>
+          <p>Only the paired Telegram chat can talk to your assistant.</p>
+        </div>
+        <div class="telegram-pair-state" id="telegramPairState">${pairingHtml}</div>
+      </section>
+    </div>`;
+  S.view = 'telegram';
+  updateHeader();
+
+  const feedback = $('telegramFeedback');
+  const showFeedback = (message, kind = '') => {
+    feedback.textContent = message;
+    feedback.className = `telegram-feedback${kind ? ' ' + kind : ''}`;
+  };
+  $('telegramToggle').addEventListener('change', async event => {
+    const requested = event.target.checked;
+    event.target.disabled = true;
+    try {
+      S.telegram = await api('PUT', API.telegram.update(), { enabled: requested });
+      renderTelegram();
+    } catch (error) {
+      event.target.checked = !requested;
+      event.target.disabled = false;
+      showFeedback(error.message, 'error');
+    }
+  });
+  $('telegramSaveToken').addEventListener('click', async () => {
+    const tokenInput = $('telegramToken');
+    const saveButton = $('telegramSaveToken');
+    if (saveButton.dataset.editing !== 'true') {
+      saveButton.dataset.editing = 'true';
+      $('telegramTokenEditor').hidden = false;
+      $('telegramCancelToken').hidden = false;
+      saveButton.textContent = configured ? 'Save new token' : 'Save and connect';
+      tokenInput.focus();
+      showFeedback(configured
+        ? 'Paste the replacement token from BotFather.'
+        : 'Paste the token supplied by BotFather.');
+      return;
+    }
+    const token = tokenInput.value.trim();
+    if (!token) {
+      showFeedback(configured ? 'Enter a new token to replace the current one.' : 'Paste the token from BotFather.', 'error');
+      return;
+    }
+    showFeedback('Saving and connecting…');
+    try {
+      S.telegram = await api('PUT', API.telegram.update(), { bot_token: token, enabled: true });
+      S.telegram = await api('POST', '/api/telegram/test');
+      renderTelegram();
+      $('telegramFeedback').textContent = 'Bot connected successfully.';
+      $('telegramFeedback').className = 'telegram-feedback ok';
+    } catch (error) {
+      S.telegram = await api('GET', '/api/telegram');
+      renderTelegram();
+      $('telegramFeedback').textContent = error.message;
+      $('telegramFeedback').className = 'telegram-feedback error';
+    }
+  });
+  $('telegramCancelToken').addEventListener('click', () => renderTelegram());
+  $('telegramTest').addEventListener('click', async () => {
+    showFeedback('Testing the Telegram connection…');
+    try {
+      S.telegram = await api('POST', '/api/telegram/test');
+      renderTelegram();
+      $('telegramFeedback').textContent = 'Connection successful.';
+      $('telegramFeedback').className = 'telegram-feedback ok';
+    } catch (error) {
+      S.telegram = await api('GET', '/api/telegram');
+      renderTelegram();
+      $('telegramFeedback').textContent = error.message;
+      $('telegramFeedback').className = 'telegram-feedback error';
+    }
+  });
+  $('telegramRemoveToken')?.addEventListener('click', async () => {
+    if (!await showConfirm('Remove the Telegram bot token and disconnect the paired account?')) return;
+    try {
+      S.telegram = await api('DELETE', '/api/telegram/token');
+      renderTelegram();
+    } catch (error) {
+      showFeedback(error.message, 'error');
+    }
+  });
+  $('telegramDisconnect')?.addEventListener('click', async () => {
+    if (!await showConfirm('Disconnect this Telegram account?')) return;
+    try {
+      S.telegram = await api('DELETE', '/api/telegram/pairing');
+      renderTelegram();
+    } catch (error) {
+      showFeedback(error.message, 'error');
+    }
+  });
+  $('telegramPair')?.addEventListener('click', async event => {
+    event.target.disabled = true;
+    try {
+      const pairing = await api('POST', '/api/telegram/pairing-code');
+      $('telegramPairState').innerHTML = `
+        <div class="telegram-pair-code">
+          <div class="telegram-pair-code-label">Send this command to ${esc(botName)}</div>
+          <div class="telegram-pair-command mono">${esc(pairing.command)}</div>
+          <div class="telegram-pair-help">Waiting for your Telegram message… This page will update automatically.</div>
+          <div class="telegram-actions" style="justify-content:center"><button class="btn outline" type="button" id="telegramCopyPair">Copy command</button></div>
+        </div>`;
+      $('telegramCopyPair').addEventListener('click', async copyEvent => {
+        await navigator.clipboard.writeText(pairing.command);
+        copyEvent.target.textContent = 'Copied';
+      });
+      const expiresAt = Date.parse(pairing.expires_at);
+      telegramPairPoll = setInterval(async () => {
+        if (Date.now() >= expiresAt) {
+          stopTelegramPairPolling();
+          const help = $('telegramPairState')?.querySelector('.telegram-pair-help');
+          if (help) help.textContent = 'This pairing code expired. Generate a new one.';
+          return;
+        }
+        try {
+          const latest = await api('GET', '/api/telegram');
+          if (latest.paired) {
+            S.telegram = latest;
+            renderTelegram();
+          }
+        } catch (_) {}
+      }, 2000);
+    } catch (error) {
+      event.target.disabled = false;
+      showFeedback(error.message, 'error');
+    }
+  });
+  if (state.connection_status === 'connecting') startTelegramStatusPolling();
 }
 
 function heartbeatToolKey(subagentId, toolName) {
@@ -2409,6 +2770,10 @@ $('modifyBtn').addEventListener('click', () => {
 /* ========== sidebar navigation ========== */
 document.querySelectorAll('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => {
+    if (btn.dataset.tab !== 'telegram') {
+      stopTelegramPairPolling();
+      stopTelegramStatusPolling();
+    }
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     S.tab = btn.dataset.tab;

@@ -432,26 +432,33 @@ from the old built-in specialists.
 | `USE_MISTRAL` / `MISTRAL_API_KEY` / `MISTRAL_MODEL` | `false` / – / `mistral-small-latest` | Run the supervisor on Mistral |
 | `USE_GROQ` / `GROQ_API_KEY` / `GROQ_MODEL` | `false` / – / `qwen/qwen3-32b` | Run the supervisor on Groq |
 
-### Telegram bridge (`telegram_cli.py`)
+### Telegram
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | – | Bot token from @BotFather (long-polling — nothing exposed) |
-| `TELEGRAM_CHAT_ID` | – | The one chat allowed to talk to the assistant |
-| `MOUNIR_TELEGRAM_ENABLED` | `true` | Start Telegram automatically with `server.py` |
+Telegram is configured from **Agent Studio → Telegram**. Paste the token from
+@BotFather, test the connection, and generate a temporary pairing code. Send
+the displayed `/pair 123456` command to the bot; Mounir records that account
+automatically, so the UI never asks for a numeric chat id. Pairing codes are
+one-use, kept only in server memory, and expire after ten minutes.
 
-When `TELEGRAM_BOT_TOKEN` is configured, `python server.py` starts Telegram in
-a managed background thread alongside the web dashboard and heartbeat. Web and
-Telegram turns use the same conversation and are serialized so they cannot
-modify the shared history simultaneously. Tool confirmations return to the
-interface that initiated the turn: browser turns ask in the browser, Telegram
-turns ask in Telegram.
+The bot token is stored in the user-only local SQLite database and is never
+returned by the admin API. Replacing a token removes the previous account
+pairing. Enable, disable, replace, test, pair, and disconnect operations take
+effect immediately without restarting the server.
 
-`python telegram_cli.py` remains available to run only the Telegram bridge.
-Do not run it with the same bot token while the web server's bridge is active,
-because Telegram permits only one long-poll consumer per bot. To test the
-standalone entry point while the server is running, start the server with
-`MOUNIR_TELEGRAM_ENABLED=false`.
+Existing `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and
+`MOUNIR_TELEGRAM_ENABLED` environment values are imported once when the new
+database settings are first created. Agent Studio owns the configuration after
+that migration.
+
+When enabled, `python server.py` owns Telegram in a managed background thread
+alongside the web dashboard and heartbeat. Web and Telegram turns use the same
+conversation and are serialized so they cannot modify shared history at the
+same time. Tool confirmations return to the interface that initiated the turn.
+
+`python telegram_cli.py` remains available to run only the Telegram bridge. Do
+not run it while Telegram is enabled in the web server, because Telegram allows
+only one long-poll consumer per bot. Disable Telegram in Agent Studio before
+using the standalone entry point.
 
 ### Voice / wake word
 
@@ -505,6 +512,9 @@ Two separate pages, both served by `server.py`:
   name, location, and preferred response language. Changes are stored in SQLite
   and are picked up by the supervisor and every specialist on the next message,
   without restarting the app.
+- **Telegram** in the admin sidebar provides the complete bot setup: private
+  token storage, live connection testing, enable/disable control, status, and
+  secure one-time account pairing without manually entering a chat id.
 - **Heartbeat** in the admin sidebar runs optional periodic checks while the web
   server is active. Choose an interval, describe what deserves an alert, and
   select the cached MCP tools it may use. Heartbeat runs each selected subagent
@@ -522,7 +532,7 @@ profile-neutral; the live profile now comes from SQLite at runtime.
 
 ```bash
 sudo apt install ffmpeg
-python server.py            # web + admin + Telegram (when its token is configured)
+python server.py            # web + admin + Telegram (when enabled in Agent Studio)
 ```
 
 The web app binds to `127.0.0.1` by default because it can execute local tools

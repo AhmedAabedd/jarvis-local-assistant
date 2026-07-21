@@ -140,22 +140,74 @@ async def _deliver_heartbeat_alert(message: str) -> None:
 
 
 heartbeat_service = HeartbeatService(_deliver_heartbeat_alert)
-telegram_service = TelegramBridge(agent=agent, turn_lock=_agent_lock)
+
+
+def _telegram_paired(chat_id: int, name: str, username: str) -> None:
+    db.pair_telegram_chat(chat_id, name, username)
+
+
+def _telegram_status(status: str, bot_username: str, error: str) -> None:
+    db.update_telegram_connection(
+        status, bot_username=bot_username or None, error=error
+    )
+
+
+_telegram_saved = db.get_telegram_settings(include_secret=True)
+telegram_service = TelegramBridge(
+    agent=agent,
+    turn_lock=_agent_lock,
+    token=_telegram_saved["bot_token"],
+    chat_id=_telegram_saved["chat_id"],
+    on_paired=_telegram_paired,
+    on_status=_telegram_status,
+)
+
+
+def _telegram_public_state() -> dict:
+    state = db.get_telegram_settings()
+    state["running"] = telegram_service.is_running
+    if not state["enabled"]:
+        state["connection_status"] = "disabled"
+    elif not state["token_configured"]:
+        state["connection_status"] = "needs_token"
+    elif telegram_service.last_error and not telegram_service.is_running:
+        state["connection_status"] = "error"
+        state["last_error"] = telegram_service.last_error
+    return state
+
+
+def _apply_telegram_settings() -> dict:
+    saved = db.get_telegram_settings(include_secret=True)
+    started = telegram_service.reconfigure(
+        token=saved["bot_token"],
+        chat_id=saved["chat_id"],
+        start=bool(saved["enabled"] and saved["bot_token"]),
+    )
+    if saved["enabled"] and saved["bot_token"] and not started:
+        db.update_telegram_connection("error", error=telegram_service.last_error)
+    elif not saved["enabled"]:
+        db.update_telegram_connection("disabled")
+    return _telegram_public_state()
+
+
+def _safe_telegram_error(exc: Exception, token: str = "") -> str:
+    message = str(exc) or exc.__class__.__name__
+    if token:
+        message = message.replace(token, "[hidden token]")
+    return message[:600]
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     await heartbeat_service.start()
-    telegram_started = False
-    if cfg.TELEGRAM_ENABLED:
-        telegram_started = telegram_service.start_background()
-        if not telegram_started:
+    saved = db.get_telegram_settings(include_secret=True)
+    if saved["enabled"] and saved["bot_token"]:
+        if not telegram_service.start_background():
             trace.kv("telegram", f"not started: {telegram_service.last_error}")
     try:
         yield
     finally:
-        if telegram_started:
-            await asyncio.to_thread(telegram_service.stop)
+        await asyncio.to_thread(telegram_service.stop)
         await heartbeat_service.stop()
 
 
@@ -368,6 +420,91 @@ async def update_profile(req: dict):
         return db.update_profile(**req)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/api/telegram")
+async def get_telegram_settings():
+    return _telegram_public_state()
+
+
+@app.put("/api/telegram")
+async def update_telegram_settings(req: dict):
+    allowed = {"enabled", "bot_token", "clear_token"}
+    fields = {key: value for key, value in req.items() if key in allowed}
+    try:
+        db.update_telegram_settings(**fields)
+        return await asyncio.to_thread(_apply_telegram_settings)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/telegram/test")
+async def test_telegram_connection():
+    saved = db.get_telegram_settings(include_secret=True)
+    token = saved["bot_token"]
+    if not token:
+        return JSONResponse({"error": "Add a bot token first."}, status_code=400)
+    try:
+        identity = await asyncio.to_thread(
+            telegram_service.test_connection, token, saved["chat_id"]
+        )
+        if saved["chat_id"] and identity.get("chat"):
+            db.pair_telegram_chat(
+                int(saved["chat_id"]),
+                identity["chat"].get("name", ""),
+                identity["chat"].get("username", ""),
+            )
+        if saved["enabled"] and telegram_service.is_running:
+            status = "connected" if saved["chat_id"] else "waiting_pairing"
+        else:
+            status = "configured"
+        db.update_telegram_connection(
+            status,
+            bot_username=identity["username"],
+            tested=True,
+        )
+        return {**_telegram_public_state(), "bot": identity}
+    except Exception as exc:
+        message = _safe_telegram_error(exc, token)
+        db.update_telegram_connection("error", error=message, tested=True)
+        return JSONResponse({"error": message}, status_code=400)
+
+
+@app.post("/api/telegram/pairing-code")
+async def create_telegram_pairing_code():
+    saved = db.get_telegram_settings(include_secret=True)
+    if not saved["enabled"]:
+        return JSONResponse({"error": "Enable Telegram before pairing."}, status_code=400)
+    if not saved["bot_token"]:
+        return JSONResponse({"error": "Add a bot token before pairing."}, status_code=400)
+    if saved["chat_id"]:
+        return JSONResponse(
+            {"error": "Disconnect the current Telegram account before pairing another one."},
+            status_code=409,
+        )
+    if not telegram_service.is_running:
+        state = await asyncio.to_thread(_apply_telegram_settings)
+        if not state["running"]:
+            return JSONResponse(
+                {"error": state.get("last_error") or "Telegram could not start."},
+                status_code=400,
+            )
+    try:
+        return telegram_service.create_pairing_code()
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.delete("/api/telegram/pairing")
+async def disconnect_telegram_account():
+    db.clear_telegram_pairing()
+    return await asyncio.to_thread(_apply_telegram_settings)
+
+
+@app.delete("/api/telegram/token")
+async def remove_telegram_token():
+    db.update_telegram_settings(clear_token=True)
+    return await asyncio.to_thread(_apply_telegram_settings)
 
 
 @app.get("/api/heartbeat")

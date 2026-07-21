@@ -243,16 +243,16 @@ KNOWLEDGE_MODEL: str = os.environ.get("KNOWLEDGE_MODEL", GEMINI_MODEL)
 SYSTEM_MODEL: str = os.environ.get("SYSTEM_MODEL", "meta/llama-3.1-8b-instruct")
 
 
-# --- Telegram bridge ---------------------------------------------------------
-# Token from @BotFather. The bridge (telegram_cli.py) long-polls Telegram, so
-# everything is an OUTBOUND connection — nothing on this machine is exposed.
+# --- Telegram bridge bootstrap ----------------------------------------------
+# Agent Studio stores the live settings in SQLite. These environment values
+# are imported only when the singleton DB record is first created, preserving
+# existing installations. Long polling remains outbound-only.
 TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 # The ONE chat allowed to talk to the assistant (the bot is publicly findable,
 # so anyone could message it otherwise). Leave unset for first-run discovery:
 # the bridge replies to any message with that chat's id so you can export it.
 TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
-# The FastAPI server starts the Telegram bridge automatically by default.
-# Disable only when intentionally running telegram_cli.py as a separate process.
+# Initial enabled state imported with the legacy token/chat values.
 TELEGRAM_ENABLED: bool = os.environ.get("MOUNIR_TELEGRAM_ENABLED", "true").lower() in (
     "1", "true", "yes", "on"
 )

@@ -13,12 +13,14 @@ import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 # Keep tests away from the owner's real ~/.mounir database.
 _IMPORT_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["MOUNIR_DATA_DIR"] = _IMPORT_DATA_DIR.name
 os.environ["MOUNIR_TELEGRAM_ENABLED"] = "false"
+os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+os.environ.pop("TELEGRAM_CHAT_ID", None)
 
 from mounir import (
     browser_control,
@@ -51,6 +53,47 @@ class TemporaryDatabaseTest(unittest.TestCase):
 
 
 class DatabaseTests(TemporaryDatabaseTest):
+    def test_telegram_settings_migrate_env_and_never_expose_token(self):
+        with (
+            patch.object(config, "TELEGRAM_BOT_TOKEN", "123:secret"),
+            patch.object(config, "TELEGRAM_CHAT_ID", "42"),
+            patch.object(config, "TELEGRAM_ENABLED", True),
+        ):
+            db.init()
+
+        public = db.get_telegram_settings()
+        private = db.get_telegram_settings(include_secret=True)
+        self.assertTrue(public["enabled"])
+        self.assertTrue(public["token_configured"])
+        self.assertTrue(public["paired"])
+        self.assertNotIn("bot_token", public)
+        self.assertNotIn("chat_id", public)
+        self.assertEqual(private["bot_token"], "123:secret")
+        self.assertEqual(private["chat_id"], "42")
+        self.assertEqual(stat.S_IMODE(db.DB_PATH.stat().st_mode), 0o600)
+
+    def test_telegram_token_replacement_and_pairing_are_persisted(self):
+        db.init()
+        with self.assertRaisesRegex(ValueError, "bot token"):
+            db.update_telegram_settings(enabled=True)
+
+        saved = db.update_telegram_settings(bot_token="123:first", enabled=True)
+        self.assertTrue(saved["enabled"])
+        self.assertFalse(saved["paired"])
+        paired = db.pair_telegram_chat(42, "Mounir Owner", "owner")
+        self.assertTrue(paired["paired"])
+        self.assertEqual(paired["chat_name"], "Mounir Owner")
+
+        replaced = db.update_telegram_settings(bot_token="456:second")
+        self.assertFalse(replaced["paired"])
+        self.assertEqual(
+            db.get_telegram_settings(include_secret=True)["bot_token"],
+            "456:second",
+        )
+        removed = db.update_telegram_settings(clear_token=True)
+        self.assertFalse(removed["enabled"])
+        self.assertFalse(removed["token_configured"])
+
     def test_heartbeat_setting_is_disabled_by_default_and_persisted(self):
         db.init()
         initial = db.get_heartbeat_settings()
@@ -1109,6 +1152,87 @@ class AdminApiTests(TemporaryDatabaseTest):
         asyncio.run(exercise_api())
 
 
+    def test_telegram_admin_setup_never_returns_secret(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+
+        def fake_apply():
+            saved = db.get_telegram_settings(include_secret=True)
+            web_server.telegram_service.token = saved["bot_token"]
+            web_server.telegram_service.chat_id = saved["chat_id"]
+            web_server.telegram_service.last_error = ""
+            return web_server._telegram_public_state()
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            with (
+                patch.object(
+                    type(web_server.telegram_service),
+                    "is_running",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ),
+                patch.object(web_server, "_apply_telegram_settings", side_effect=fake_apply),
+                patch.object(
+                    web_server.telegram_service,
+                    "test_connection",
+                    return_value={"username": "mounir_bot", "first_name": "Mounir", "id": 7},
+                ),
+                patch.object(
+                    web_server.telegram_service,
+                    "create_pairing_code",
+                    return_value={
+                        "code": "123456",
+                        "command": "/pair 123456",
+                        "expires_at": "2030-01-01T00:00:00+00:00",
+                    },
+                ),
+            ):
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://localhost"
+                ) as client:
+                    initial = await client.get("/api/telegram")
+                    self.assertEqual(initial.status_code, 200)
+                    self.assertNotIn("bot_token", initial.json())
+                    self.assertNotIn("chat_id", initial.json())
+
+                    saved = await client.put(
+                        "/api/telegram",
+                        json={"bot_token": "123:secret", "enabled": True},
+                    )
+                    self.assertEqual(saved.status_code, 200)
+                    self.assertTrue(saved.json()["token_configured"])
+                    self.assertNotIn("123:secret", saved.text)
+
+                    tested = await client.post("/api/telegram/test")
+                    self.assertEqual(tested.status_code, 200)
+                    self.assertEqual(tested.json()["bot_username"], "mounir_bot")
+                    self.assertNotIn("123:secret", tested.text)
+
+                    pairing = await client.post("/api/telegram/pairing-code")
+                    self.assertEqual(pairing.status_code, 200)
+                    self.assertEqual(pairing.json()["command"], "/pair 123456")
+
+                    db.pair_telegram_chat(42, "Ada", "ada")
+                    connected = await client.get("/api/telegram")
+                    self.assertTrue(connected.json()["paired"])
+                    self.assertEqual(connected.json()["chat_name"], "Ada")
+                    self.assertNotIn("chat_id", connected.json())
+
+                    disconnected = await client.delete("/api/telegram/pairing")
+                    self.assertEqual(disconnected.status_code, 200)
+                    self.assertFalse(disconnected.json()["paired"])
+
+                    removed = await client.delete("/api/telegram/token")
+                    self.assertEqual(removed.status_code, 200)
+                    self.assertFalse(removed.json()["token_configured"])
+                    self.assertFalse(removed.json()["enabled"])
+
+        asyncio.run(exercise_api())
+
+
 class InterfaceRoutingTests(unittest.TestCase):
     def test_server_lifespan_owns_telegram_bridge(self):
         import server as web_server
@@ -1130,7 +1254,11 @@ class InterfaceRoutingTests(unittest.TestCase):
 
         async def exercise_lifespan():
             with (
-                patch.object(web_server.cfg, "TELEGRAM_ENABLED", True),
+                patch.object(
+                    web_server.db,
+                    "get_telegram_settings",
+                    return_value={"enabled": True, "bot_token": "123:abc"},
+                ),
                 patch.object(web_server.heartbeat_service, "start", heartbeat_start),
                 patch.object(web_server.heartbeat_service, "stop", heartbeat_stop),
                 patch.object(web_server.telegram_service, "start_background", telegram_start),
@@ -1234,10 +1362,56 @@ class InterfaceRoutingTests(unittest.TestCase):
         fallback.assert_called_once_with("outside")
         self.assertEqual(fake_bot.sent[-1][1], "Telegram reply")
 
+    def test_telegram_pairing_code_is_one_use_and_records_identity(self):
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def send_message(self, chat_id, text, **_kwargs):
+                self.sent.append((chat_id, text))
+
+            def reply_to(self, message, text):
+                self.sent.append((message.chat.id, text))
+
+            def stop_polling(self):
+                return None
+
+        paired = []
+        fake_bot = FakeBot()
+        bridge = TelegramBridge(
+            agent=SimpleNamespace(conversation=Conversation(system_prompt="test")),
+            token="123:abc",
+            chat_id="",
+            bot_factory=lambda _token: fake_bot,
+            on_paired=lambda chat_id, name, username: paired.append(
+                (chat_id, name, username)
+            ),
+        )
+        with patch("mounir.telegram_bridge.secrets.randbelow", return_value=123456):
+            pairing = bridge.create_pairing_code()
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=42),
+            from_user=SimpleNamespace(
+                first_name="Ada", last_name="Lovelace", username="ada"
+            ),
+            text=pairing["command"],
+        )
+
+        bridge._handle_text(message)
+        bridge._handle_text(message)
+
+        self.assertEqual(bridge.chat_id, "42")
+        self.assertEqual(paired, [(42, "Ada Lovelace", "ada")])
+        self.assertIn("now connected", fake_bot.sent[0][1])
+        self.assertIn("invalid or expired", fake_bot.sent[1][1])
+
     def test_telegram_without_token_does_not_start(self):
         bridge = TelegramBridge(token="", chat_id="")
         self.assertFalse(bridge.start_background())
-        self.assertIn("TELEGRAM_BOT_TOKEN", bridge.last_error)
+        self.assertIn("bot token", bridge.last_error)
 
 
 class BrowserToolTests(unittest.TestCase):
