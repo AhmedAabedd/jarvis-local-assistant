@@ -1313,19 +1313,34 @@ class TransportTests(unittest.TestCase):
 
 
 class AdminApiTests(TemporaryDatabaseTest):
-    def test_web_and_telegram_histories_are_isolated_and_receive_heartbeat(self):
+    def test_channel_histories_are_isolated_and_receive_selected_heartbeat(self):
         import server as web_server
 
         db.init()
         db.update_telegram_settings(enabled=True, bot_token="123:secret")
         db.pair_telegram_chat(42, "Ada", "ada")
+        db.update_whatsapp_settings(
+            enabled=True,
+            access_token="whatsapp-token",
+            phone_number_id="phone-id",
+            business_account_id="business-id",
+            app_secret="app-secret",
+        )
+        db.pair_whatsapp_phone("21611111111", "Ada")
+        db.update_heartbeat_settings(notify_telegram=True, notify_whatsapp=True)
         web_server.agent.conversation.reset()
         web_server.telegram_agent.conversation.reset()
+        web_server.whatsapp_agent.conversation.reset()
 
         web_server.agent.conversation.add_user("Web-only context")
         self.assertEqual(len(web_server.agent.conversation), 1)
         self.assertEqual(len(web_server.telegram_agent.conversation), 0)
+        self.assertEqual(len(web_server.whatsapp_agent.conversation), 0)
         self.assertIsNot(web_server.agent, web_server.telegram_service.agent)
+        self.assertIsNot(web_server.agent, web_server.whatsapp_service.agent)
+        self.assertIsNot(
+            web_server.telegram_service.agent, web_server.whatsapp_service.agent
+        )
 
         web_server.agent.conversation.reset()
         async def run_inline(function, *args, **kwargs):
@@ -1337,11 +1352,19 @@ class AdminApiTests(TemporaryDatabaseTest):
                 "send_notification",
                 return_value=True,
             ) as send_notification,
+            patch.object(
+                web_server.whatsapp_service,
+                "send_notification",
+                return_value=True,
+            ) as send_whatsapp_notification,
             patch.object(web_server.asyncio, "to_thread", side_effect=run_inline),
         ):
             asyncio.run(web_server._deliver_heartbeat_alert("Important update"))
 
         send_notification.assert_called_once_with(
+            "Heartbeat update\n\nImportant update"
+        )
+        send_whatsapp_notification.assert_called_once_with(
             "Heartbeat update\n\nImportant update"
         )
         expected = [{
@@ -1352,8 +1375,12 @@ class AdminApiTests(TemporaryDatabaseTest):
         self.assertEqual(
             web_server.telegram_agent.conversation.display_messages(), expected
         )
+        self.assertEqual(
+            web_server.whatsapp_agent.conversation.display_messages(), expected
+        )
         web_server.agent.conversation.reset()
         web_server.telegram_agent.conversation.reset()
+        web_server.whatsapp_agent.conversation.reset()
 
     def test_heartbeat_notifications_endpoint_returns_saved_alerts(self):
         import httpx

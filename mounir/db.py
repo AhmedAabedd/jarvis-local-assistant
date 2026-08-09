@@ -9,6 +9,7 @@ Core tables include:
 - ``mcp_server_tools`` cached MCP capability metadata
 - ``heartbeat_*`` heartbeat permissions, schedule, state, and bounded run log
 - ``telegram_settings`` private Telegram bot configuration and pairing state
+- ``whatsapp_settings`` private WhatsApp Cloud API configuration and pairing state
 
 On first run, if ``~/.mounir/mcp_agents.json`` exists it is migrated into the
 DB; after that the JSON file is ignored.
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -200,6 +202,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             last_status TEXT NOT NULL DEFAULT 'never',
             last_message TEXT NOT NULL DEFAULT '',
             last_error TEXT NOT NULL DEFAULT '',
+            notify_telegram INTEGER NOT NULL DEFAULT 1 CHECK (notify_telegram IN (0, 1)),
+            notify_whatsapp INTEGER NOT NULL DEFAULT 0 CHECK (notify_whatsapp IN (0, 1)),
             updated_at TEXT
         );
 
@@ -260,6 +264,29 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             connection_status TEXT NOT NULL DEFAULT 'disabled',
             last_error TEXT NOT NULL DEFAULT '',
             last_tested_at TEXT,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS whatsapp_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+            access_token TEXT NOT NULL DEFAULT '',
+            phone_number_id TEXT NOT NULL DEFAULT '',
+            business_account_id TEXT NOT NULL DEFAULT '',
+            app_secret TEXT NOT NULL DEFAULT '',
+            verify_token TEXT NOT NULL DEFAULT '',
+            api_version TEXT NOT NULL DEFAULT 'v25.0',
+            display_phone_number TEXT NOT NULL DEFAULT '',
+            verified_name TEXT NOT NULL DEFAULT '',
+            paired_phone TEXT NOT NULL DEFAULT '',
+            paired_name TEXT NOT NULL DEFAULT '',
+            connection_status TEXT NOT NULL DEFAULT 'disabled',
+            last_error TEXT NOT NULL DEFAULT '',
+            last_tested_at TEXT,
+            webhook_verified_at TEXT,
+            last_inbound_at TEXT,
+            heartbeat_template_name TEXT NOT NULL DEFAULT '',
+            heartbeat_template_language TEXT NOT NULL DEFAULT 'en_US',
             updated_at TEXT
         );
         """
@@ -339,6 +366,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             telegram_status, _now(),
         ),
     )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO whatsapp_settings
+            (id, verify_token, updated_at)
+        VALUES (1, ?, ?)
+        """,
+        (secrets.token_urlsafe(24), _now()),
+    )
     # CREATE TABLE does not add columns to an existing SQLite table. Keep the
     # migrations explicit so upgrading an earlier feature-branch DB works.
     migrations = {
@@ -375,6 +410,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "last_status": "TEXT NOT NULL DEFAULT 'never'",
             "last_message": "TEXT NOT NULL DEFAULT ''",
             "last_error": "TEXT NOT NULL DEFAULT ''",
+            "notify_telegram": "INTEGER NOT NULL DEFAULT 1 CHECK (notify_telegram IN (0, 1))",
+            "notify_whatsapp": "INTEGER NOT NULL DEFAULT 0 CHECK (notify_whatsapp IN (0, 1))",
         },
     }
     added_columns: set[tuple[str, str]] = set()
@@ -1174,6 +1211,284 @@ def clear_telegram_pairing() -> dict:
 
 
 # -----------------------------------------------------------------------------
+# WhatsApp Cloud API configuration
+# -----------------------------------------------------------------------------
+
+WHATSAPP_STATUSES = {"disabled", "incomplete", "configured", "connected", "error"}
+
+
+def get_whatsapp_settings(*, include_secret: bool = False) -> dict:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM whatsapp_settings WHERE id = 1"
+        ).fetchone()
+    if row is None:
+        result = {
+            "id": 1,
+            "enabled": False,
+            "access_token": "",
+            "phone_number_id": "",
+            "business_account_id": "",
+            "app_secret": "",
+            "verify_token": "",
+            "api_version": "v25.0",
+            "display_phone_number": "",
+            "verified_name": "",
+            "paired_phone": "",
+            "paired_name": "",
+            "connection_status": "disabled",
+            "last_error": "",
+            "last_tested_at": None,
+            "webhook_verified_at": None,
+            "last_inbound_at": None,
+            "heartbeat_template_name": "",
+            "heartbeat_template_language": "en_US",
+            "updated_at": None,
+        }
+    else:
+        result = dict(row)
+        result["enabled"] = bool(result["enabled"])
+    result["token_configured"] = bool(result["access_token"])
+    result["app_secret_configured"] = bool(result["app_secret"])
+    result["credentials_configured"] = bool(
+        result["access_token"]
+        and result["phone_number_id"]
+        and result["business_account_id"]
+        and result["app_secret"]
+    )
+    result["webhook_verified"] = bool(result["webhook_verified_at"])
+    result["paired"] = bool(result["paired_phone"])
+    result["paired_phone_hint"] = (
+        f"••••{result['paired_phone'][-4:]}" if result["paired_phone"] else ""
+    )
+    if not include_secret:
+        result.pop("access_token", None)
+        result.pop("app_secret", None)
+        result.pop("paired_phone", None)
+    return result
+
+
+def update_whatsapp_settings(
+    *,
+    enabled: bool | None = None,
+    access_token: str | None = None,
+    phone_number_id: str | None = None,
+    business_account_id: str | None = None,
+    app_secret: str | None = None,
+    api_version: str | None = None,
+    heartbeat_template_name: str | None = None,
+    heartbeat_template_language: str | None = None,
+    clear_credentials: bool = False,
+    regenerate_verify_token: bool = False,
+) -> dict:
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ValueError("enabled must be true or false")
+    current = get_whatsapp_settings(include_secret=True)
+    fields: dict[str, object] = {}
+    if clear_credentials:
+        fields.update(
+            enabled=0,
+            access_token="",
+            phone_number_id="",
+            business_account_id="",
+            app_secret="",
+            display_phone_number="",
+            verified_name="",
+            paired_phone="",
+            paired_name="",
+            connection_status="disabled",
+            last_error="",
+            last_tested_at=None,
+            webhook_verified_at=None,
+            last_inbound_at=None,
+            heartbeat_template_name="",
+            heartbeat_template_language="en_US",
+            verify_token=secrets.token_urlsafe(24),
+        )
+    else:
+        supplied = {
+            "access_token": access_token,
+            "phone_number_id": phone_number_id,
+            "business_account_id": business_account_id,
+            "app_secret": app_secret,
+            "heartbeat_template_name": heartbeat_template_name,
+            "heartbeat_template_language": heartbeat_template_language,
+        }
+        limits = {
+            "access_token": 4096,
+            "phone_number_id": 80,
+            "business_account_id": 80,
+            "app_secret": 512,
+            "heartbeat_template_name": 160,
+            "heartbeat_template_language": 32,
+        }
+        for key, value in supplied.items():
+            if value is None:
+                continue
+            normalized = str(value or "").strip()
+            if key in {"access_token", "phone_number_id", "business_account_id", "app_secret"} and not normalized:
+                raise ValueError(f"{key.replace('_', ' ')} is required")
+            if len(normalized) > limits[key]:
+                raise ValueError(f"{key.replace('_', ' ')} is too long")
+            fields[key] = normalized
+        if api_version is not None:
+            normalized_version = str(api_version or "").strip().lower()
+            if normalized_version.startswith("v"):
+                normalized_version = normalized_version[1:]
+            parts = normalized_version.split(".")
+            if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                raise ValueError("Graph API version must look like v25.0")
+            fields["api_version"] = f"v{int(parts[0])}.{int(parts[1])}"
+        if regenerate_verify_token:
+            fields["verify_token"] = secrets.token_urlsafe(24)
+            fields["webhook_verified_at"] = None
+
+        identity_changed = any(
+            key in fields and fields[key] != current[key]
+            for key in ("phone_number_id", "business_account_id")
+        )
+        signature_changed = (
+            "app_secret" in fields and fields["app_secret"] != current["app_secret"]
+        )
+        credentials_changed = identity_changed or signature_changed or (
+            "access_token" in fields and fields["access_token"] != current["access_token"]
+        )
+        if identity_changed:
+            fields.update(
+                display_phone_number="",
+                verified_name="",
+                paired_phone="",
+                paired_name="",
+                last_inbound_at=None,
+            )
+        if identity_changed or signature_changed:
+            fields["webhook_verified_at"] = None
+        if credentials_changed:
+            fields.update(last_error="", last_tested_at=None)
+
+        active = current["enabled"] if enabled is None else enabled
+        resulting = {
+            key: fields.get(key, current[key])
+            for key in ("access_token", "phone_number_id", "business_account_id", "app_secret")
+        }
+        complete = all(resulting.values())
+        if active and not complete:
+            raise ValueError(
+                "add the access token, phone number ID, business account ID, and app secret before enabling WhatsApp"
+            )
+        if enabled is not None:
+            fields["enabled"] = int(enabled)
+        webhook_verified = fields.get(
+            "webhook_verified_at", current["webhook_verified_at"]
+        )
+        fields["connection_status"] = (
+            "disabled" if not active
+            else "incomplete" if not complete
+            else "connected" if webhook_verified and not credentials_changed
+            else "configured"
+        )
+
+    fields["updated_at"] = _now()
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE whatsapp_settings SET {sets} WHERE id = 1",
+            tuple(fields.values()),
+        )
+        conn.commit()
+    return get_whatsapp_settings()
+
+
+def update_whatsapp_connection(
+    status: str,
+    *,
+    display_phone_number: str | None = None,
+    verified_name: str | None = None,
+    error: str = "",
+    tested: bool = False,
+    webhook_verified: bool = False,
+) -> dict:
+    status = str(status or "").strip()
+    if status not in WHATSAPP_STATUSES:
+        raise ValueError("WhatsApp connection status is not supported")
+    fields: dict[str, object] = {
+        "connection_status": status,
+        "last_error": str(error or "")[:1000],
+        "updated_at": _now(),
+    }
+    if display_phone_number is not None:
+        fields["display_phone_number"] = str(display_phone_number or "").strip()[:80]
+    if verified_name is not None:
+        fields["verified_name"] = " ".join(str(verified_name or "").split())[:160]
+    if tested:
+        fields["last_tested_at"] = _now()
+    if webhook_verified:
+        fields["webhook_verified_at"] = _now()
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE whatsapp_settings SET {sets} WHERE id = 1",
+            tuple(fields.values()),
+        )
+        conn.commit()
+    return get_whatsapp_settings()
+
+
+def pair_whatsapp_phone(phone: str, name: str = "") -> dict:
+    normalized = "".join(character for character in str(phone or "") if character.isdigit())
+    if not 6 <= len(normalized) <= 20:
+        raise ValueError("WhatsApp phone number is invalid")
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE whatsapp_settings
+            SET paired_phone = ?, paired_name = ?, last_inbound_at = ?,
+                connection_status = 'connected', last_error = '', updated_at = ?
+            WHERE id = 1
+            """,
+            (normalized, " ".join(str(name or "").split())[:160], _now(), _now()),
+        )
+        conn.commit()
+    return get_whatsapp_settings()
+
+
+def clear_whatsapp_pairing() -> dict:
+    current = get_whatsapp_settings(include_secret=True)
+    status = "configured" if current["enabled"] and current["credentials_configured"] else "disabled"
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE whatsapp_settings
+            SET paired_phone = '', paired_name = '', last_inbound_at = NULL,
+                connection_status = ?, last_error = '', updated_at = ?
+            WHERE id = 1
+            """,
+            (status, _now()),
+        )
+        conn.commit()
+    return get_whatsapp_settings()
+
+
+def mark_whatsapp_inbound(phone: str, name: str = "") -> dict:
+    current = get_whatsapp_settings(include_secret=True)
+    normalized = "".join(character for character in str(phone or "") if character.isdigit())
+    if not current["paired_phone"] or normalized != current["paired_phone"]:
+        return get_whatsapp_settings()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE whatsapp_settings
+            SET paired_name = CASE WHEN ? = '' THEN paired_name ELSE ? END,
+                last_inbound_at = ?, updated_at = ?
+            WHERE id = 1
+            """,
+            (str(name or "").strip(), " ".join(str(name or "").split())[:160], _now(), _now()),
+        )
+        conn.commit()
+    return get_whatsapp_settings()
+
+
+# -----------------------------------------------------------------------------
 # Supervisor and built-in specialist configuration
 # -----------------------------------------------------------------------------
 
@@ -1457,6 +1772,8 @@ def get_heartbeat_settings() -> dict:
             "last_status": "never",
             "last_message": "",
             "last_error": "",
+            "notify_telegram": True,
+            "notify_whatsapp": False,
             "updated_at": None,
         }
     return {
@@ -1468,6 +1785,8 @@ def get_heartbeat_settings() -> dict:
         "last_status": row["last_status"] or "never",
         "last_message": row["last_message"] or "",
         "last_error": row["last_error"] or "",
+        "notify_telegram": bool(row["notify_telegram"]),
+        "notify_whatsapp": bool(row["notify_whatsapp"]),
         "updated_at": row["updated_at"],
     }
 
@@ -1478,6 +1797,8 @@ def update_heartbeat_settings(
     interval_minutes: int | None = None,
     instructions: str | None = None,
     selected_tools: list[dict] | None = None,
+    notify_telegram: bool | None = None,
+    notify_whatsapp: bool | None = None,
 ) -> dict:
     if enabled is not None and not isinstance(enabled, bool):
         raise ValueError("enabled must be true or false")
@@ -1492,6 +1813,12 @@ def update_heartbeat_settings(
             raise ValueError("heartbeat instructions are required")
         if len(instructions) > 2000:
             raise ValueError("heartbeat instructions must be 2000 characters or fewer")
+    for field_name, value in (
+        ("notify_telegram", notify_telegram),
+        ("notify_whatsapp", notify_whatsapp),
+    ):
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"{field_name} must be true or false")
 
     normalized_tools: list[tuple[str, str]] | None = None
     if selected_tools is not None:
@@ -1618,6 +1945,10 @@ def update_heartbeat_settings(
             fields["interval_minutes"] = interval_minutes
         if instructions is not None:
             fields["instructions"] = instructions
+        if notify_telegram is not None:
+            fields["notify_telegram"] = int(notify_telegram)
+        if notify_whatsapp is not None:
+            fields["notify_whatsapp"] = int(notify_whatsapp)
         # Saving an active schedule starts a fresh interval; disabling it
         # removes the due time so a stale wake-up cannot launch a run.
         fields["next_run_at"] = (

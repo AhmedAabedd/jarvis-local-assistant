@@ -34,9 +34,9 @@ servers connected to it—not by assumptions built into its core.
 - **MCP-native extensibility** — connect local stdio servers, modern remote
   Streamable HTTP servers, and legacy SSE servers.
 - **More than chat** — reach the same agent platform through text, browser voice,
-  standalone voice, the CLI, Telegram, and future channels.
+  standalone voice, the CLI, Telegram, WhatsApp, and future channels.
 - **Proactive when needed** — Heartbeat runs safe scheduled checks and delivers
-  meaningful notifications to the dashboard and Telegram.
+  meaningful notifications to the dashboard and selected messaging channels.
 - **Human control remains explicit** — risky tools can require confirmation,
   dynamic agents can be disabled instantly, and background checks only receive
   tools approved for unattended use.
@@ -51,7 +51,7 @@ Mounir ships with a useful core and becomes broader as capabilities are attached
 
 | Area | Capabilities |
 |---|---|
-| Conversation | Streaming text chat, persistent history, CLI, web, and Telegram |
+| Conversation | Streaming text chat, persistent history, CLI, web, Telegram, and WhatsApp |
 | Voice | Browser speech input, standalone push-to-talk, wake word mode, STT, and TTS |
 | Desktop | Volume, brightness, media, Wi-Fi, Bluetooth, power, browser, and approved shell actions |
 | Media | Inspect and transform images, PDFs, audio, and video |
@@ -59,7 +59,7 @@ Mounir ships with a useful core and becomes broader as capabilities are attached
 | MCP | Discover tools from connected servers and turn them into dynamic specialists |
 | Models | Manage local and cloud model profiles, providers, endpoints, and credentials |
 | Automation | Scheduled Heartbeat checks with safe tool selection and duplicate suppression |
-| Notifications | Persistent in-app Heartbeat feed, live updates, and Telegram delivery |
+| Notifications | Persistent in-app Heartbeat feed plus selectable Telegram and WhatsApp delivery |
 | Administration | Visual agent graph, connection health, tool catalog, activation controls, and profile settings |
 
 Through MCP, the same system can be extended for source control, email, browsers,
@@ -76,6 +76,8 @@ flowchart LR
     CLI[CLI and standalone voice] --> S
     TG[Telegram channel] --> TS[Telegram conversation]
     TS --> S
+    WA[WhatsApp channel] --> WS[WhatsApp conversation]
+    WS --> S
 
     S --> B[Built-in specialists]
     S --> D[Dynamic MCP specialists]
@@ -91,6 +93,7 @@ flowchart LR
     HB --> D
     HB --> N[Dashboard notifications]
     HB --> TG
+    HB --> WA
 ```
 
 The supervisor receives a compact schema for each active specialist. It chooses
@@ -278,6 +281,37 @@ originating channel.
 `python telegram_cli.py` remains available when Telegram needs to run without the
 web server. Do not run both long-poll consumers for the same bot at once.
 
+### WhatsApp
+
+WhatsApp is a first-class server-managed channel built on Meta's official WhatsApp
+Business Cloud API. It has no separate entry point and no unofficial browser
+automation. Incoming messages reach FastAPI through a signed webhook, and replies
+are sent through the Graph API.
+
+Configure it from **Agent Studio → WhatsApp** using the values from the Meta App
+Dashboard:
+
+1. Add the phone number ID, WhatsApp Business Account ID, permanent access token,
+   and Meta app secret.
+2. Save and test the connection. Mounir validates the phone and subscribes the app
+   to the Business Account.
+3. Copy the generated callback URL and verify token into Meta's webhook settings.
+4. Enable WhatsApp and generate a temporary pairing command.
+5. Send that command to the business number from the phone that should be authorized.
+
+The callback must be reachable through public HTTPS. When exposing the server
+through a domain or reverse proxy, include that host and origin in Mounir's allowed
+web configuration.
+
+Every webhook body is verified with the Meta app secret before it is processed.
+Duplicate webhook message IDs are ignored, secrets are never returned by read APIs,
+and only the paired phone can submit agent requests. WhatsApp uses its own `Agent`
+and conversation history, isolated from both web and Telegram.
+
+WhatsApp permits free-form replies during the 24-hour customer-service window after
+an inbound message. For proactive Heartbeat delivery outside that window, configure
+an approved template whose body contains one variable for the alert text.
+
 ### Command line
 
 `python cli.py` provides the original interactive client. It supports `/reset`,
@@ -295,16 +329,17 @@ The user controls:
 - what Mounir should watch for
 - which specialist and approval-free tools it may use
 - which exact duplicate actions should be suppressed
+- whether alerts should also be delivered through Telegram and WhatsApp
 
 Built-in and dynamic specialists appear in one capability selector. Each specialist
 has **Select all**, but tools that require user confirmation are excluded from
 unattended execution.
 
 Heartbeat uses a code-enforced allowlist and a read-only system instruction. Quiet
-runs stay quiet; meaningful changes create a persisted notification. Notifications
-appear immediately in the web dashboard and are also sent to the privately paired
-Telegram account when available. Recent runs and alerts remain available after a
-page refresh.
+runs stay quiet; meaningful changes create a persisted notification. Web delivery
+is always enabled. Telegram and WhatsApp delivery can be selected independently,
+and each destination is used only when it is enabled, configured, and paired.
+Recent runs and alerts remain available after a page refresh.
 
 ---
 
@@ -320,11 +355,12 @@ The default view is a zoomable, pannable graph showing:
 - built-in specialists
 - active and inactive dynamic MCP specialists
 - the Telegram input channel when enabled
+- the WhatsApp input channel when enabled
 - model and status summaries
 
 Nodes are clickable. Icons uploaded for dynamic specialists are stored in SQLite and
-appear in both the graph and list view. Telegram is rendered as an input channel,
-visually distinct from supervisor-to-specialist delegation.
+appear in both the graph and list view. Telegram and WhatsApp are rendered as input
+channels, visually distinct from supervisor-to-specialist delegation.
 
 ### Configuration areas
 
@@ -337,6 +373,7 @@ visually distinct from supervisor-to-specialist delegation.
 | Supervisor | Model selection, identity, and direct non-delegation tools |
 | Voice | STT and TTS providers, models, voices, endpoints, languages, and keys |
 | Telegram | Token lifecycle, connection testing, pairing, activation, and status |
+| WhatsApp | Cloud API credentials, signed webhook, connection testing, pairing, templates, and status |
 | Heartbeat | Schedule, monitoring instruction, safe tools, recent runs, and notifications |
 | Profile | User name, assistant name, location, and preferred response language |
 
@@ -351,7 +388,9 @@ An agent platform that acts on devices, accounts, data, and external services ne
 stricter boundaries than an ordinary chatbot. Mounir includes several layers:
 
 - confirmation gates for shell commands, outbound actions, and selected MCP tools
-- route-specific confirmation delivery for web, CLI, voice, and Telegram
+- route-specific confirmation delivery for web, CLI, voice, Telegram, and WhatsApp
+- HMAC-SHA256 verification for every incoming WhatsApp webhook
+- one-use private pairing for both messaging channels
 - a final runtime check before any inactive subagent can be used
 - exact-string file edits that require the target content to be read first
 - configurable duplicate action prevention
@@ -373,7 +412,7 @@ history, cookies, passwords, or signed-in sessions.
 
 ### Individuals
 
-- A daily assistant available through text, voice, Telegram, and the web
+- A daily assistant available through text, voice, Telegram, WhatsApp, and the web
 - A personal operator for devices, accounts, files, and connected services
 - A research and knowledge companion powered by the user's preferred models
 - An automation hub that expands without coding every integration from scratch
@@ -421,7 +460,8 @@ python server.py
 ```
 
 Open `http://127.0.0.1:8000` for the assistant and use **Agent Studio** to manage
-models, MCP servers, specialists, voice, Telegram, Heartbeat, and profile settings.
+models, MCP servers, specialists, voice, Telegram, WhatsApp, Heartbeat, and profile
+settings.
 
 To use a different existing Ollama model without creating the custom build:
 
@@ -478,20 +518,20 @@ Agent Studio owns the bot configuration.
 
 Mounir stores configuration in `~/.mounir/mounir.db` by default. This includes the
 profile, model registry, MCP servers, cached tool metadata, dynamic specialists,
-icons, activation state, voice configuration, Telegram settings, Heartbeat settings,
-runs, and notifications.
+icons, activation state, voice configuration, Telegram and WhatsApp settings,
+Heartbeat settings, runs, and notifications.
 
 Conversation memory preserves complete valid turns, including paired tool calls and
-results. A rolling window prevents unbounded prompt growth. Web and Telegram use
-different `Agent` instances and different histories, so switching channels does not
-mix unrelated conversations.
+results. A rolling window prevents unbounded prompt growth. Web, Telegram, and
+WhatsApp use different `Agent` instances and histories, so switching channels does
+not mix unrelated conversations.
 
 ---
 
 ## Project structure
 
 ```text
-server.py                 FastAPI web, WebSocket, Telegram, and Heartbeat runtime
+server.py                 FastAPI web, WebSocket, messaging channels, and Heartbeat runtime
 cli.py                    Text REPL
 voice_cli.py              Push-to-talk and wake-word voice client
 telegram_cli.py           Standalone Telegram runtime
@@ -508,6 +548,7 @@ mounir/
   db.py                   SQLite schema and persistence API
   heartbeat.py            Safe scheduler and change-notification pipeline
   telegram_bridge.py      Pairing and lifecycle-managed Telegram transport
+  whatsapp_bridge.py      Signed webhook and official WhatsApp Cloud API transport
   llm.py                  Supervisor/provider adapters
   stt.py / tts.py         Speech provider adapters
   voice.py / wakeword.py  Voice session and wake-word behavior
@@ -533,6 +574,7 @@ tests/
 - **Provider adapters** separate orchestration from model vendors.
 - **Application-owned scheduling** runs Heartbeat independently of the page lifecycle.
 - **Managed Telegram polling** starts and stops with server configuration.
+- **Signed WhatsApp webhooks** run inside the FastAPI server with no second process.
 
 The runtime intentionally separates configuration, orchestration, tool execution,
 and presentation. That makes it possible to add another model provider, MCP server,
@@ -572,7 +614,8 @@ The fastest correct mental model is:
 5. A specialist executes tools privately and returns a compact report.
 6. Confirmation is request-scoped and must return through the originating interface.
 7. Heartbeat may only use explicitly selected, non-interactive tools.
-8. Web and Telegram conversations are isolated; shared tool execution is locked.
+8. Web, Telegram, and WhatsApp conversations are isolated; shared tool execution is
+   locked.
 9. Deactivation must be enforced in the backend even if a stale frontend or graph
    still references the agent.
 10. Secrets may be accepted by configuration endpoints but must never be returned by

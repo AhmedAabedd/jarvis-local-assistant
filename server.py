@@ -6,9 +6,9 @@ Serves:
   - WS   /ws/chat          -> text chat, streams Mounir's reply token by token
   - POST /api/voice        -> upload audio, returns transcript + spoken reply (base64 wav)
 
-Also owns the heartbeat scheduler and, when configured, the Telegram
-long-polling bridge. Web and Telegram keep separate conversation histories,
-while agent turns remain serialized for safe access to shared desktop tools.
+Also owns the heartbeat scheduler, Telegram long-polling bridge, and signed
+WhatsApp Cloud API webhook. Every channel keeps separate conversation history,
+while agent turns remain serialized for safe access to shared tools.
 
 Run with:
     pip install fastapi uvicorn psutil python-multipart
@@ -31,7 +31,15 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -43,6 +51,7 @@ from mounir import stt, tts, audio as audio_mod, tools
 from mounir.heartbeat import HeartbeatService
 from mounir.specialists.mcp_agent import discover_tools
 from mounir.telegram_bridge import TelegramBridge
+from mounir.whatsapp_bridge import WhatsAppBridge
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_PORT = int(os.environ.get("MOUNIR_WEB_PORT", "8000"))
@@ -87,11 +96,12 @@ _secure_gmail_auth_files()
 # Ensure the SQLite DB exists and the legacy JSON file is migrated.
 db.init()
 
-# Web and Telegram use separate context windows so messages from one interface
-# never become conversational history in the other. ``agent`` remains the web
-# alias for compatibility with existing integrations and tests.
+# Every channel uses a separate context window so messages never leak between
+# interfaces. ``agent`` remains the web alias for compatibility with existing
+# integrations and tests.
 agent = Agent()
 telegram_agent = Agent()
+whatsapp_agent = Agent()
 _agent_lock = threading.Lock()
 
 # --- in-browser tool confirmation -------------------------------------------
@@ -141,26 +151,44 @@ async def _deliver_heartbeat_alert(message: str) -> None:
     if out is not None:
         out.put_nowait({"type": "heartbeat", "text": alert})
 
-    telegram = db.get_telegram_settings()
-    if not (
-        telegram["enabled"]
-        and telegram["token_configured"]
-        and telegram["paired"]
-    ):
-        return
+    destinations = db.get_heartbeat_settings()
+    if destinations["notify_telegram"]:
+        telegram = db.get_telegram_settings()
+        if (
+            telegram["enabled"]
+            and telegram["token_configured"]
+            and telegram["paired"]
+        ):
+            try:
+                sent = await asyncio.to_thread(telegram_service.send_notification, alert)
+                if sent:
+                    def persist_telegram() -> None:
+                        with _agent_lock:
+                            telegram_agent.conversation.add_assistant(alert)
 
-    try:
-        sent = await asyncio.to_thread(telegram_service.send_notification, alert)
-        if sent:
-            def persist_telegram() -> None:
-                with _agent_lock:
-                    telegram_agent.conversation.add_assistant(alert)
+                    await asyncio.to_thread(persist_telegram)
+            except Exception as exc:
+                # A channel outage must never suppress the web notification or
+                # turn a successful heartbeat check into a failed run.
+                trace.kv("heartbeat telegram", f"delivery failed: {exc}")
 
-            await asyncio.to_thread(persist_telegram)
-    except Exception as exc:
-        # A Telegram outage must not suppress the web notification or turn a
-        # successful heartbeat check into a failed run.
-        trace.kv("heartbeat telegram", f"delivery failed: {exc}")
+    if destinations["notify_whatsapp"]:
+        whatsapp = db.get_whatsapp_settings()
+        if (
+            whatsapp["enabled"]
+            and whatsapp["credentials_configured"]
+            and whatsapp["paired"]
+        ):
+            try:
+                sent = await asyncio.to_thread(whatsapp_service.send_notification, alert)
+                if sent:
+                    def persist_whatsapp() -> None:
+                        with _agent_lock:
+                            whatsapp_agent.conversation.add_assistant(alert)
+
+                    await asyncio.to_thread(persist_whatsapp)
+            except Exception as exc:
+                trace.kv("heartbeat whatsapp", f"delivery failed: {exc}")
 
 
 heartbeat_service = HeartbeatService(_deliver_heartbeat_alert)
@@ -184,6 +212,23 @@ telegram_service = TelegramBridge(
     chat_id=_telegram_saved["chat_id"],
     on_paired=_telegram_paired,
     on_status=_telegram_status,
+)
+
+
+def _whatsapp_paired(phone: str, name: str) -> None:
+    db.pair_whatsapp_phone(phone, name)
+
+
+def _whatsapp_inbound(phone: str, name: str) -> None:
+    db.mark_whatsapp_inbound(phone, name)
+
+
+_whatsapp_saved = db.get_whatsapp_settings(include_secret=True)
+whatsapp_service = WhatsAppBridge(
+    agent=whatsapp_agent,
+    turn_lock=_agent_lock,
+    on_paired=_whatsapp_paired,
+    on_inbound=_whatsapp_inbound,
 )
 
 
@@ -218,6 +263,39 @@ def _safe_telegram_error(exc: Exception, token: str = "") -> str:
     message = str(exc) or exc.__class__.__name__
     if token:
         message = message.replace(token, "[hidden token]")
+    return message[:600]
+
+
+def _whatsapp_public_state() -> dict:
+    state = db.get_whatsapp_settings()
+    state["webhook_path"] = whatsapp_service.webhook_url_path
+    if not state["enabled"]:
+        state["connection_status"] = "disabled"
+    elif not state["credentials_configured"]:
+        state["connection_status"] = "incomplete"
+    return state
+
+
+def _apply_whatsapp_settings() -> dict:
+    saved = db.get_whatsapp_settings(include_secret=True)
+    whatsapp_service.reconfigure(saved)
+    if not saved["enabled"]:
+        db.update_whatsapp_connection("disabled")
+    elif not saved["credentials_configured"]:
+        db.update_whatsapp_connection("incomplete")
+    elif saved["connection_status"] in {"disabled", "incomplete"}:
+        db.update_whatsapp_connection("configured")
+    return _whatsapp_public_state()
+
+
+def _safe_whatsapp_error(exc: Exception, settings: dict | None = None) -> str:
+    message = str(exc) or exc.__class__.__name__
+    for secret in (
+        str((settings or {}).get("access_token") or ""),
+        str((settings or {}).get("app_secret") or ""),
+    ):
+        if secret:
+            message = message.replace(secret, "[hidden credential]")
     return message[:600]
 
 
@@ -509,6 +587,129 @@ async def remove_telegram_token():
     return await asyncio.to_thread(_apply_telegram_settings)
 
 
+@app.get("/api/whatsapp")
+async def get_whatsapp_settings():
+    return _whatsapp_public_state()
+
+
+@app.put("/api/whatsapp")
+async def update_whatsapp_settings(req: dict):
+    allowed = {
+        "enabled",
+        "access_token",
+        "phone_number_id",
+        "business_account_id",
+        "app_secret",
+        "api_version",
+        "heartbeat_template_name",
+        "heartbeat_template_language",
+        "clear_credentials",
+        "regenerate_verify_token",
+    }
+    fields = {key: value for key, value in req.items() if key in allowed}
+    try:
+        db.update_whatsapp_settings(**fields)
+        return _apply_whatsapp_settings()
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/whatsapp/test")
+async def test_whatsapp_connection():
+    saved = db.get_whatsapp_settings(include_secret=True)
+    whatsapp_service.reconfigure(saved)
+    error = whatsapp_service.configuration_error()
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
+    try:
+        identity = await asyncio.to_thread(whatsapp_service.test_connection)
+        status = "connected" if saved["webhook_verified_at"] else "configured"
+        db.update_whatsapp_connection(
+            status,
+            display_phone_number=identity["display_phone_number"],
+            verified_name=identity["verified_name"],
+            tested=True,
+        )
+        return {**_whatsapp_public_state(), "account": identity}
+    except Exception as exc:
+        message = _safe_whatsapp_error(exc, saved)
+        db.update_whatsapp_connection("error", error=message, tested=True)
+        return JSONResponse({"error": message}, status_code=400)
+
+
+@app.post("/api/whatsapp/pairing-code")
+async def create_whatsapp_pairing_code():
+    saved = db.get_whatsapp_settings(include_secret=True)
+    if not saved["enabled"]:
+        return JSONResponse({"error": "Enable WhatsApp before pairing."}, status_code=400)
+    if not saved["credentials_configured"]:
+        return JSONResponse(
+            {"error": "Complete the WhatsApp Cloud API connection first."},
+            status_code=400,
+        )
+    if not saved["webhook_verified"]:
+        return JSONResponse(
+            {"error": "Verify the webhook in Meta before pairing a phone."},
+            status_code=400,
+        )
+    if saved["paired_phone"]:
+        return JSONResponse(
+            {"error": "Disconnect the current WhatsApp phone before pairing another one."},
+            status_code=409,
+        )
+    whatsapp_service.reconfigure(saved)
+    try:
+        return whatsapp_service.create_pairing_code()
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.delete("/api/whatsapp/pairing")
+async def disconnect_whatsapp_phone():
+    whatsapp_service.cancel_pairing()
+    db.clear_whatsapp_pairing()
+    return _apply_whatsapp_settings()
+
+
+@app.delete("/api/whatsapp/credentials")
+async def remove_whatsapp_credentials():
+    whatsapp_service.cancel_pairing()
+    db.update_whatsapp_settings(clear_credentials=True)
+    return _apply_whatsapp_settings()
+
+
+@app.get("/api/whatsapp/webhook")
+async def verify_whatsapp_webhook(request: Request):
+    query = request.query_params
+    challenge = whatsapp_service.verify_webhook(
+        query.get("hub.mode", ""),
+        query.get("hub.verify_token", ""),
+        query.get("hub.challenge", ""),
+    )
+    if challenge is None:
+        return Response(content="Webhook verification failed", status_code=403)
+    db.update_whatsapp_connection("connected", webhook_verified=True)
+    return Response(content=challenge, media_type="text/plain")
+
+
+@app.post("/api/whatsapp/webhook")
+async def receive_whatsapp_webhook(
+    request: Request, background_tasks: BackgroundTasks
+):
+    body = await request.body()
+    signature = request.headers.get("x-hub-signature-256", "")
+    if not whatsapp_service.verify_signature(body, signature):
+        return Response(content="Invalid webhook signature", status_code=403)
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return Response(content="Invalid webhook payload", status_code=400)
+    if payload.get("object") != "whatsapp_business_account":
+        return Response(content="Unsupported webhook object", status_code=400)
+    background_tasks.add_task(whatsapp_service.handle_webhook, payload)
+    return Response(content="EVENT_RECEIVED", media_type="text/plain")
+
+
 @app.get("/api/heartbeat")
 async def get_heartbeat():
     return {
@@ -545,6 +746,8 @@ async def update_heartbeat(req: dict):
             interval_minutes=req.get("interval_minutes"),
             instructions=req.get("instructions"),
             selected_tools=selected_tools,
+            notify_telegram=req.get("notify_telegram"),
+            notify_whatsapp=req.get("notify_whatsapp"),
         )
         heartbeat_service.wake()
         return await get_heartbeat()

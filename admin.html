@@ -133,6 +133,16 @@
   }
   .heartbeat-field textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
   .heartbeat-field select:focus, .heartbeat-field textarea:focus { border-color: var(--purple); }
+  .heartbeat-destinations {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px;
+  }
+  .heartbeat-destination {
+    display: flex; align-items: center; gap: 9px; padding: 10px 11px;
+    border: 1px solid var(--line); border-radius: 9px; background: var(--bg);
+    color: var(--text-mid); font-size: 10px; cursor: pointer;
+  }
+  .heartbeat-destination input { width: 15px; height: 15px; accent-color: var(--purple); }
+  .heartbeat-destination.locked { opacity: .7; cursor: default; }
   .heartbeat-enable-setting {
     display: flex; align-items: center; justify-content: space-between; gap: 24px;
   }
@@ -213,6 +223,11 @@
     border: 1px solid rgba(51,144,236,.24);
   }
   .telegram-logo img { width: 27px; height: 27px; display: block; }
+  .telegram-logo.whatsapp-logo {
+    color: #25d366; background: rgba(37,211,102,.10);
+    border-color: rgba(37,211,102,.25);
+  }
+  .telegram-logo.whatsapp-logo img { width: 30px; height: 30px; }
   .telegram-identity h3 { margin: 0 0 5px; color: var(--text); font-size: 14px; font-weight: 600; }
   .telegram-identity p { margin: 0; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
   .telegram-status {
@@ -256,11 +271,11 @@
     color: var(--text-mid); font-size: 10px; font-weight: 600;
     text-transform: uppercase; letter-spacing: .05em;
   }
-  .telegram-field input {
+  .telegram-field input, .telegram-field select {
     width: 100%; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px;
     background: var(--bg); color: var(--text); font: inherit; outline: none;
   }
-  .telegram-field input:focus { border-color: var(--purple); }
+  .telegram-field input:focus, .telegram-field select:focus { border-color: var(--purple); }
   .telegram-field .hint { color: var(--text-dim); font-size: 9px; line-height: 1.5; }
   .telegram-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
   .telegram-feedback { min-height: 16px; margin-top: 10px; color: var(--text-dim); font-size: 10px; }
@@ -371,6 +386,7 @@
   .workflow-links path { fill: none; stroke: #403752; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
   .workflow-links .specialist-link { stroke-dasharray: 6 6; }
   .workflow-links .input-link { stroke: #4c7d66; stroke-width: 1.5; opacity: .72; }
+  .workflow-links .whatsapp-input-link { stroke: #35a862; opacity: .76; }
   .workflow-links marker path { fill: #4c7d66; stroke: none; opacity: .78; }
   .workflow-links circle { fill: #6b5a82; }
   .supervisor-wrap { position: relative; z-index: 2; display: flex; justify-content: center; margin-bottom: 112px; }
@@ -409,21 +425,28 @@
     box-shadow: 0 10px 36px rgba(89,42,132,.2); cursor: pointer;
   }
   .agent-node.supervisor:hover { border-color: rgba(190,125,255,.9); box-shadow: 0 12px 38px rgba(89,42,132,.3); }
-  .agent-node.telegram-node {
+  .agent-node.channel-node {
     position: absolute; left: calc(50% - 342px); top: 50%; z-index: 2;
     width: 66px; min-width: 66px; height: 66px; padding: 8px;
     transform: translate(-50%, -50%); display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 4px; cursor: pointer;
     border-color: rgba(95,180,135,.48); background: rgba(22,19,31,.96);
   }
+  .agent-node.channel-node.channel-top { top: calc(50% - 52px); }
+  .agent-node.channel-node.channel-bottom { top: calc(50% + 52px); }
   .agent-node.telegram-node:hover {
     border-color: rgba(95,180,135,.9); box-shadow: 0 10px 30px rgba(95,180,135,.13);
   }
-  .telegram-node img { width: 40px; height: 40px; display: block; }
-  .telegram-node-label {
+  .agent-node.whatsapp-node { border-color: rgba(37,211,102,.48); }
+  .agent-node.whatsapp-node:hover {
+    border-color: rgba(37,211,102,.92); box-shadow: 0 10px 30px rgba(37,211,102,.13);
+  }
+  .channel-node img { width: 40px; height: 40px; display: block; }
+  .channel-node-label {
     position: absolute; top: calc(100% + 7px); left: 50%; transform: translateX(-50%);
     color: #7fcca4; font-size: 9px; font-weight: 600; white-space: nowrap;
   }
+  .whatsapp-node .channel-node-label { color: #63df91; }
   .node-head { display: flex; align-items: center; gap: 9px; }
   .node-icon {
     width: 30px; height: 30px; flex: 0 0 30px; border-radius: 9px;
@@ -873,6 +896,7 @@
     .heartbeat-enable-setting { align-items: flex-start; flex-direction: column; }
     .heartbeat-enable-setting .heartbeat-control { width: 100%; }
     .telegram-status-card, .telegram-enable-row, .telegram-account { align-items: flex-start; flex-direction: column; }
+    .heartbeat-destinations { grid-template-columns: 1fr; }
   }
   @media (max-width: 1080px) {
     .form-view.server-form-view { grid-template-columns: 1fr; }
@@ -920,6 +944,10 @@
       <button class="nav-item" data-tab="telegram">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21 3-7.2 18-4.1-7.4L3 9.7 21 3Z"/><path d="m9.7 13.6 4.1-3.8"/></svg>
         <span>Telegram</span>
+      </button>
+      <button class="nav-item" data-tab="whatsapp">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 11.7a8.5 8.5 0 0 1-12.6 7.5L3.5 20.5l1.3-4.3a8.5 8.5 0 1 1 15.7-4.5Z"/><path d="M8.4 7.7c.3 3.4 2.5 5.7 5.9 6.2l1.1-1.4"/></svg>
+        <span>WhatsApp</span>
       </button>
       <button class="nav-item" data-tab="heartbeat">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.2-6 4.2 12 2.2-6H21"/></svg>
@@ -969,6 +997,7 @@ const S = {
   overview: { supervisor: {}, builtins: [] },
   heartbeat: { enabled: false },
   telegram: { enabled: false },
+  whatsapp: { enabled: false },
   voice: { stt: {}, tts: {} },
   profile: {},
   models: [],
@@ -984,11 +1013,13 @@ let heartbeatSelectedAgentId = null;
 let heartbeatToolSelections = new Set();
 let telegramPairPoll = null;
 let telegramStatusPoll = null;
+let whatsappPairPoll = null;
 
 const API = {
   overview: '/api/agent-overview',
   heartbeat: { update: () => '/api/heartbeat' },
   telegram: { update: () => '/api/telegram' },
+  whatsapp: { update: () => '/api/whatsapp' },
   voice: { update: () => '/api/voice-settings' },
   profile:  { update: () => '/api/profile' },
   models:  { list: '/api/models',  create: '/api/models',  update: id => `/api/models/${id}`,  del: id => `/api/models/${id}` },
@@ -1000,6 +1031,7 @@ const TAB_META = {
   overview: { title: 'Agent Overview', labelSingular: '', subtitle: 'See how your assistant and subagents work together' },
   heartbeat: { title: 'Heartbeat', labelSingular: '', subtitle: 'Schedule automatic checks using approved tools' },
   telegram: { title: 'Telegram', labelSingular: '', subtitle: 'Connect to your assistant from Telegram' },
+  whatsapp: { title: 'WhatsApp', labelSingular: '', subtitle: 'Connect through the official WhatsApp Business Platform' },
   voice: { title: 'Voice', labelSingular: '', subtitle: 'Configure speech recognition and voice output' },
   profile: { title: 'Profile', labelSingular: 'Profile', subtitle: 'Personalize names, location, and language' },
   models:  { title: 'Models',        labelSingular: 'Model', subtitle: 'Manage the cloud and local models used by your agents' },
@@ -1083,10 +1115,11 @@ async function api(method, url, body) {
 }
 
 async function loadAll() {
-  const [o, h, t, v, p, m, s, a] = await Promise.all([
+  const [o, h, t, w, v, p, m, s, a] = await Promise.all([
     api('GET', API.overview),
     api('GET', '/api/heartbeat'),
     api('GET', '/api/telegram'),
+    api('GET', '/api/whatsapp'),
     api('GET', '/api/voice-settings'),
     api('GET', '/api/profile'),
     api('GET', API.models.list),
@@ -1096,6 +1129,7 @@ async function loadAll() {
   S.overview = o;
   S.heartbeat = h;
   S.telegram = t;
+  S.whatsapp = w;
   S.voice = v;
   S.profile = p;
   S.models = m;
@@ -1130,6 +1164,7 @@ function render() {
   if (S.tab === 'overview') renderOverview();
   else if (S.tab === 'heartbeat') renderHeartbeat();
   else if (S.tab === 'telegram') renderTelegram();
+  else if (S.tab === 'whatsapp') renderWhatsApp();
   else if (S.tab === 'voice') renderVoice();
   else if (S.tab === 'profile') renderForm();
   else if (S.view === 'list') renderList();
@@ -1142,6 +1177,7 @@ function updateHeader() {
   const inOverview = S.tab === 'overview';
   const inHeartbeat = S.tab === 'heartbeat';
   const inTelegram = S.tab === 'telegram';
+  const inWhatsApp = S.tab === 'whatsapp';
   const inVoice = S.tab === 'voice';
   const inProfile = S.tab === 'profile';
   const inForm = S.view === 'form';
@@ -1155,14 +1191,14 @@ function updateHeader() {
   const createLabels = { models: '+ Add model', servers: '+ Add MCP server', agents: '+ Add subagent' };
   $('createBtn').textContent = createLabels[S.tab] || '+ Add new';
   // Add button: only in list view
-  $('createBtn').style.display = (inOverview || inHeartbeat || inTelegram || inVoice || inProfile || inForm) ? 'none' : '';
+  $('createBtn').style.display = (inOverview || inHeartbeat || inTelegram || inWhatsApp || inVoice || inProfile || inForm) ? 'none' : '';
   // Delete: only in readonly form view
   $('deleteBtn').style.display = (!inOverview && !inProfile && editing && S.formReadonly) ? '' : 'none';
   $('testBtn').style.display = (S.tab === 'servers' && editing && S.formReadonly) ? '' : 'none';
   // Cancel: in form view but NOT in readonly edit mode
   $('cancelBtn').style.display = (inForm && !(editing && S.formReadonly)) ? '' : 'none';
   // Edit / Save / Create button
-  if (inOverview || inHeartbeat || inTelegram || inVoice) {
+  if (inOverview || inHeartbeat || inTelegram || inWhatsApp || inVoice) {
     $('modifyBtn').style.display = 'none';
     $('cancelBtn').style.display = 'none';
     $('testBtn').style.display = 'none';
@@ -1185,6 +1221,8 @@ function renderOverview() {
   const builtins = S.overview.builtins || [];
   const dynamic = S.agents || [];
   const telegramEnabled = Boolean(S.telegram?.enabled);
+  const whatsappEnabled = Boolean(S.whatsapp?.enabled);
+  const channelCount = Number(telegramEnabled) + Number(whatsappEnabled);
   const total = builtins.length + dynamic.length;
   const supervisorInitial = (supervisor.name || 'M').trim().charAt(0).toUpperCase();
   const builtinCards = builtins.map((item, index) => agentNodeHtml(item, 'builtin', `builtin-${index}`)).join('');
@@ -1205,7 +1243,7 @@ function renderOverview() {
         <div class="workflow-toolbar">
           <div class="workflow-title"><span class="live-dot"></span><span>Agent workflow</span></div>
           <div class="workflow-tools">
-            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>MCP subagent</span><span><i class="legend-dot" style="background:var(--danger)"></i>Inactive</span>${telegramEnabled ? '<span><i class="legend-dot input"></i>Input channel</span>' : ''}</div>
+            <div class="workflow-legend"><span><i class="legend-dot"></i>Built-in</span><span><i class="legend-dot dynamic"></i>MCP subagent</span><span><i class="legend-dot" style="background:var(--danger)"></i>Inactive</span>${channelCount ? '<span><i class="legend-dot input"></i>Input channel</span>' : ''}</div>
             <div class="zoom-controls" aria-label="Graph zoom controls">
               <button class="zoom-control" type="button" data-zoom="out" aria-label="Zoom out">−</button>
               <button class="zoom-control value" type="button" data-zoom="reset" id="zoomValue" aria-label="Reset zoom">100%</button>
@@ -1217,13 +1255,19 @@ function renderOverview() {
           <div class="workflow-stage" id="workflowStage">
             <svg class="workflow-links" id="workflowLinks" aria-hidden="true"></svg>
             <div class="supervisor-wrap">
-              ${telegramEnabled ? `<article class="agent-node telegram-node" id="node-telegram" data-open-telegram title="Open Telegram settings" role="button" tabindex="0">
+              ${telegramEnabled ? `<article class="agent-node channel-node telegram-node${channelCount > 1 ? ' channel-top' : ''}" id="node-telegram" data-open-telegram title="Open Telegram settings" role="button" tabindex="0">
                 <span class="node-port output-right"></span>
                 <img src="/images/telegram.svg" alt="">
-                <span class="telegram-node-label">Telegram</span>
+                <span class="channel-node-label">Telegram</span>
+              </article>` : ''}
+              ${whatsappEnabled ? `<article class="agent-node channel-node whatsapp-node${channelCount > 1 ? ' channel-bottom' : ''}" id="node-whatsapp" data-open-whatsapp title="Open WhatsApp settings" role="button" tabindex="0">
+                <span class="node-port output-right"></span>
+                <img src="/images/whatsapp.svg" alt="">
+                <span class="channel-node-label">WhatsApp</span>
               </article>` : ''}
               <article class="agent-node supervisor" id="node-supervisor" data-open-supervisor title="Open ${esc(assistantName)} settings" role="button" tabindex="0">
-                ${telegramEnabled ? '<span class="node-port input-left"></span>' : ''}
+                ${telegramEnabled ? `<span class="node-port input-left telegram-input-port" style="top:${channelCount > 1 ? '38%' : '50%'}"></span>` : ''}
+                ${whatsappEnabled ? `<span class="node-port input-left whatsapp-input-port" style="top:${channelCount > 1 ? '62%' : '50%'}"></span>` : ''}
                 <span class="node-port output"></span>
                 <div class="node-head">
                   <div class="node-icon">${esc(supervisorInitial)}</div>
@@ -1641,6 +1685,306 @@ function renderTelegram() {
   if (state.connection_status === 'connecting') startTelegramStatusPolling();
 }
 
+function stopWhatsAppPairPolling() {
+  if (whatsappPairPoll) clearInterval(whatsappPairPoll);
+  whatsappPairPoll = null;
+}
+
+function whatsappStatusInfo(status) {
+  const states = {
+    disabled: ['disabled', 'Disabled'],
+    incomplete: ['configured', 'Setup required'],
+    configured: ['configured', 'Webhook required'],
+    connected: ['connected', 'Connected'],
+    error: ['error', 'Connection error'],
+  };
+  const [kind, label] = states[status] || states.disabled;
+  return { kind, label };
+}
+
+function renderWhatsApp() {
+  stopWhatsAppPairPolling();
+  const state = S.whatsapp || {};
+  const enabled = Boolean(state.enabled);
+  const configured = Boolean(state.credentials_configured);
+  const paired = Boolean(state.paired);
+  const webhookVerified = Boolean(state.webhook_verified);
+  const status = whatsappStatusInfo(state.connection_status);
+  const assistantName = assistantLabel();
+  const accountName = state.verified_name || 'WhatsApp Business';
+  const displayNumber = state.display_phone_number || 'No verified number loaded';
+  const callbackUrl = `${window.location.origin}${state.webhook_path || '/api/whatsapp/webhook'}`;
+  const statusDetail = state.last_error
+    ? state.last_error
+    : status.kind === 'connected'
+    ? `${accountName} is ready to receive signed WhatsApp messages.`
+    : !configured
+    ? 'Add the credentials from your Meta app and WhatsApp Business account.'
+    : !webhookVerified
+    ? 'The Cloud API is configured. Add and verify the callback in Meta to receive messages.'
+    : !enabled
+    ? 'The connection is ready. Enable WhatsApp when you want this channel available.'
+    : 'WhatsApp is ready.';
+  const pairingHtml = paired ? `
+    <div class="telegram-account">
+      <div>
+        <div class="telegram-account-name">${esc(state.paired_name || 'Authorized WhatsApp user')}</div>
+        <div class="telegram-account-user">${esc(state.paired_phone_hint || 'WhatsApp number connected')}</div>
+      </div>
+      <button class="btn danger" type="button" id="whatsappDisconnect">Disconnect number</button>
+    </div>` : !configured ? `
+    <div class="telegram-pair-empty">Complete the Cloud API connection before pairing a WhatsApp number.</div>` : !enabled ? `
+    <div class="telegram-pair-empty">Enable WhatsApp before pairing your number.</div>` : !webhookVerified ? `
+    <div class="telegram-pair-empty">Verify the webhook in Meta before generating a pairing code.</div>` : `
+    <div class="telegram-pair-empty">
+      Generate a temporary code, then send the displayed command to ${esc(displayNumber)} from the WhatsApp number you want to authorize.
+      The code works once and expires after ten minutes.
+      <div class="telegram-actions"><button class="btn primary" type="button" id="whatsappPair">Generate pairing code</button></div>
+    </div>`;
+
+  $('content').innerHTML = `
+    <div class="telegram-view">
+      <section class="telegram-card telegram-status-card">
+        <div class="telegram-identity">
+          <div class="telegram-logo whatsapp-logo">
+            <img src="/images/whatsapp.svg" alt="">
+          </div>
+          <div>
+            <h3>${esc(accountName)}</h3>
+            <p>${esc(statusDetail)}</p>
+          </div>
+        </div>
+        <span class="telegram-status ${status.kind}">${esc(status.label)}</span>
+      </section>
+
+      <section class="telegram-card">
+        <div class="telegram-enable-row">
+          <div class="telegram-enable-copy">
+            <strong>Enable WhatsApp</strong>
+            <span>Accept signed messages through the server webhook while ${esc(assistantName)} is running.</span>
+          </div>
+          <div class="heartbeat-control">
+            <label class="switch" title="Enable or disable WhatsApp">
+              <input type="checkbox" id="whatsappToggle" role="switch" aria-label="Enable WhatsApp"${enabled ? ' checked' : ''}>
+              <span class="switch-track"></span>
+            </label>
+          </div>
+        </div>
+        <div class="telegram-section-head">
+          <h3>Cloud API connection</h3>
+          <p>Copy these values from Meta App Dashboard → WhatsApp → API Setup. Saved secrets are never displayed.</p>
+        </div>
+        <form id="whatsappForm">
+          <div class="telegram-fields">
+            <label class="telegram-field">
+              <span>Phone number ID</span>
+              <input id="whatsappPhoneId" value="${esc(state.phone_number_id || '')}" placeholder="ID shown below the WhatsApp test number" required>
+            </label>
+            <label class="telegram-field">
+              <span>Business account ID</span>
+              <input id="whatsappBusinessId" value="${esc(state.business_account_id || '')}" placeholder="WhatsApp Business Account ID" required>
+            </label>
+            <label class="telegram-field">
+              <span>Access token</span>
+              <input type="password" id="whatsappAccessToken" autocomplete="new-password" placeholder="${state.token_configured ? 'Saved — paste only to replace' : 'Permanent system-user access token'}">
+              <span class="hint">${state.token_configured ? 'Access token saved. Leave blank to keep it.' : 'Use a permanent system-user token for a stable server connection.'}</span>
+            </label>
+            <label class="telegram-field">
+              <span>Meta app secret</span>
+              <input type="password" id="whatsappAppSecret" autocomplete="new-password" placeholder="${state.app_secret_configured ? 'Saved — paste only to replace' : 'App secret from Meta App Settings'}">
+              <span class="hint">Used only to reject forged webhook requests. ${state.app_secret_configured ? 'App secret saved.' : ''}</span>
+            </label>
+            <label class="telegram-field">
+              <span>Graph API version</span>
+              <input id="whatsappApiVersion" value="${esc(state.api_version || 'v25.0')}" placeholder="v25.0" required>
+              <span class="hint">Keep the version supported by your Meta app.</span>
+            </label>
+            <label class="telegram-field">
+              <span>Heartbeat message template</span>
+              <input id="whatsappHeartbeatTemplate" value="${esc(state.heartbeat_template_name || '')}" placeholder="Optional approved template name">
+              <span class="hint">Needed for proactive alerts outside WhatsApp's 24-hour reply window. The template body must contain one variable for the alert.</span>
+            </label>
+            <label class="telegram-field">
+              <span>Template language</span>
+              <input id="whatsappTemplateLanguage" value="${esc(state.heartbeat_template_language || 'en_US')}" placeholder="en_US">
+            </label>
+          </div>
+          <div class="telegram-actions">
+            <button class="btn primary" type="submit" id="whatsappSave">Save connection</button>
+            <button class="btn outline" type="button" id="whatsappTest"${configured ? '' : ' disabled'}>Test connection</button>
+            ${configured ? '<button class="btn danger" type="button" id="whatsappRemove">Remove connection</button>' : ''}
+          </div>
+          <div class="telegram-feedback" id="whatsappFeedback"></div>
+        </form>
+      </section>
+
+      <section class="telegram-card">
+        <div class="telegram-section-head">
+          <h3>Meta webhook</h3>
+          <p>Add this callback URL and verification token to the WhatsApp webhook configuration in Meta. The callback must be reachable through public HTTPS.</p>
+        </div>
+        <div class="telegram-fields">
+          <label class="telegram-field">
+            <span>Callback URL</span>
+            <input id="whatsappCallbackUrl" class="mono" value="${esc(callbackUrl)}" readonly>
+          </label>
+          <label class="telegram-field">
+            <span>Verify token</span>
+            <input id="whatsappVerifyToken" class="mono" value="${esc(state.verify_token || '')}" readonly>
+          </label>
+        </div>
+        <div class="telegram-token-state${webhookVerified ? ' configured' : ''}" style="margin-top:15px">
+          ${webhookVerified ? 'Webhook verified by Meta' : 'Waiting for Meta webhook verification'}
+        </div>
+        <div class="telegram-actions">
+          <button class="btn outline" type="button" id="whatsappCopyCallback">Copy callback URL</button>
+          <button class="btn outline" type="button" id="whatsappCopyVerify">Copy verify token</button>
+          <button class="btn outline" type="button" id="whatsappRegenerateVerify">Generate new verify token</button>
+        </div>
+      </section>
+
+      <section class="telegram-card">
+        <div class="telegram-section-head">
+          <h3>Authorized number</h3>
+          <p>Only the paired WhatsApp number can send requests to ${esc(assistantName)}.</p>
+        </div>
+        <div class="telegram-pair-state" id="whatsappPairState">${pairingHtml}</div>
+      </section>
+    </div>`;
+  S.view = 'whatsapp';
+  updateHeader();
+
+  const feedback = $('whatsappFeedback');
+  const showFeedback = (message, kind = '') => {
+    feedback.textContent = message;
+    feedback.className = `telegram-feedback${kind ? ' ' + kind : ''}`;
+  };
+  $('whatsappToggle').addEventListener('change', async event => {
+    const requested = event.target.checked;
+    event.target.disabled = true;
+    try {
+      S.whatsapp = await api('PUT', API.whatsapp.update(), { enabled: requested });
+      renderWhatsApp();
+    } catch (error) {
+      event.target.checked = !requested;
+      event.target.disabled = false;
+      showFeedback(error.message, 'error');
+    }
+  });
+  $('whatsappForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const save = $('whatsappSave');
+    save.disabled = true;
+    showFeedback('Saving WhatsApp connection…');
+    const payload = {
+      phone_number_id: $('whatsappPhoneId').value.trim(),
+      business_account_id: $('whatsappBusinessId').value.trim(),
+      api_version: $('whatsappApiVersion').value.trim(),
+      heartbeat_template_name: $('whatsappHeartbeatTemplate').value.trim(),
+      heartbeat_template_language: $('whatsappTemplateLanguage').value.trim() || 'en_US',
+    };
+    const accessToken = $('whatsappAccessToken').value.trim();
+    const appSecret = $('whatsappAppSecret').value.trim();
+    if (accessToken) payload.access_token = accessToken;
+    if (appSecret) payload.app_secret = appSecret;
+    try {
+      S.whatsapp = await api('PUT', API.whatsapp.update(), payload);
+      renderWhatsApp();
+      $('whatsappFeedback').textContent = 'WhatsApp connection saved.';
+      $('whatsappFeedback').className = 'telegram-feedback ok';
+    } catch (error) {
+      showFeedback(error.message, 'error');
+      save.disabled = false;
+    }
+  });
+  $('whatsappTest').addEventListener('click', async event => {
+    event.target.disabled = true;
+    showFeedback('Testing the Cloud API and subscribing the Meta app…');
+    try {
+      S.whatsapp = await api('POST', '/api/whatsapp/test');
+      renderWhatsApp();
+      $('whatsappFeedback').textContent = 'Cloud API connection successful.';
+      $('whatsappFeedback').className = 'telegram-feedback ok';
+    } catch (error) {
+      S.whatsapp = await api('GET', '/api/whatsapp');
+      renderWhatsApp();
+      $('whatsappFeedback').textContent = error.message;
+      $('whatsappFeedback').className = 'telegram-feedback error';
+    }
+  });
+  $('whatsappRemove')?.addEventListener('click', async () => {
+    if (!await showConfirm('Remove the WhatsApp connection and disconnect the authorized number?', 'Remove')) return;
+    try {
+      S.whatsapp = await api('DELETE', '/api/whatsapp/credentials');
+      renderWhatsApp();
+    } catch (error) {
+      showFeedback(error.message, 'error');
+    }
+  });
+  $('whatsappDisconnect')?.addEventListener('click', async () => {
+    if (!await showConfirm('Disconnect this WhatsApp number?', 'Disconnect')) return;
+    try {
+      S.whatsapp = await api('DELETE', '/api/whatsapp/pairing');
+      renderWhatsApp();
+    } catch (error) {
+      showFeedback(error.message, 'error');
+    }
+  });
+  $('whatsappCopyCallback').addEventListener('click', async event => {
+    await navigator.clipboard.writeText(callbackUrl);
+    event.target.textContent = 'Callback copied';
+  });
+  $('whatsappCopyVerify').addEventListener('click', async event => {
+    await navigator.clipboard.writeText(state.verify_token || '');
+    event.target.textContent = 'Token copied';
+  });
+  $('whatsappRegenerateVerify').addEventListener('click', async () => {
+    if (!await showConfirm('Generate a new verify token? Meta must verify the webhook again.', 'Generate')) return;
+    try {
+      S.whatsapp = await api('PUT', API.whatsapp.update(), { regenerate_verify_token: true });
+      renderWhatsApp();
+    } catch (error) {
+      showFeedback(error.message, 'error');
+    }
+  });
+  $('whatsappPair')?.addEventListener('click', async event => {
+    event.target.disabled = true;
+    try {
+      const pairing = await api('POST', '/api/whatsapp/pairing-code');
+      $('whatsappPairState').innerHTML = `
+        <div class="telegram-pair-code">
+          <div class="telegram-pair-code-label">Send this command to ${esc(displayNumber)} in WhatsApp</div>
+          <div class="telegram-pair-command mono">${esc(pairing.command)}</div>
+          <div class="telegram-pair-help">Waiting for the command in WhatsApp. This page updates automatically.</div>
+          <div class="telegram-actions" style="justify-content:center"><button class="btn outline" type="button" id="whatsappCopyPair">Copy command</button></div>
+        </div>`;
+      $('whatsappCopyPair').addEventListener('click', async copyEvent => {
+        await navigator.clipboard.writeText(pairing.command);
+        copyEvent.target.textContent = 'Command copied';
+      });
+      const expiresAt = Date.parse(pairing.expires_at);
+      whatsappPairPoll = setInterval(async () => {
+        if (Date.now() >= expiresAt) {
+          stopWhatsAppPairPolling();
+          const help = $('whatsappPairState')?.querySelector('.telegram-pair-help');
+          if (help) help.textContent = 'This pairing code expired. Generate a new one.';
+          return;
+        }
+        try {
+          const latest = await api('GET', '/api/whatsapp');
+          if (latest.paired) {
+            S.whatsapp = latest;
+            renderWhatsApp();
+          }
+        } catch (_) {}
+      }, 2000);
+    } catch (error) {
+      event.target.disabled = false;
+      showFeedback(error.message, 'error');
+    }
+  });
+}
+
 function heartbeatAgentKey(agent) {
   return String(agent?.key ?? agent?.id ?? '');
 }
@@ -1771,6 +2115,24 @@ function renderHeartbeat() {
             <textarea id="heartbeatInstructions" maxlength="2000" placeholder="Describe what should trigger an update.">${esc(S.heartbeat.instructions || '')}</textarea>
           </label>
         </div>
+        <div>
+          <h3>Send notifications to</h3>
+          <p>Web notifications are always saved. Choose which connected messaging channels should also receive alerts.</p>
+        </div>
+        <div class="heartbeat-destinations">
+          <label class="heartbeat-destination locked">
+            <input type="checkbox" checked disabled>
+            <span>Web dashboard · always on</span>
+          </label>
+          <label class="heartbeat-destination">
+            <input type="checkbox" id="heartbeatNotifyTelegram"${S.heartbeat.notify_telegram ? ' checked' : ''}>
+            <span>Telegram</span>
+          </label>
+          <label class="heartbeat-destination">
+            <input type="checkbox" id="heartbeatNotifyWhatsApp"${S.heartbeat.notify_whatsapp ? ' checked' : ''}>
+            <span>WhatsApp</span>
+          </label>
+        </div>
         <div class="heartbeat-section-divider"></div>
         <div>
           <h3>Tools heartbeat can use</h3>
@@ -1872,6 +2234,8 @@ function heartbeatFormPayload(enabled = Boolean(S.heartbeat.enabled)) {
     interval_minutes: Number($('heartbeatInterval').value),
     instructions: $('heartbeatInstructions').value.trim(),
     selected_tools,
+    notify_telegram: Boolean($('heartbeatNotifyTelegram')?.checked),
+    notify_whatsapp: Boolean($('heartbeatNotifyWhatsApp')?.checked),
   };
 }
 
@@ -1939,19 +2303,27 @@ function drawWorkflowLinks() {
   const sx = (sourceRect.left + sourceRect.width / 2 - canvasRect.left) / canvasZoom;
   const sy = (sourceRect.bottom - canvasRect.top) / canvasZoom;
   const targets = canvas.querySelectorAll('.agent-grid .agent-node');
-  const paths = [`<defs><marker id="input-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4c7d66" stroke="none"/></marker></defs>`];
-  const telegram = $('node-telegram');
-  if (telegram) {
-    const inputRect = telegram.getBoundingClientRect();
+  const paths = [`<defs>
+    <marker id="telegram-input-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4c7d66" stroke="none"/></marker>
+    <marker id="whatsapp-input-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#35a862" stroke="none"/></marker>
+  </defs>`];
+  const inputChannels = [
+    { node: $('node-telegram'), port: '.telegram-input-port', marker: 'telegram-input-arrow', className: '' },
+    { node: $('node-whatsapp'), port: '.whatsapp-input-port', marker: 'whatsapp-input-arrow', className: ' whatsapp-input-link' },
+  ];
+  inputChannels.forEach(channel => {
+    if (!channel.node) return;
+    const inputRect = channel.node.getBoundingClientRect();
     const inputX = (inputRect.right - canvasRect.left) / canvasZoom;
     const inputY = (inputRect.top + inputRect.height / 2 - canvasRect.top) / canvasZoom;
-    const supervisorPort = source.querySelector('.input-left');
+    const supervisorPort = source.querySelector(channel.port);
+    if (!supervisorPort) return;
     const portRect = supervisorPort.getBoundingClientRect();
     const supervisorX = (portRect.left - canvasRect.left) / canvasZoom;
     const supervisorY = (portRect.top + portRect.height / 2 - canvasRect.top) / canvasZoom;
     const bend = inputX + Math.max(14, (supervisorX - inputX) * .5);
-    paths.push(`<path class="input-link" marker-end="url(#input-arrow)" d="M ${inputX} ${inputY} C ${bend} ${inputY}, ${bend} ${supervisorY}, ${supervisorX} ${supervisorY}"/>`);
-  }
+    paths.push(`<path class="input-link${channel.className}" marker-end="url(#${channel.marker})" d="M ${inputX} ${inputY} C ${bend} ${inputY}, ${bend} ${supervisorY}, ${supervisorX} ${supervisorY}"/>`);
+  });
   targets.forEach(target => {
     const rect = target.getBoundingClientRect();
     const tx = (rect.left + rect.width / 2 - canvasRect.left) / canvasZoom;
@@ -3091,6 +3463,15 @@ $('content').addEventListener('click', async e => {
     renderTelegram();
     return;
   }
+  const whatsappNode = e.target.closest('[data-open-whatsapp]');
+  if (whatsappNode) {
+    S.tab = 'whatsapp';
+    document.querySelectorAll('.nav-item').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tab === 'whatsapp');
+    });
+    renderWhatsApp();
+    return;
+  }
   const supervisorNode = e.target.closest('[data-open-supervisor]');
   if (supervisorNode) {
     openSupervisor();
@@ -3149,6 +3530,12 @@ $('content').addEventListener('keydown', e => {
   if (telegramNode && (e.key === 'Enter' || e.key === ' ')) {
     e.preventDefault();
     telegramNode.click();
+    return;
+  }
+  const whatsappNode = e.target.closest('[data-open-whatsapp]');
+  if (whatsappNode && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault();
+    whatsappNode.click();
     return;
   }
   const supervisorNode = e.target.closest('[data-open-supervisor]');
@@ -3270,6 +3657,7 @@ document.querySelectorAll('.nav-item').forEach(btn => {
       stopTelegramPairPolling();
       stopTelegramStatusPolling();
     }
+    if (btn.dataset.tab !== 'whatsapp') stopWhatsAppPairPolling();
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     S.tab = btn.dataset.tab;
