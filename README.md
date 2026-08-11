@@ -439,7 +439,7 @@ instructions, permissions, and knowledge sources it trusts.
 - Python 3.10+
 - Ollama for the default local supervisor configuration, or a configured Mistral or
   Groq supervisor profile
-- Node.js 18+ only when a selected stdio MCP package requires it
+- Node.js 20.19+ (or 22.12+) to build the React interface and run Node-based MCP servers
 - FFmpeg for browser voice uploads
 - Provider credentials only for cloud services you choose to enable
 
@@ -453,6 +453,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
+# Build the React web interface
+cd frontend
+npm install
+npm run build
+cd ..
+
 # Default local supervisor build
 ollama create mounir -f modelfiles/mounir.Modelfile
 
@@ -462,6 +468,11 @@ python server.py
 Open `http://127.0.0.1:8000` for the assistant and use **Agent Studio** to manage
 models, MCP servers, specialists, voice, Telegram, WhatsApp, Heartbeat, and profile
 settings.
+
+For frontend development, run `npm run dev` from `frontend/` in a second terminal
+while the FastAPI server is running. Vite proxies API, image, and WebSocket traffic
+to `127.0.0.1:8000`. Production assets are generated in `web-dist/` and served by
+FastAPI; generated files and `node_modules/` are intentionally excluded from Git.
 
 To use a different existing Ollama model without creating the custom build:
 
@@ -535,8 +546,8 @@ server.py                 FastAPI web, WebSocket, messaging channels, and Heartb
 cli.py                    Text REPL
 voice_cli.py              Push-to-talk and wake-word voice client
 telegram_cli.py           Standalone Telegram runtime
-index.html                Main assistant dashboard
-admin.html                Agent Studio
+frontend/                 React + TypeScript source for the dashboard and Agent Studio
+web-dist/                 Generated production frontend (created by npm run build)
 images/                   Interface assets
 modelfiles/               Local Ollama model definition
 
@@ -567,6 +578,8 @@ tests/
 
 - **FastAPI** serves the dashboard, Agent Studio, REST configuration APIs, and the
   streaming chat WebSocket.
+- **React and TypeScript** provide feature-based dashboard and Agent Studio views;
+  TanStack Query owns server state and React Flow renders the live topology.
 - **LangGraph** compiles the supervisor and active specialist topology.
 - **SQLite** is the local source of truth for runtime configuration and cached MCP
   metadata.

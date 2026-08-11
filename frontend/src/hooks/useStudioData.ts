@@ -1,0 +1,30 @@
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../api/client'
+
+export const keys = {
+  profile: ['profile'] as const,
+  overview: ['overview'] as const,
+  models: ['models'] as const,
+  servers: ['servers'] as const,
+  agents: ['agents'] as const,
+  voice: ['voice'] as const,
+  telegram: ['telegram'] as const,
+  whatsapp: ['whatsapp'] as const,
+  heartbeat: ['heartbeat'] as const,
+}
+
+export function useProfile() {
+  return useQuery({ queryKey: keys.profile, queryFn: api.profile.get })
+}
+export function useOverview() {
+  return useQuery({ queryKey: keys.overview, queryFn: api.overview.get })
+}
+export function useModels() {
+  return useQuery({ queryKey: keys.models, queryFn: api.models.list })
+}
+export function useServers() {
+  return useQuery({ queryKey: keys.servers, queryFn: api.servers.list })
+}
+export function useAgents() {
+  return useQuery({ queryKey: keys.agents, queryFn: api.agents.list })
+}

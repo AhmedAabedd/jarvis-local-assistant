@@ -1,0 +1,58 @@
+import { lazy, Suspense } from 'react'
+import { Navigate, Route, Routes } from 'react-router-dom'
+import { Loading } from '../components/ui/Loading'
+
+const ChatPage = lazy(() =>
+  import('../features/chat/ChatPage').then((module) => ({ default: module.ChatPage })),
+)
+const StudioLayout = lazy(() =>
+  import('../features/studio/StudioLayout').then((module) => ({ default: module.StudioLayout })),
+)
+const OverviewPage = lazy(() =>
+  import('../features/overview/OverviewPage').then((module) => ({ default: module.OverviewPage })),
+)
+const ResourcesPage = lazy(() =>
+  import('../features/resources/ResourcesPage').then((module) => ({
+    default: module.ResourcesPage,
+  })),
+)
+const VoicePage = lazy(() =>
+  import('../features/settings/VoicePage').then((module) => ({ default: module.VoicePage })),
+)
+const TelegramPage = lazy(() =>
+  import('../features/settings/TelegramPage').then((module) => ({ default: module.TelegramPage })),
+)
+const WhatsAppPage = lazy(() =>
+  import('../features/settings/WhatsAppPage').then((module) => ({ default: module.WhatsAppPage })),
+)
+const HeartbeatPage = lazy(() =>
+  import('../features/settings/HeartbeatPage').then((module) => ({
+    default: module.HeartbeatPage,
+  })),
+)
+const ProfilePage = lazy(() =>
+  import('../features/settings/ProfilePage').then((module) => ({ default: module.ProfilePage })),
+)
+
+export function App() {
+  return (
+    <Suspense fallback={<Loading label="Opening Mounir…" />}>
+      <Routes>
+        <Route path="/" element={<ChatPage />} />
+        <Route path="/admin" element={<StudioLayout />}>
+          <Route index element={<OverviewPage />} />
+          <Route path="models" element={<ResourcesPage kind="models" />} />
+          <Route path="servers" element={<ResourcesPage kind="servers" />} />
+          <Route path="agents" element={<ResourcesPage kind="agents" />} />
+          <Route path="voice" element={<VoicePage />} />
+          <Route path="telegram" element={<TelegramPage />} />
+          <Route path="whatsapp" element={<WhatsAppPage />} />
+          <Route path="heartbeat" element={<HeartbeatPage />} />
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="*" element={<Navigate to="/admin" replace />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Suspense>
+  )
+}

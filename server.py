@@ -2,7 +2,7 @@
 FastAPI backend for the Mounir web UI.
 
 Serves:
-  - GET  /                 -> the dashboard (index.html)
+  - GET  / and /admin      -> the compiled React application
   - WS   /ws/chat          -> text chat, streams Mounir's reply token by token
   - POST /api/voice        -> upload audio, returns transcript + spoken reply (base64 wav)
 
@@ -40,7 +40,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -63,7 +63,8 @@ ALLOWED_HOSTS = [
 ]
 _default_origins = (
     f"http://localhost:{WEB_PORT},http://127.0.0.1:{WEB_PORT},"
-    f"http://[::1]:{WEB_PORT}"
+    f"http://[::1]:{WEB_PORT},http://localhost:5173,"
+    "http://127.0.0.1:5173,http://[::1]:5173"
 )
 ALLOWED_ORIGINS = {
     origin.strip()
@@ -316,20 +317,42 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="Mounir", lifespan=_lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 app.mount("/images", StaticFiles(directory=ROOT_DIR / "images"), name="images")
+WEB_DIST_DIR = ROOT_DIR / "web-dist"
+if WEB_DIST_DIR.is_dir():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=WEB_DIST_DIR / "assets"),
+        name="web-assets",
+    )
 
-def _read_html(filename: str) -> str:
-    with (ROOT_DIR / filename).open("r", encoding="utf-8") as f:
-        return f.read()
+
+def _frontend_response():
+    """Serve the compiled React shell or explain how to create it."""
+    entry = WEB_DIST_DIR / "index.html"
+    if entry.is_file():
+        return FileResponse(entry)
+    return HTMLResponse(
+        "<h1>Frontend build missing</h1>"
+        "<p>Run <code>cd frontend &amp;&amp; npm install &amp;&amp; npm run build</code>, "
+        "then restart Mounir.</p>",
+        status_code=503,
+    )
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def root():
-    return _read_html("index.html")
+    return _frontend_response()
 
 
-@app.get("/admin", response_class=HTMLResponse)
+@app.get("/admin")
 async def admin():
-    return _read_html("admin.html")
+    return _frontend_response()
+
+
+@app.get("/admin/{path:path}")
+async def admin_route(path: str):
+    """Let React Router handle direct links inside Agent Studio."""
+    return _frontend_response()
 
 
 @app.get("/api/conversation")
@@ -816,19 +839,20 @@ async def update_builtin_agent(agent_key: str, req: dict):
 
 @app.get("/api/models")
 async def list_models():
-    return db.list_models()
+    return [db.model_for_api(model) for model in db.list_models()]
 
 
 @app.post("/api/models")
 async def create_model(req: dict):
     try:
-        return db.add_model(
+        model = db.add_model(
             req.get("name", ""),
             req.get("model", ""),
             req.get("provider", ""),
             req.get("base_url", ""),
             req.get("api_key", ""),
         )
+        return db.model_for_api(model)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -840,26 +864,40 @@ async def update_model(model_id: int, req: dict):
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if not m:
-        return JSONResponse({"error": "Model not found or in use."}, status_code=404)
-    return m
+        return JSONResponse({"error": "Model not found."}, status_code=404)
+    return db.model_for_api(m)
+
+
+def _restricted_delete_response(result: db.DeletionResult, resource: str):
+    """Translate a repository delete outcome into one consistent API response."""
+    if result.deleted:
+        return JSONResponse({"ok": True})
+    if result.status == "not_found":
+        return JSONResponse({"error": f"{resource} not found."}, status_code=404)
+    used_by = ", ".join(result.dependencies)
+    return JSONResponse(
+        {
+            "error": f"This {resource.lower()} cannot be deleted because it is used by {used_by}.",
+            "dependencies": result.dependencies,
+        },
+        status_code=409,
+    )
 
 
 @app.delete("/api/models/{model_id}")
 async def delete_model(model_id: int):
-    if db.delete_model(model_id):
-        return JSONResponse({"ok": True})
-    return JSONResponse({"error": "Model not found or in use."}, status_code=404)
+    return _restricted_delete_response(db.delete_model_result(model_id), "Model")
 
 
 @app.get("/api/mcp-servers")
 async def list_servers():
-    return db.list_servers()
+    return [db.server_for_api(server) for server in db.list_servers()]
 
 
 @app.post("/api/mcp-servers")
 async def create_server(req: dict):
     try:
-        return db.add_server(
+        server = db.add_server(
             req.get("name", ""),
             req.get("connection", ""),
             transport=req.get("transport", "stdio"),
@@ -868,6 +906,7 @@ async def create_server(req: dict):
             description=req.get("description", ""),
             auth_scheme=req.get("auth_scheme", ""),
         )
+        return db.server_for_api(server)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -879,8 +918,8 @@ async def update_server(server_id: int, req: dict):
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if not s:
-        return JSONResponse({"error": "Server not found or in use."}, status_code=404)
-    return s
+        return JSONResponse({"error": "Server not found."}, status_code=404)
+    return db.server_for_api(s)
 
 
 @app.get("/api/mcp-servers/{server_id}/tools")
@@ -1138,14 +1177,14 @@ async def run_server_setup_action(server_id: int, action_id: str):
 
 @app.delete("/api/mcp-servers/{server_id}")
 async def delete_server(server_id: int):
-    if db.delete_server(server_id):
-        return JSONResponse({"ok": True})
-    return JSONResponse({"error": "Server not found or in use."}, status_code=404)
+    return _restricted_delete_response(
+        db.delete_server_result(server_id), "MCP server"
+    )
 
 
 @app.get("/api/subagents")
 async def list_subagents():
-    return db.list_subagents()
+    return [db.subagent_for_api(agent) for agent in db.list_subagents()]
 
 
 def _decode_subagent_icon(value) -> dict:
@@ -1197,7 +1236,7 @@ async def create_subagent(req: dict):
     try:
         mcp_agents._validate_agent_name(req.get("name", ""))
         icon = _decode_subagent_icon(req.get("icon_data")) if "icon_data" in req else {}
-        return db.add_subagent(
+        subagent = db.add_subagent(
             req.get("name", ""),
             req.get("description", ""),
             req.get("system_prompt", ""),
@@ -1210,6 +1249,7 @@ async def create_subagent(req: dict):
             enabled=req.get("enabled", True),
             **icon,
         )
+        return db.subagent_for_api(subagent)
     except (ValueError, TypeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -1228,7 +1268,7 @@ async def update_subagent(subagent_id: int, req: dict):
         return JSONResponse({"error": str(exc)}, status_code=400)
     if not s:
         return JSONResponse({"error": "Subagent not found."}, status_code=404)
-    return s
+    return db.subagent_for_api(s)
 
 
 @app.delete("/api/subagents/{subagent_id}")

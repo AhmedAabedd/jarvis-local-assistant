@@ -26,6 +26,7 @@ import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -40,6 +41,18 @@ HEARTBEAT_DEFAULT_INSTRUCTIONS = (
 )
 
 
+@dataclass(frozen=True)
+class DeletionResult:
+    """Outcome of a restricted delete, including what still uses the record."""
+
+    status: str
+    dependencies: tuple[str, ...] = ()
+
+    @property
+    def deleted(self) -> bool:
+        return self.status == "deleted"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -47,7 +60,7 @@ def _now() -> str:
 @contextmanager
 def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
     # UI-entered credentials are stored locally in this DB. Restrict it to the
     # current OS user even when the process was started with a permissive umask.
     try:
@@ -57,13 +70,20 @@ def _connect():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     try:
         yield conn
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
+    # WAL lets readers continue while a short configuration write is committed.
+    # This matters when chat, heartbeats, and Agent Studio are active together.
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS models (
@@ -512,6 +532,21 @@ def _json_object(value, field: str) -> str:
     return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
 
+def _merge_masked_json_object(value, current, field: str) -> str:
+    """Preserve stored values represented by blank placeholders in edit forms.
+
+    Removing a key still removes its credential; only a present key with an empty
+    value inherits the existing value.
+    """
+    incoming = json.loads(_json_object(value, field))
+    existing = json.loads(_json_object(current, field))
+    merged = {
+        key: existing.get(key, "") if item == "" else item
+        for key, item in incoming.items()
+    }
+    return json.dumps(merged, ensure_ascii=False, sort_keys=True)
+
+
 def _json_string_list(value, field: str) -> str:
     """Validate and canonicalize a JSON list of unique, non-empty strings."""
     if value in (None, ""):
@@ -565,6 +600,56 @@ def _friendly_integrity_error(exc: sqlite3.IntegrityError) -> ValueError:
     if "FOREIGN KEY constraint failed" in message:
         return ValueError("The selected model or MCP server does not exist.")
     return ValueError(message)
+
+
+def _masked_json_object(value) -> tuple[str, bool]:
+    """Keep credential names useful to the UI without returning their values."""
+    try:
+        parsed = json.loads(value or "{}") if isinstance(value, str) else (value or {})
+    except (TypeError, json.JSONDecodeError):
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    configured = any(str(item) for item in parsed.values())
+    masked = {str(key): "" for key in parsed}
+    return json.dumps(masked, ensure_ascii=False, sort_keys=True), configured
+
+
+def model_for_api(model: dict | None) -> dict | None:
+    """Return a model record safe for a management API response."""
+    if model is None:
+        return None
+    result = dict(model)
+    result["api_key_configured"] = bool(result.pop("api_key", ""))
+    return result
+
+
+def server_for_api(server: dict | None) -> dict | None:
+    """Return MCP metadata and credential names, never credential values."""
+    if server is None:
+        return None
+    result = dict(server)
+    result["headers"], headers_configured = _masked_json_object(result.get("headers"))
+    result["env"], env_configured = _masked_json_object(result.get("env"))
+    result["headers_configured"] = headers_configured
+    result["env_configured"] = env_configured
+    result["credentials_configured"] = headers_configured or env_configured
+    return result
+
+
+def subagent_for_api(subagent: dict | None) -> dict | None:
+    """Remove joined model/server credentials from a subagent API response."""
+    if subagent is None:
+        return None
+    result = dict(subagent)
+    result["api_key_configured"] = bool(result.pop("api_key", ""))
+    headers = result.pop("headers", "{}")
+    env = result.pop("env", "{}")
+    _, headers_configured = _masked_json_object(headers)
+    _, env_configured = _masked_json_object(env)
+    result["mcp_credentials_configured"] = headers_configured or env_configured
+    result["mcp_server_name"] = result.get("server_name", "")
+    return result
 
 
 def _migrate_legacy(conn: sqlite3.Connection) -> None:
@@ -2419,13 +2504,48 @@ def update_model(model_id: int, **kwargs) -> dict | None:
 
 
 def delete_model(model_id: int) -> bool:
+    return delete_model_result(model_id).deleted
+
+
+def delete_model_result(model_id: int) -> DeletionResult:
     with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            "SELECT 1 FROM models WHERE id = ?", (model_id,)
+        ).fetchone() is None:
+            conn.rollback()
+            return DeletionResult("not_found")
+
+        dependencies = []
+        if conn.execute(
+            "SELECT 1 FROM supervisor_settings WHERE model_id = ?", (model_id,)
+        ).fetchone():
+            dependencies.append("the supervisor")
+        builtin_rows = conn.execute(
+            "SELECT agent_key FROM builtin_agent_settings WHERE model_id = ? ORDER BY agent_key",
+            (model_id,),
+        ).fetchall()
+        for row in builtin_rows:
+            definition = builtin_agents.definition(row["agent_key"])
+            dependencies.append(
+                f"the {definition['name']} built-in agent"
+                if definition
+                else f"the {row['agent_key']} built-in agent"
+            )
+        agent_rows = conn.execute(
+            "SELECT name FROM subagents WHERE model_id = ? ORDER BY name", (model_id,)
+        ).fetchall()
+        dependencies.extend(f"the {row['name']} subagent" for row in agent_rows)
+        if dependencies:
+            conn.rollback()
+            return DeletionResult("in_use", tuple(dependencies))
         try:
             cur = conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
             conn.commit()
-            return cur.rowcount > 0
+            return DeletionResult("deleted" if cur.rowcount else "not_found")
         except sqlite3.IntegrityError:
-            return False
+            conn.rollback()
+            return DeletionResult("in_use", ("another saved configuration",))
 
 
 # -----------------------------------------------------------------------------
@@ -2535,9 +2655,13 @@ def update_server(server_id: int, **kwargs) -> dict | None:
     if "name" in fields:
         fields["name"] = _required(fields["name"], "name")
     if "headers" in fields:
-        fields["headers"] = _json_object(fields["headers"], "headers")
+        fields["headers"] = _merge_masked_json_object(
+            fields["headers"], current["headers"], "headers"
+        )
     if "env" in fields:
-        fields["env"] = _json_object(fields["env"], "environment")
+        fields["env"] = _merge_masked_json_object(
+            fields["env"], current["env"], "environment"
+        )
     if "description" in fields:
         fields["description"] = (fields["description"] or "").strip()
     if "auth_scheme" in fields:
@@ -2566,13 +2690,32 @@ def update_server(server_id: int, **kwargs) -> dict | None:
 
 
 def delete_server(server_id: int) -> bool:
+    return delete_server_result(server_id).deleted
+
+
+def delete_server_result(server_id: int) -> DeletionResult:
     with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            "SELECT 1 FROM mcp_servers WHERE id = ?", (server_id,)
+        ).fetchone() is None:
+            conn.rollback()
+            return DeletionResult("not_found")
+        agent_rows = conn.execute(
+            "SELECT name FROM subagents WHERE mcp_server_id = ? ORDER BY name",
+            (server_id,),
+        ).fetchall()
+        dependencies = tuple(f"the {row['name']} subagent" for row in agent_rows)
+        if dependencies:
+            conn.rollback()
+            return DeletionResult("in_use", dependencies)
         try:
             cur = conn.execute("DELETE FROM mcp_servers WHERE id = ?", (server_id,))
             conn.commit()
-            return cur.rowcount > 0
+            return DeletionResult("deleted" if cur.rowcount else "not_found")
         except sqlite3.IntegrityError:
-            return False
+            conn.rollback()
+            return DeletionResult("in_use", ("another saved configuration",))
 
 
 def get_server_tools_state(server_id: int) -> dict | None:

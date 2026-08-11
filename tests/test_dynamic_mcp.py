@@ -988,6 +988,50 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertFalse(db.delete_model(model["id"]))
         self.assertFalse(db.delete_server(server["id"]))
 
+        model_result = db.delete_model_result(model["id"])
+        server_result = db.delete_server_result(server["id"])
+        self.assertEqual(model_result.status, "in_use")
+        self.assertIn("the Helper subagent", model_result.dependencies)
+        self.assertEqual(server_result.status, "in_use")
+        self.assertEqual(server_result.dependencies, ("the Helper subagent",))
+
+    def test_api_views_mask_credentials_and_masked_updates_preserve_them(self):
+        db.init()
+        model = db.add_model(
+            "Private model", "model-id", "Cloud", "https://models.test/v1", "model-key"
+        )
+        server = db.add_server(
+            "Private server",
+            "https://example.test/mcp",
+            transport="streamable_http",
+            headers={"Authorization": "Bearer server-key"},
+            auth_scheme="bearer",
+        )
+
+        public_model = db.model_for_api(model)
+        public_server = db.server_for_api(server)
+        self.assertNotIn("api_key", public_model)
+        self.assertTrue(public_model["api_key_configured"])
+        self.assertEqual(json.loads(public_server["headers"]), {"Authorization": ""})
+        self.assertTrue(public_server["headers_configured"])
+
+        db.update_server(server["id"], headers=public_server["headers"])
+        self.assertEqual(
+            db.build_server_spec(server["id"])["headers"],
+            {"Authorization": "Bearer server-key"},
+        )
+
+    def test_connection_rolls_back_failed_write(self):
+        db.init()
+        with self.assertRaisesRegex(RuntimeError, "stop"):
+            with db._connect() as conn:
+                conn.execute(
+                    "INSERT INTO models (name, model, provider, base_url) VALUES (?, ?, ?, ?)",
+                    ("Rolled back", "model", "Local", "http://localhost:11434/v1"),
+                )
+                raise RuntimeError("stop")
+        self.assertEqual(db.list_models(), [])
+
     def test_transport_and_json_are_validated(self):
         db.init()
         with self.assertRaisesRegex(ValueError, "local command"):
@@ -1408,6 +1452,66 @@ class AdminApiTests(TemporaryDatabaseTest):
 
         asyncio.run(exercise_api())
 
+    def test_admin_delete_api_distinguishes_dependencies_from_missing_records(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+        model = db.add_model(
+            "Delete model", "delete/model", "Ollama",
+            "http://localhost:11434/v1", "private-model-key",
+        )
+        mcp_server = db.add_server(
+            "Delete server", "delete-server", env={"PRIVATE_TOKEN": "server-secret"}
+        )
+        subagent = db.add_subagent(
+            "Delete helper", "Handles deletion tests.", "",
+            model["id"], mcp_server["id"],
+        )
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                models = (await client.get("/api/models")).json()
+                servers = (await client.get("/api/mcp-servers")).json()
+                agents = (await client.get("/api/subagents")).json()
+                self.assertNotIn("api_key", models[0])
+                self.assertNotIn("server-secret", json.dumps(servers))
+                self.assertNotIn("private-model-key", json.dumps(agents))
+                self.assertNotIn("server-secret", json.dumps(agents))
+
+                model_conflict = await client.delete(f"/api/models/{model['id']}")
+                server_conflict = await client.delete(
+                    f"/api/mcp-servers/{mcp_server['id']}"
+                )
+                self.assertEqual(model_conflict.status_code, 409)
+                self.assertEqual(server_conflict.status_code, 409)
+                self.assertIn("Delete helper", model_conflict.json()["error"])
+                self.assertIn("Delete helper", server_conflict.json()["error"])
+
+                self.assertEqual(
+                    (await client.delete(f"/api/subagents/{subagent['id']}")).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    (await client.delete(f"/api/models/{model['id']}")).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    (
+                        await client.delete(f"/api/mcp-servers/{mcp_server['id']}")
+                    ).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    (await client.delete(f"/api/models/{model['id']}")).status_code,
+                    404,
+                )
+
+        asyncio.run(exercise_api())
+
     def test_admin_flow_persists_transport_and_tests_connection(self):
         import httpx
         import server as web_server
@@ -1589,6 +1693,11 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(named_header.json()["auth_scheme"], "header")
                 self.assertEqual(
                     json.loads(named_header.json()["headers"]),
+                    {"X-API-Key": ""},
+                )
+                self.assertTrue(named_header.json()["headers_configured"])
+                self.assertEqual(
+                    db.build_server_spec(remote_auth.json()["id"])["headers"],
                     {"X-API-Key": "service-key"},
                 )
                 untouched_tools = await client.get(

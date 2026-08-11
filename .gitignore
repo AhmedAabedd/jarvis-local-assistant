@@ -5,6 +5,9 @@ venv/
 .mounir/
 *.json.bak
 .DS_Store
+frontend/node_modules/
+frontend/*.tsbuildinfo
+web-dist/
 
 # personal data - Mounir long-term knowledge stays local
 knowledge/
