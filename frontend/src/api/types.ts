@@ -57,6 +57,9 @@ export interface Subagent {
   dedupe_tools: string[] | string
   enabled: boolean | number
   has_icon?: boolean
+  parent_agent_id?: Id | null
+  parent_name?: string
+  child_count?: number
 }
 
 export interface BuiltinAgent {

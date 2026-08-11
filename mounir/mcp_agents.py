@@ -47,7 +47,7 @@ def node_name(name: str) -> str:
 
 # Names a dynamic agent may not take: the built-in graph nodes and their
 # delegate tools are already wired by hand.
-_RESERVED = {"supervisor", "coder", "media", "knowledge", "system"}
+_RESERVED = {"supervisor", "media", "knowledge", "system"}
 
 
 def _validate_agent_name(name: str, *, exclude_id: int | None = None) -> None:
@@ -68,7 +68,7 @@ def _validate_agent_name(name: str, *, exclude_id: int | None = None) -> None:
 # --- runtime-facing API (used by the graph) ------------------------------------
 
 def load() -> list[dict]:
-    """All active subagents, resolved into the flat spec the graph expects."""
+    """All active subagents with their parent relationships resolved."""
     db.init()
     return db.build_specs()
 
@@ -169,7 +169,10 @@ def _servers_cmd(args):
 def _agents_cmd(args):
     if args.action == "list":
         rows = db.list_subagents()
-        _print_table(rows, ["id", "name", "enabled", "model_name", "server_name", "parent"])
+        _print_table(
+            rows,
+            ["id", "name", "enabled", "model_name", "server_name", "parent_name"],
+        )
     elif args.action == "show":
         if not args.name:
             raise ValueError("--name is required when showing an agent.")
@@ -194,7 +197,7 @@ def _agents_cmd(args):
             args.model_id,
             args.server_id,
             confirm_tool_calls=args.confirm_tool_calls is not False,
-            parent="supervisor",
+            parent_agent_id=args.parent_id,
             confirm_tools=(
                 [name.strip() for name in args.confirm_tools.split(",") if name.strip()]
                 if args.confirm_tools is not None
@@ -218,6 +221,8 @@ def _agents_cmd(args):
             fields["model_id"] = args.model_id
         if args.server_id is not None:
             fields["mcp_server_id"] = args.server_id
+        if args.parent_id is not None:
+            fields["parent_agent_id"] = args.parent_id or None
         if args.confirm_tool_calls is not None:
             fields["confirm_tool_calls"] = args.confirm_tool_calls
         if args.confirm_tools is not None:
@@ -287,6 +292,11 @@ def _main() -> int:
     p_ag.add_argument("--prompt")
     p_ag.add_argument("--model-id", type=int)
     p_ag.add_argument("--server-id", type=int)
+    p_ag.add_argument(
+        "--parent-id",
+        type=int,
+        help="Parent subagent ID; use 0 to attach directly to Mounir.",
+    )
     p_ag.add_argument(
         "--confirm-tool-calls",
         action=argparse.BooleanOptionalAction,

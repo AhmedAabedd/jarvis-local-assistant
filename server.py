@@ -1240,7 +1240,7 @@ async def create_subagent(req: dict):
             req.get("model_id"),
             req.get("mcp_server_id"),
             confirm_tool_calls=req.get("confirm_tool_calls", True),
-            parent="supervisor",
+            parent_agent_id=req.get("parent_agent_id"),
             confirm_tools=req.get("confirm_tools"),
             dedupe_tools=req.get("dedupe_tools"),
             enabled=req.get("enabled", True),
@@ -1270,8 +1270,11 @@ async def update_subagent(subagent_id: int, req: dict):
 
 @app.delete("/api/subagents/{subagent_id}")
 async def delete_subagent(subagent_id: int):
-    if db.delete_subagent(subagent_id):
-        return JSONResponse({"ok": True})
+    try:
+        if db.delete_subagent(subagent_id):
+            return JSONResponse({"ok": True})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     return JSONResponse({"error": "Subagent not found."}, status_code=404)
 
 

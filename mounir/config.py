@@ -66,7 +66,7 @@ def build_system_prompt(profile: dict | None = None) -> str:
         "You have no web search unless a currently supplied tool provides it.\n\n"
         "HARD RULES:\n"
         "1. Never claim you did something unless you actually called the tool THIS "
-        "turn and saw its result. Do not write \"done\", \"task sent to the coder\", "
+        "turn and saw its result. Do not write \"done\", \"task delegated\", "
         "\"file updated\", or similar from your head — if you didn't call the tool, "
         "you didn't do it, and saying otherwise is lying. Perform actions by calling "
         "tools, never by describing them.\n"
@@ -269,12 +269,11 @@ MISTRAL_BASE_URL: str = os.environ.get("MISTRAL_BASE_URL", "https://api.mistral.
 USE_MISTRAL: bool = os.environ.get("USE_MISTRAL", "false").lower() in ("1", "true", "yes")
 
 
-# --- NVIDIA (build.nvidia.com) — powers the coder specialist ----------------
+# --- NVIDIA (build.nvidia.com) -----------------------------------------------
 NVIDIA_API_KEY: str = os.environ.get("NVIDIA_API_KEY", "")
 NVIDIA_BASE_URL: str = os.environ.get(
     "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
 )
-CODER_MODEL: str = os.environ.get("CODER_MODEL", "minimaxai/minimax-m3")
 # Omni (multimodal) model powering the media specialist: reads images, PDFs,
 # audio, and video frames. Must be a model that accepts image/audio content
 # parts on the NVIDIA OpenAI-compatible endpoint.

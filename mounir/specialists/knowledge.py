@@ -34,7 +34,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # one path segment
 
 # Files read this task (via read_knowledge). save_knowledge refuses to REWRITE
 # an existing file and append_knowledge refuses to touch one that hasn't been
-# read yet — same code safeguard as the coder and the supervisor, so the model
+# read yet — the same safeguard used by the supervisor, so the model
 # can't skip the read-before-write rule.
 _files_read: set[str] = set()
 

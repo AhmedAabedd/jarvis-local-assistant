@@ -611,6 +611,12 @@ select:disabled {
   border-color: #3d5047;
   transform: translateY(-1px);
 }
+.resource-row--agent {
+  padding-left: calc(18px + var(--agent-depth, 0) * 28px);
+}
+.resource-row--agent[data-depth] {
+  background: linear-gradient(90deg, rgb(89 201 142 / 5%), transparent 24%), var(--surface);
+}
 .resource-row__identity {
   display: flex;
   align-items: center;
@@ -722,6 +728,13 @@ select:disabled {
 .key-value-editor__title strong {
   font-size: 12px;
 }
+.key-value-editor__title small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
 .key-value-row {
   display: grid;
   grid-template-columns: 1fr 1fr 36px;
@@ -762,6 +775,73 @@ select:disabled {
   color: var(--muted);
   font-size: 10px;
   line-height: 1.4;
+}
+.agent-choice-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.agent-choice {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 16px 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: #0e1512;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
+}
+.agent-choice:hover {
+  border-color: #3d5047;
+  background: #111a16;
+}
+.agent-choice:has(input:checked) {
+  border-color: rgb(89 201 142 / 55%);
+  background: rgb(89 201 142 / 7%);
+}
+.agent-choice input {
+  width: 15px;
+  min-height: auto;
+  margin: 0;
+}
+.agent-choice .avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+}
+.agent-choice__copy {
+  min-width: 0;
+}
+.agent-choice__copy strong,
+.agent-choice__copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-choice__copy strong {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.agent-choice__copy small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.agent-choice__copy .agent-choice__parent {
+  color: var(--muted-2);
+  font-size: 9px;
+}
+.agent-choice-empty {
+  min-height: 90px;
+  margin-top: 12px;
 }
 .availability {
   display: flex;
@@ -1480,6 +1560,9 @@ select:disabled {
   .field--full,
   .detail--full {
     grid-column: auto;
+  }
+  .agent-choice-list {
+    grid-template-columns: 1fr;
   }
   .flow-card {
     height: min(480px, calc(100dvh - 190px));

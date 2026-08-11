@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Bot, ChevronLeft, Database, Edit3, Plus, Save, Server, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
 import type { McpServer, ModelRecord, Subagent } from '../../api/types'
@@ -137,6 +137,32 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       }),
     [data, kind],
   )
+  const listed = useMemo(() => {
+    const entries = data.map((item, index) => ({ item, index, depth: 0 }))
+    if (kind !== 'agents') return entries
+    const ids = new Set(data.map((item) => item.id))
+    const children = new Map<number | null, typeof entries>()
+    entries.forEach((entry) => {
+      const parent = Number((entry.item as Subagent).parent_agent_id) || null
+      const key = parent && ids.has(parent) ? parent : null
+      children.set(key, [...(children.get(key) || []), entry])
+    })
+    const result: typeof entries = []
+    const visited = new Set<number>()
+    const append = (parent: number | null, depth: number) => {
+      ;(children.get(parent) || []).forEach((entry) => {
+        if (visited.has(entry.item.id)) return
+        visited.add(entry.item.id)
+        result.push({ ...entry, depth })
+        append(entry.item.id, depth + 1)
+      })
+    }
+    append(null, 0)
+    entries.forEach((entry) => {
+      if (!visited.has(entry.item.id)) result.push(entry)
+    })
+    return result
+  }, [data, kind])
 
   const openList = () => {
     setEditing(undefined)
@@ -236,6 +262,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                   item={editing as Subagent | undefined}
                   models={models.data || []}
                   servers={servers.data || []}
+                  agents={agents.data || []}
                   formId={formId}
                   onSubmit={submit}
                 />
@@ -261,14 +288,16 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           <div className="card empty-state">No {info.title.toLowerCase()} saved yet.</div>
         ) : (
           <div className="resource-list">
-            {data.map((item, index) => {
+            {listed.map(({ item, index, depth }) => {
               const row = rows[index]
               const Icon = info.icon
               const isAgent = kind === 'agents'
               return (
                 <button
-                  className="resource-row"
+                  className={`resource-row ${isAgent ? 'resource-row--agent' : ''}`}
                   key={item.id}
+                  style={{ '--agent-depth': depth } as CSSProperties}
+                  data-depth={depth || undefined}
                   onClick={() => {
                     setEditing(undefined)
                     setSelected(item)

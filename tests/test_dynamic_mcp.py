@@ -777,6 +777,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             {
                 "description", "icon_data", "icon_mime",
                 "confirm_tool_calls", "confirm_tools", "dedupe_tools", "enabled",
+                "parent_agent_id",
             }
             <= agent_columns
         )
@@ -845,6 +846,121 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(spec["dedupe_tools"], ["dangerous_action"])
         self.assertEqual(agent["confirm_tool_calls"], 1)
         self.assertEqual(agent["confirm_tools"], '["dangerous_action"]')
+
+    def test_subagents_support_safe_nested_hierarchies(self):
+        db.init()
+        model = db.add_model(
+            "Hierarchy model", "hierarchy/model", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Hierarchy server", "hierarchy-server")
+        parent = db.add_subagent(
+            "Team lead", "Coordinates the team.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        child = db.add_subagent(
+            "Worker", "Handles delegated work.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=parent["id"],
+        )
+        grandchild = db.add_subagent(
+            "Specialist", "Handles narrow work.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=child["id"],
+        )
+
+        self.assertIsNone(parent["parent_agent_id"])
+        self.assertEqual(child["parent_agent_id"], parent["id"])
+        self.assertEqual(child["parent_name"], "Team lead")
+        specs = {item["id"]: item for item in db.build_specs()}
+        self.assertEqual(specs[grandchild["id"]]["parent_agent_id"], child["id"])
+        with self.assertRaisesRegex(ValueError, "below one of its children"):
+            db.update_subagent(parent["id"], parent_agent_id=grandchild["id"])
+        with self.assertRaisesRegex(ValueError, "children first"):
+            db.delete_subagent(parent["id"])
+
+        level_four = db.add_subagent(
+            "Deep specialist", "Handles the deepest allowed work.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=grandchild["id"],
+        )
+        with self.assertRaisesRegex(ValueError, "at most 4 levels"):
+            db.add_subagent(
+                "Too deep", "Must be rejected.", "",
+                model["id"], server["id"], confirm_tools=[],
+                parent_agent_id=level_four["id"],
+            )
+
+    def test_supervisor_graph_exposes_only_top_level_dynamic_agents(self):
+        db.init()
+        model = db.add_model(
+            "Routing model", "routing/model", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Routing server", "routing-server")
+        parent = db.add_subagent(
+            "Lead agent", "Coordinates work.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        db.add_subagent(
+            "Nested agent", "Completes child tasks.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=parent["id"],
+        )
+
+        nodes = set(langgraph_agent.build_graph().get_graph().nodes)
+        self.assertIn("mcp_lead_agent", nodes)
+        self.assertNotIn("mcp_nested_agent", nodes)
+
+    def test_parent_assigns_multiple_children_atomically(self):
+        db.init()
+        model = db.add_model(
+            "Bulk hierarchy model", "bulk/hierarchy", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Bulk hierarchy server", "bulk-server")
+        parent = db.add_subagent(
+            "Bulk lead", "Coordinates selected children.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        other_parent = db.add_subagent(
+            "Other lead", "Starts with one child.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        first = db.add_subagent(
+            "First worker", "Handles first tasks.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        second = db.add_subagent(
+            "Second worker", "Handles second tasks.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=other_parent["id"],
+        )
+
+        updated = db.update_subagent(
+            parent["id"], child_agent_ids=[first["id"], second["id"]]
+        )
+        self.assertEqual(updated["child_count"], 2)
+        self.assertEqual(db.get_subagent(first["id"])["parent_agent_id"], parent["id"])
+        self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
+        self.assertEqual(db.get_subagent(other_parent["id"])["child_count"], 0)
+
+        db.update_subagent(parent["id"], child_agent_ids=[second["id"]])
+        self.assertIsNone(db.get_subagent(first["id"])["parent_agent_id"])
+        self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
+
+        db.update_subagent(parent["id"], parent_agent_id=first["id"])
+        with self.assertRaisesRegex(ValueError, "below one of its children"):
+            db.update_subagent(
+                parent["id"], child_agent_ids=[first["id"], second["id"]]
+            )
+        self.assertEqual(db.get_subagent(parent["id"])["parent_agent_id"], first["id"])
+        self.assertIsNone(db.get_subagent(first["id"])["parent_agent_id"])
+        self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
+
+        with self.assertRaisesRegex(ValueError, "existing subagent"):
+            db.update_subagent(parent["id"], child_agent_ids=[999999])
+        self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
 
     def test_dynamic_subagent_activation_controls_runtime_and_mcp_connection(self):
         db.init()
@@ -1122,6 +1238,87 @@ class DatabaseTests(TemporaryDatabaseTest):
 
 
 class TransportTests(unittest.TestCase):
+    def test_parent_agent_delegates_to_child_through_toolnode(self):
+        class Session:
+            async def list_tools(self, cursor=None):
+                return SimpleNamespace(tools=[], nextCursor=None)
+
+        @asynccontextmanager
+        async def fake_session(_spec):
+            yield Session()
+
+        parent = {
+            "id": 1,
+            "name": "Lead",
+            "description": "Coordinates tasks.",
+            "prompt": "",
+            "model": "parent-model",
+            "base_url": "http://localhost/v1",
+            "connection": "parent-server",
+            "confirm_tools": [],
+            "dedupe_tools": [],
+            "parent_agent_id": None,
+        }
+        child = {
+            "id": 2,
+            "name": "Worker",
+            "description": "Completes focused tasks.",
+            "prompt": "",
+            "model": "child-model",
+            "base_url": "http://localhost/v1",
+            "connection": "child-server",
+            "confirm_tools": [],
+            "dedupe_tools": [],
+            "parent_agent_id": 1,
+        }
+        observed_tools = {}
+
+        def fake_chat(messages, tools=None, model="", **_kwargs):
+            observed_tools.setdefault(model, tools or [])
+            if model == "child-model":
+                return {"content": "Child completed the focused task.", "tool_calls": []}
+            tool_result = next(
+                (message for message in messages if message.get("role") == "tool"),
+                None,
+            )
+            if tool_result is None:
+                return {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "delegate_1",
+                            "function": {
+                                "name": "delegate_to_worker",
+                                "arguments": '{"task":"Do the focused task"}',
+                            },
+                        }
+                    ],
+                }
+            self.assertIn("Child completed", tool_result["content"])
+            return {"content": "The team completed the task.", "tool_calls": []}
+
+        with (
+            patch.object(mcp_agent, "_mcp_session", fake_session),
+            patch.object(mcp_agent.llm, "openai_chat", side_effect=fake_chat),
+            patch.object(db, "is_subagent_enabled", return_value=True),
+        ):
+            result = asyncio.run(
+                mcp_agent._run_async(
+                    "Handle the request",
+                    parent,
+                    "",
+                    all_specs=[parent, child],
+                    lineage=(1,),
+                )
+            )
+
+        self.assertEqual(result, "The team completed the task.")
+        self.assertEqual(
+            [tool["function"]["name"] for tool in observed_tools["parent-model"]],
+            ["delegate_to_worker"],
+        )
+        self.assertEqual(observed_tools["child-model"], [])
+
     def test_restricted_mcp_run_hides_and_blocks_unselected_tools(self):
         called = []
 
@@ -1412,6 +1609,89 @@ class TransportTests(unittest.TestCase):
 
 
 class AdminApiTests(TemporaryDatabaseTest):
+    def test_subagent_api_persists_and_protects_parent_relationships(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+        model = db.add_model(
+            "API hierarchy model", "api/hierarchy", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        mcp_server = db.add_server("API hierarchy server", "api-server")
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                common = {
+                    "description": "Hierarchy test agent.",
+                    "system_prompt": "",
+                    "model_id": model["id"],
+                    "mcp_server_id": mcp_server["id"],
+                    "confirm_tools": [],
+                }
+                parent_response = await client.post(
+                    "/api/subagents", json={**common, "name": "API lead"}
+                )
+                self.assertEqual(parent_response.status_code, 200)
+                parent = parent_response.json()
+                child_response = await client.post(
+                    "/api/subagents",
+                    json={
+                        **common,
+                        "name": "API worker",
+                        "parent_agent_id": parent["id"],
+                    },
+                )
+                self.assertEqual(child_response.status_code, 200)
+                child = child_response.json()
+                self.assertEqual(child["parent_agent_id"], parent["id"])
+                self.assertEqual(child["parent_name"], "API lead")
+                second_child_response = await client.post(
+                    "/api/subagents", json={**common, "name": "API second worker"}
+                )
+                self.assertEqual(second_child_response.status_code, 200)
+                second_child = second_child_response.json()
+
+                assigned = await client.put(
+                    f"/api/subagents/{parent['id']}",
+                    json={"child_agent_ids": [child["id"], second_child["id"]]},
+                )
+                self.assertEqual(assigned.status_code, 200)
+                self.assertEqual(assigned.json()["child_count"], 2)
+                listed = (await client.get("/api/subagents")).json()
+                listed_by_id = {agent["id"]: agent for agent in listed}
+                self.assertEqual(
+                    listed_by_id[second_child["id"]]["parent_agent_id"], parent["id"]
+                )
+
+                cycle = await client.put(
+                    f"/api/subagents/{parent['id']}",
+                    json={"parent_agent_id": child["id"]},
+                )
+                self.assertEqual(cycle.status_code, 400)
+                protected = await client.delete(f"/api/subagents/{parent['id']}")
+                self.assertEqual(protected.status_code, 409)
+                self.assertIn("children first", protected.json()["error"])
+
+                detached = await client.put(
+                    f"/api/subagents/{parent['id']}", json={"child_agent_ids": []}
+                )
+                self.assertEqual(detached.status_code, 200)
+                self.assertEqual(detached.json()["child_count"], 0)
+                listed = (await client.get("/api/subagents")).json()
+                listed_by_id = {agent["id"]: agent for agent in listed}
+                self.assertIsNone(listed_by_id[child["id"]]["parent_agent_id"])
+                self.assertIsNone(listed_by_id[second_child["id"]]["parent_agent_id"])
+                self.assertEqual(
+                    (await client.delete(f"/api/subagents/{parent['id']}")).status_code,
+                    200,
+                )
+
+        asyncio.run(exercise_api())
+
     def test_channel_histories_are_isolated_and_receive_selected_heartbeat(self):
         import server as web_server
 

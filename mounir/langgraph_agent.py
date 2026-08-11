@@ -26,7 +26,6 @@ from langgraph.types import Command
 
 from . import config as cfg, db, graph_runtime, llm, mcp_agents, tools, trace
 from .memory import Conversation
-from .specialists.coder import run as run_coder
 from .specialists.knowledge import run as run_knowledge
 from .specialists.media import run as run_media
 from .specialists.mcp_agent import run as run_mcp_agent
@@ -40,7 +39,6 @@ VOICE_RESPONSE_INSTRUCTION = (
 )
 
 _DELEGATES = {
-    "delegate_to_coder": "coder",
     "delegate_to_media": "media",
     "delegate_to_knowledge": "knowledge",
     "delegate_to_system": "system",
@@ -217,12 +215,6 @@ def _specialist_result(
     )
 
 
-def _coder(state: TurnState) -> Command:
-    return _specialist_result(
-        state, "delegate_to_coder", "coder", run_coder
-    )
-
-
 def _media(state: TurnState) -> Command:
     enabled = db.is_builtin_agent_enabled("media")
     return _specialist_result(
@@ -258,13 +250,10 @@ def _system(state: TurnState) -> Command:
 
 def _make_mcp_node(
     spec: dict,
-    valid_parents: set[str],
+    all_specs: list[dict],
     protected_attempts: set[str],
 ):
     tool_name = mcp_agents.delegate_tool_name(spec["name"])
-    parent = spec.get("parent") or "supervisor"
-    if parent not in valid_parents:
-        parent = "supervisor"
 
     def node(state: TurnState) -> Command:
         enabled = db.is_subagent_enabled(spec["id"])
@@ -277,7 +266,12 @@ def _make_mcp_node(
             state,
             tool_name,
             spec["name"],
-            lambda task: run_mcp_agent(task, spec, protected_attempts),
+            lambda task: run_mcp_agent(
+                task,
+                spec,
+                protected_attempts,
+                all_specs=all_specs,
+            ),
             unavailable,
         )
 
@@ -290,10 +284,11 @@ def _compile_graph(model: str, use_tools: bool):
     delegates = {
         name: node
         for name, node in _DELEGATES.items()
-        if node == "coder" or node in enabled_builtins
+        if node in enabled_builtins
     }
+    root_specs = [spec for spec in dynamic if spec.get("parent_agent_id") is None]
     dynamic_tools = []
-    for spec in dynamic:
+    for spec in root_specs:
         name = mcp_agents.delegate_tool_name(spec["name"])
         delegates[name] = mcp_agents.node_name(spec["name"])
         dynamic_tools.append(mcp_agents.delegate_tool(spec))
@@ -341,7 +336,6 @@ def _compile_graph(model: str, use_tools: bool):
     )
     graph.add_node("declined", _declined)
     graph.add_node("force_final", lambda state: _force_final(state, model))
-    graph.add_node("coder", _coder)
     if "media" in enabled_builtins:
         graph.add_node("media", _media)
     if "knowledge" in enabled_builtins:
@@ -350,10 +344,10 @@ def _compile_graph(model: str, use_tools: bool):
         graph.add_node("system", _system)
 
     protected_attempts: set[str] = set()
-    for spec in dynamic:
+    for spec in root_specs:
         graph.add_node(
             mcp_agents.node_name(spec["name"]),
-            _make_mcp_node(spec, {"supervisor"}, protected_attempts),
+            _make_mcp_node(spec, dynamic, protected_attempts),
         )
 
     graph.add_edge(START, "supervisor")

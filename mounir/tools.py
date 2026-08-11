@@ -14,15 +14,8 @@ from langchain_core.tools import tool
 
 from . import browser_control, config
 
-# Specialist agents (lazy imports — only load the specialist when actually
-# called). These are reached via handoff in the graph; the registry entries are
-# fallbacks and aren't normally dispatched.
-def delegate_to_coder(task: str, context: str = "") -> str:
-    """Ask the coder agent to write or fix code for a given task."""
-    from .specialists.coder import run
-    return run(task)
-
-
+# Specialist agents are reached through LangGraph handoffs. These functions
+# remain defensive fallbacks for direct tool invocation.
 def delegate_to_knowledge(task: str) -> str:
     """Hand a knowledge-folder change to the knowledge agent; returns its report."""
     from . import db
@@ -50,9 +43,9 @@ def delegate_to_system(task: str) -> str:
 
 
 # The supervisor runs on a small, local model with a modest context window, and
-# reads files only incidentally (a note, a config, a path the user mentions) —
-# heavy code reading is the coder's job. So keep a read to a quick glance the
-# model can actually digest; it pages for more with start_line.
+# reads files only incidentally (a note, a config, a path the user mentions).
+# Keep a read to a quick glance the model can digest; it pages for more with
+# start_line.
 MAX_READ_LINES = 300    # lines per read when no range is given
 MAX_READ_CHARS = 12000  # hard char ceiling so one read can't flood the context
 

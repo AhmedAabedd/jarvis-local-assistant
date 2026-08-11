@@ -108,7 +108,7 @@ export function ResourceDetails({
           <span>
             <strong>{enabled ? 'Active' : 'Inactive'}</strong>
             <small>
-              {enabled ? 'Available for supervisor delegation' : 'Removed from runtime delegation'}
+              {enabled ? 'Available for parent delegation' : 'Removed from runtime delegation'}
             </small>
           </span>
           <label className="switch">
@@ -128,6 +128,7 @@ export function ResourceDetails({
             value={model ? `${model.name} — ${model.model}` : agent.model_name}
           />
           <Detail label="MCP server" value={server?.name || agent.mcp_server_name} />
+          <Detail label="Parent agent" value={agent.parent_name || 'Mounir'} />
           <Detail label="Description" value={agent.description} full />
           <Detail
             label="System prompt"

@@ -86,7 +86,7 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
           )}
         </>
       )}
-      {(data.kind === 'supervisor' || data.kind === 'channel') && (
+      {(data.kind === 'supervisor' || data.kind === 'channel' || data.kind === 'dynamic') && (
         <Handle
           type="source"
           position={data.kind === 'channel' ? Position.Right : Position.Bottom}

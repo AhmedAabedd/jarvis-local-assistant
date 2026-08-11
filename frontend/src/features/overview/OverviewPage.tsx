@@ -69,14 +69,29 @@ export function OverviewPage() {
     const info = overview.data
     const custom = agents.data || []
     if (!info) return { nodes: [], edges: [] }
-    const specialistCount = info.builtins.length + custom.length
     const nodeWidth = 158
     const nodeGap = 14
-    const rowWidth = specialistCount
-      ? specialistCount * nodeWidth + Math.max(0, specialistCount - 1) * nodeGap
-      : nodeWidth
+    const byId = new Map(custom.map((item) => [item.id, item]))
+    const depthOf = (item: (typeof custom)[number]) => {
+      let depth = 0
+      let parentId = Number(item.parent_agent_id) || 0
+      const visited = new Set<number>([item.id])
+      while (parentId && byId.has(parentId) && !visited.has(parentId)) {
+        depth += 1
+        visited.add(parentId)
+        parentId = Number(byId.get(parentId)?.parent_agent_id) || 0
+      }
+      return depth
+    }
+    const dynamicDepth = new Map(custom.map((item) => [item.id, depthOf(item)]))
+    const layerCount = new Map<number, number>([[0, info.builtins.length]])
+    custom.forEach((item) => {
+      const depth = dynamicDepth.get(item.id) || 0
+      layerCount.set(depth, (layerCount.get(depth) || 0) + 1)
+    })
+    const widestLayer = Math.max(1, ...layerCount.values())
+    const rowWidth = widestLayer * nodeWidth + Math.max(0, widestLayer - 1) * nodeGap
     const width = Math.max(900, rowWidth + 80)
-    const rowStart = (width - rowWidth) / 2
     const center = width / 2
     const nodes: Node<FlowData>[] = [
       {
@@ -95,6 +110,17 @@ export function OverviewPage() {
       },
     ]
     const edges: Edge[] = []
+    const layerOffsets = new Map<number, number>()
+    const nextPosition = (depth: number) => {
+      const count = layerCount.get(depth) || 1
+      const layerWidth = count * nodeWidth + Math.max(0, count - 1) * nodeGap
+      const index = layerOffsets.get(depth) || 0
+      layerOffsets.set(depth, index + 1)
+      return {
+        x: (width - layerWidth) / 2 + index * (nodeWidth + nodeGap),
+        y: 345 + depth * 135,
+      }
+    }
     if (telegram.data?.enabled) {
       nodes.push({
         id: 'telegram',
@@ -123,13 +149,12 @@ export function OverviewPage() {
       })
       edges.push(inputEdge('whatsapp', '#25d366'))
     }
-    info.builtins.forEach((item, index) => {
-      const x = rowStart + index * (nodeWidth + nodeGap)
+    info.builtins.forEach((item) => {
       const id = `builtin-${item.key}`
       nodes.push({
         id,
         type: 'agent',
-        position: { x, y: 345 },
+        position: nextPosition(0),
         data: {
           label: item.name,
           kind: 'builtin',
@@ -150,31 +175,36 @@ export function OverviewPage() {
         style: { stroke: item.enabled ? '#59c98e' : '#ff7d79' },
       })
     })
-    custom.forEach((item, offset) => {
-      const index = info.builtins.length + offset
-      const x = rowStart + index * (nodeWidth + nodeGap)
-      const id = `dynamic-${item.id}`
-      nodes.push({
-        id,
-        type: 'agent',
-        position: { x, y: 345 },
-        data: {
-          label: item.name,
-          kind: 'dynamic',
-          enabled: Boolean(item.enabled),
-          model: item.model || item.model_name,
-          icon: item.has_icon ? `/api/subagents/${item.id}/icon` : undefined,
-          onOpen: () => navigate(`/admin/agents?open=${item.id}`),
-        },
+    custom
+      .slice()
+      .sort((left, right) => {
+        const depthDifference = (dynamicDepth.get(left.id) || 0) - (dynamicDepth.get(right.id) || 0)
+        return depthDifference || left.name.localeCompare(right.name)
       })
-      edges.push({
-        id: `supervisor-${id}`,
-        source: 'supervisor',
-        target: id,
-        animated: Boolean(item.enabled),
-        style: { stroke: item.enabled ? '#79b8ff' : '#ff7d79' },
+      .forEach((item) => {
+        const depth = dynamicDepth.get(item.id) || 0
+        const id = `dynamic-${item.id}`
+        nodes.push({
+          id,
+          type: 'agent',
+          position: nextPosition(depth),
+          data: {
+            label: item.name,
+            kind: 'dynamic',
+            enabled: Boolean(item.enabled),
+            model: item.model || item.model_name,
+            icon: item.has_icon ? `/api/subagents/${item.id}/icon` : undefined,
+            onOpen: () => navigate(`/admin/agents?open=${item.id}`),
+          },
+        })
+        edges.push({
+          id: `${item.parent_agent_id ? `dynamic-${item.parent_agent_id}` : 'supervisor'}-${id}`,
+          source: item.parent_agent_id ? `dynamic-${item.parent_agent_id}` : 'supervisor',
+          target: id,
+          animated: Boolean(item.enabled),
+          style: { stroke: item.enabled ? '#79b8ff' : '#ff7d79' },
+        })
       })
-    })
     return { nodes, edges }
   }, [overview.data, agents.data, telegram.data?.enabled, whatsapp.data?.enabled, navigate])
 

@@ -5,6 +5,7 @@ import type { McpServer, ModelRecord, Subagent } from '../../api/types'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Field } from '../../components/ui/Field'
 import { Feedback } from '../../components/ui/Feedback'
+import { AgentChoices } from './AgentChoices'
 import { stringList, toDataUrl } from './helpers'
 import { ToolChoices } from './ToolChoices'
 
@@ -12,12 +13,14 @@ export function AgentForm({
   item,
   models,
   servers,
+  agents,
   formId,
   onSubmit,
 }: {
   item?: Subagent
   models: ModelRecord[]
   servers: McpServer[]
+  agents: Subagent[]
   formId: string
   onSubmit: (body: object) => Promise<void>
 }) {
@@ -30,6 +33,38 @@ export function AgentForm({
   const [deduped, setDeduped] = useState(new Set(stringList(item?.dedupe_tools)))
   const [icon, setIcon] = useState<string | undefined>()
   const [error, setError] = useState('')
+  const [parentId, setParentId] = useState(Number(item?.parent_agent_id) || 0)
+  const [children, setChildren] = useState(
+    new Set(
+      item
+        ? agents
+            .filter((agent) => Number(agent.parent_agent_id) === item.id)
+            .map((agent) => agent.id)
+        : [],
+    ),
+  )
+  const blockedParents = new Set<number>()
+  if (item) {
+    const pending = [item.id]
+    while (pending.length) {
+      const current = pending.pop()!
+      if (blockedParents.has(current)) continue
+      blockedParents.add(current)
+      agents
+        .filter((agent) => Number(agent.parent_agent_id) === current)
+        .forEach((agent) => pending.push(agent.id))
+    }
+  }
+  const blockedChildren = new Set<number>()
+  if (item) {
+    blockedChildren.add(item.id)
+    let ancestorId = parentId
+    while (ancestorId && !blockedChildren.has(ancestorId)) {
+      blockedChildren.add(ancestorId)
+      ancestorId = Number(agents.find((agent) => agent.id === ancestorId)?.parent_agent_id) || 0
+    }
+  }
+  const availableChildren = agents.filter((agent) => !blockedChildren.has(agent.id))
   const tools = useQuery({
     queryKey: ['server-tools', serverId],
     queryFn: () => api.servers.tools(serverId),
@@ -45,12 +80,14 @@ export function AgentForm({
     try {
       body.model_id = Number(body.model_id)
       body.mcp_server_id = Number(body.mcp_server_id)
+      body.parent_agent_id = parentId || null
       delete body.confirmation_mode
       body.confirm_tools = mode === 'all' ? ['*'] : mode === 'selected' ? [...confirmed] : []
       if (mode === 'selected' && !confirmed.size)
         throw new Error('Select at least one action requiring confirmation.')
       body.confirm_tool_calls = mode !== 'none'
       body.dedupe_tools = [...deduped]
+      if (item) body.child_agent_ids = [...children]
       if (icon !== undefined) body.icon_data = icon
       await onSubmit(body)
     } catch (e) {
@@ -98,7 +135,7 @@ export function AgentForm({
       <Field
         full
         label="Description"
-        hint="Explain when the supervisor should use this specialist."
+        hint="Explain when the parent agent should use this specialist."
       >
         <AutoTextarea name="description" defaultValue={item?.description} required rows={2} />
       </Field>
@@ -138,6 +175,50 @@ export function AgentForm({
           ))}
         </select>
       </Field>
+      <Field
+        full
+        label="Parent agent"
+        hint="Mounir handles top-level agents. A subagent can coordinate its own direct children."
+      >
+        <select
+          name="parent_agent_id"
+          value={parentId || ''}
+          onChange={(event) => {
+            const nextParentId = Number(event.target.value) || 0
+            setParentId(nextParentId)
+            if (nextParentId) {
+              setChildren((current) => {
+                const next = new Set(current)
+                next.delete(nextParentId)
+                return next
+              })
+            }
+          }}
+        >
+          <option value="">Mounir — top level</option>
+          {agents
+            .filter((agent) => !blockedParents.has(agent.id))
+            .map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+        </select>
+      </Field>
+      {item && (
+        <section className="key-value-editor agent-children">
+          <div className="key-value-editor__title">
+            <span>
+              <strong>Child subagents</strong>
+              <small>
+                Select every specialist this agent can delegate to. Selecting an agent moves it from
+                its current parent.
+              </small>
+            </span>
+          </div>
+          <AgentChoices agents={availableChildren} selected={children} onChange={setChildren} />
+        </section>
+      )}
       <Field full label="Action confirmation">
         <select name="confirmation_mode" value={mode} onChange={(e) => setMode(e.target.value)}>
           <option value="all">Ask before every action</option>

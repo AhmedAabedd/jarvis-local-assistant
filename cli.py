@@ -294,7 +294,6 @@ def main() -> int:
     trace.banner("knuckles cracked. no cloud, no fluff. let's cook.")
     trace.rule(64)
     trace.agent_row("Agent", llm.active_model(agent.model))
-    trace.sub_row("coder", config.CODER_MODEL)
     trace.sub_row("researcher", config.RESEARCHER_MODEL)
     trace.sub_row("media", config.MEDIA_MODEL)
     trace.sub_row("knowledge", config.KNOWLEDGE_MODEL)

@@ -80,9 +80,11 @@ flowchart LR
     WS --> S
 
     S --> B[Built-in specialists]
-    S --> D[Dynamic MCP specialists]
+    S --> D[Top-level MCP specialists]
+    D --> ND[Nested child specialists]
     B --> ENV[Devices, files, and knowledge]
     D --> MCP[MCP servers]
+    ND --> MCP
 
     SM[Self-hosted models] --> S
     CM[Managed models] --> S
@@ -96,14 +98,15 @@ flowchart LR
     HB --> WA
 ```
 
-The supervisor receives a compact schema for each active specialist. It chooses
-the right one, sends a focused task, and receives only that specialist's final
-report. Raw MCP calls and intermediate tool output stay inside the specialist,
-keeping the supervisor context smaller and easier to reason about.
+Each agent receives a compact schema only for its direct children. Mounir chooses
+a top-level specialist; that specialist can delegate further down its own team and
+return one final report upward. Raw MCP calls and intermediate output stay inside
+the relevant specialist, keeping every parent context smaller and easier to reason
+about.
 
 The graph is rebuilt from the database before every turn. Adding, editing,
-activating, deactivating, or deleting a dynamic subagent changes the supervisor's
-available capability schema immediately.
+activating, deactivating, moving, or deleting a dynamic subagent changes the
+runtime hierarchy immediately.
 
 ### Backend agent architecture
 
@@ -136,8 +139,13 @@ an MCP server.
 1. Create or select a model in **Agent Studio → Models**.
 2. Add an MCP server in **Agent Studio → MCP Servers**.
 3. Test the connection once. Mounir discovers and stores the server's tools.
-4. Create a subagent with a name, purpose, instructions, model, server, and icon.
-5. Activate it. The supervisor can delegate to it on the next message.
+4. Create a subagent with a name, purpose, instructions, model, server, icon, and
+   parent. Choose Mounir for a top-level agent or another subagent for a child.
+5. Activate it. Its direct parent can delegate to it on the next message.
+
+When editing an existing subagent, the **Child subagents** list can assign or move
+multiple specialists to that parent in one save. Parent and child controls update
+the same validated hierarchy.
 
 The user never needs to write a function schema or manually append tools to a
 prompt. Mounir reads the MCP server's tool definitions, caches their names and
@@ -205,11 +213,6 @@ user-maintained reference files.
 Controls supported desktop functions such as audio, display brightness, media,
 Wi-Fi, Bluetooth, power actions, browser actions, and approved commands.
 
-### Coder
-
-Provides coding-oriented tools and model configuration. Delegation is intentionally
-kept behind the project's current runtime guard while that specialist is completed.
-
 Inactive specialists are removed from runtime delegation—not merely hidden in the
 UI. The workflow keeps them visible as muted nodes with a red relationship so the
 configured architecture remains understandable.
@@ -226,7 +229,7 @@ jobs.
 |---|---|
 | Supervisor | Saved Mistral, Groq, or Ollama profiles |
 | Dynamic MCP specialists | OpenAI-compatible chat-completions endpoints with tool calling |
-| Media, System, Coder | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
+| Media and System | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
 | Knowledge | Configurable Gemini/OpenAI-compatible profile |
 | Speech to text | Local Faster Whisper or Groq Whisper |
 | Text to speech | Local Piper or Google Cloud TTS |
@@ -386,7 +389,7 @@ channels, visually distinct from supervisor-to-specialist delegation.
 |---|---|
 | Models | Provider, model name, base URL, API key, and local/cloud compatibility |
 | MCP Servers | Transport, command or URL, authentication, status, and cached tools |
-| Subagents | Identity, icon, instructions, model, MCP server, confirmations, dedupe, and active state |
+| Subagents | Identity, parent, icon, instructions, model, MCP server, confirmations, dedupe, and active state |
 | Built-in agents | Purpose, capabilities, model, and active state |
 | Supervisor | Model selection, identity, and direct non-delegation tools |
 | Voice | STT and TTS providers, models, voices, endpoints, languages, and keys |
@@ -410,6 +413,7 @@ stricter boundaries than an ordinary chatbot. Mounir includes several layers:
 - HMAC-SHA256 verification for every incoming WhatsApp webhook
 - one-use private pairing for both messaging channels
 - a final runtime check before any inactive subagent can be used
+- cycle prevention, protected parent deletion, and a four-level nesting limit
 - exact-string file edits that require the target content to be read first
 - configurable duplicate action prevention
 - MCP tool and whole-agent timeouts
@@ -527,7 +531,7 @@ edited in Agent Studio and take precedence after their initial import.
 | `MOUNIR_DATA_DIR` | `~/.mounir` | SQLite database, conversations, and local voice data |
 | `MOUNIR_MCP_TOOL_TIMEOUT` | `60` | Maximum seconds for one MCP tool call |
 | `MOUNIR_MCP_AGENT_TIMEOUT` | `300` | Maximum seconds for one delegated MCP task |
-| `NVIDIA_API_KEY` | unset | Initial Media, System, and Coder provider credential |
+| `NVIDIA_API_KEY` | unset | Initial Media and System provider credential |
 | `GEMINI_API_KEY` | unset | Initial Knowledge provider credential |
 | `USE_MISTRAL` | `false` | Import the Mistral supervisor configuration |
 | `MISTRAL_API_KEY` | unset | Initial Mistral credential |
@@ -627,7 +631,6 @@ Mounir is ambitious, but its current contracts are explicit:
   closing is cross-platform; some system controls remain platform-specific.
 - The custom `Hey Mounir` wake-word model is not bundled; supported openWakeWord
   models can be selected today.
-- The Coder specialist remains guarded until its delegation workflow is finalized.
 
 These are deliberate boundaries, not hidden assumptions.
 
@@ -639,17 +642,18 @@ The fastest correct mental model is:
 
 1. `Agent.respond()` is the public turn boundary.
 2. The LangGraph supervisor is rebuilt from current database state before a turn.
-3. Built-in and dynamic specialists are capability nodes, not raw tool dumps.
-4. Dynamic MCP schemas come from cached/discovered server tools and the configured
+3. Built-in and top-level dynamic specialists are capability nodes, not raw tool dumps.
+4. Every dynamic specialist can expose only its direct children as delegation tools.
+5. Dynamic MCP schemas come from cached/discovered server tools and the configured
    subagent purpose.
-5. A specialist executes tools privately and returns a compact report.
-6. Confirmation is request-scoped and must return through the originating interface.
-7. Heartbeat may only use explicitly selected, non-interactive tools.
-8. Web, Telegram, and WhatsApp conversations are isolated; shared tool execution is
+6. A specialist executes tools privately and returns a compact report to its parent.
+7. Confirmation is request-scoped and must return through the originating interface.
+8. Heartbeat may only use explicitly selected, non-interactive tools.
+9. Web, Telegram, and WhatsApp conversations are isolated; shared tool execution is
    locked.
-9. Deactivation must be enforced in the backend even if a stale frontend or graph
+10. Deactivation must be enforced in the backend even if a stale frontend or graph
    still references the agent.
-10. Secrets may be accepted by configuration endpoints but must never be returned by
+11. Secrets may be accepted by configuration endpoints but must never be returned by
     read APIs.
 
 When changing the project, preserve those invariants. Prefer adding provider or

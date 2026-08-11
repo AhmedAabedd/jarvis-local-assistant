@@ -4,8 +4,8 @@ Core tables include:
 
 - ``models``       reusable LLM presets (name, provider, base_url, api_key)
 - ``mcp_servers``  reusable MCP server connections (transport + command/URL)
-- ``subagents``    the actual agents the supervisor can delegate to
-                   (name, system_prompt, model_id, mcp_server_id, parent)
+- ``subagents``    configurable agents arranged in a parent-child hierarchy
+                   (name, prompt, model, MCP server, parent_agent_id)
 - ``mcp_server_tools`` cached MCP capability metadata
 - ``heartbeat_*`` heartbeat permissions, schedule, state, and bounded run log
 - ``telegram_settings`` private Telegram bot configuration and pairing state
@@ -35,6 +35,7 @@ from . import builtin_agents, config as cfg, default_agents
 DB_PATH: Path = cfg.DATA_DIR / "mounir.db"
 LEGACY_REGISTRY: Path = cfg.DATA_DIR / "mcp_agents.json"
 MCP_TRANSPORTS = {"stdio", "streamable_http", "sse"}
+MAX_SUBAGENT_DEPTH = 4
 HEARTBEAT_DEFAULT_INSTRUCTIONS = (
     "Check my connected services for new items that genuinely need my attention. "
     "Ignore routine or unchanged information."
@@ -165,7 +166,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             confirm_tools TEXT NOT NULL DEFAULT '["*"]',
             dedupe_tools TEXT NOT NULL DEFAULT '[]',
             enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-            parent TEXT DEFAULT 'supervisor',
+            parent_agent_id INTEGER
+                REFERENCES subagents(id) ON DELETE RESTRICT,
             created_at TEXT
         );
 
@@ -421,6 +423,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "confirm_tools": "TEXT NOT NULL DEFAULT '[\"*\"]'",
             "dedupe_tools": "TEXT NOT NULL DEFAULT '[]'",
             "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
+            "parent_agent_id": "INTEGER REFERENCES subagents(id) ON DELETE RESTRICT",
         },
         "heartbeat_settings": {
             "interval_minutes": "INTEGER NOT NULL DEFAULT 30",
@@ -443,6 +446,32 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 added_columns.add((table, column))
+    # Upgrade the short-lived text parent field used by earlier builds. Names
+    # that cannot be resolved safely remain direct children of Mounir.
+    subagent_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(subagents)")
+    }
+    if "parent" in subagent_columns:
+        conn.execute(
+            """
+            UPDATE subagents AS child
+            SET parent_agent_id = (
+                SELECT parent.id FROM subagents AS parent
+                WHERE lower(parent.name) = lower(trim(child.parent))
+                  AND parent.id != child.id
+                LIMIT 1
+            )
+            WHERE child.parent_agent_id IS NULL
+              AND child.parent IS NOT NULL
+              AND lower(trim(child.parent)) NOT IN ('', 'supervisor')
+            """
+        )
+        # The column cannot be dropped safely in place on an existing SQLite
+        # database. Neutralize it so a later init cannot undo a user reparent.
+        conn.execute("UPDATE subagents SET parent = 'supervisor'")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_subagents_parent ON subagents(parent_agent_id)"
+    )
     conn.execute(
         """
         UPDATE heartbeat_settings SET instructions = ?
@@ -697,7 +726,6 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
             system_prompt=a.get("prompt", ""),
             model_id=model_id,
             mcp_server_id=server_id,
-            parent=a.get("parent", "supervisor"),
         )
     conn.commit()
 
@@ -2823,6 +2851,129 @@ def record_server_test_failure(server_id: int, error: str) -> dict | None:
 # Subagents
 # -----------------------------------------------------------------------------
 
+def _subagent_parent_id(value) -> int | None:
+    """Normalize the API/CLI representation of Mounir as the root parent."""
+    if value in (None, "", 0, "0", "supervisor"):
+        return None
+    try:
+        parent_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Select Mounir or an existing subagent as the parent.") from exc
+    if parent_id <= 0:
+        raise ValueError("Select Mounir or an existing subagent as the parent.")
+    return parent_id
+
+
+def _subtree_height(conn: sqlite3.Connection, subagent_id: int) -> int:
+    """Return the greatest number of child edges below one agent."""
+    height = 0
+    frontier = {subagent_id}
+    visited = {subagent_id}
+    while frontier:
+        placeholders = ", ".join("?" for _ in frontier)
+        children = {
+            int(row["id"])
+            for row in conn.execute(
+                f"SELECT id FROM subagents WHERE parent_agent_id IN ({placeholders})",
+                tuple(frontier),
+            )
+            if int(row["id"]) not in visited
+        }
+        if not children:
+            break
+        height += 1
+        visited.update(children)
+        frontier = children
+    return height
+
+
+def _validate_subagent_parent(
+    conn: sqlite3.Connection,
+    parent_agent_id,
+    *,
+    subagent_id: int | None = None,
+) -> int | None:
+    """Validate existence, cycles, and the configured hierarchy depth limit."""
+    parent_id = _subagent_parent_id(parent_agent_id)
+    if parent_id is None:
+        parent_depth = 0
+    else:
+        if subagent_id is not None and parent_id == int(subagent_id):
+            raise ValueError("A subagent cannot be its own parent.")
+        row = conn.execute(
+            "SELECT id, parent_agent_id FROM subagents WHERE id = ?", (parent_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Select an existing subagent as the parent.")
+        parent_depth = 1
+        visited: set[int] = set()
+        current = row
+        while current["parent_agent_id"] is not None:
+            current_id = int(current["id"])
+            if current_id in visited:
+                raise ValueError("The saved subagent hierarchy contains a cycle.")
+            visited.add(current_id)
+            ancestor_id = int(current["parent_agent_id"])
+            if subagent_id is not None and ancestor_id == int(subagent_id):
+                raise ValueError("A subagent cannot be moved below one of its children.")
+            current = conn.execute(
+                "SELECT id, parent_agent_id FROM subagents WHERE id = ?",
+                (ancestor_id,),
+            ).fetchone()
+            if current is None:
+                raise ValueError("The selected parent has an invalid hierarchy.")
+            parent_depth += 1
+
+    subtree_height = (
+        _subtree_height(conn, int(subagent_id)) if subagent_id is not None else 0
+    )
+    resulting_depth = parent_depth + 1 + subtree_height
+    if resulting_depth > MAX_SUBAGENT_DEPTH:
+        raise ValueError(
+            f"Subagents can be nested at most {MAX_SUBAGENT_DEPTH} levels below Mounir."
+        )
+    return parent_id
+
+
+def _child_agent_ids(value) -> set[int]:
+    """Normalize a multi-select child payload without accepting scalar strings."""
+    if value is None:
+        return set()
+    if not isinstance(value, (list, tuple, set)):
+        raise ValueError("Child subagents must be provided as a list.")
+    result: set[int] = set()
+    for item in value:
+        try:
+            child_id = int(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Every selected child must be an existing subagent.") from exc
+        if child_id <= 0:
+            raise ValueError("Every selected child must be an existing subagent.")
+        result.add(child_id)
+    return result
+
+
+def _validate_subagent_hierarchy(parents: dict[int, int | None]) -> None:
+    """Validate the complete prospective hierarchy before a bulk relationship write."""
+    for subagent_id in parents:
+        current = subagent_id
+        visited = {subagent_id}
+        depth = 1
+        while parents.get(current) is not None:
+            parent_id = parents[current]
+            if parent_id not in parents:
+                raise ValueError("Select an existing subagent as the parent.")
+            if parent_id in visited:
+                raise ValueError("A subagent cannot be moved below one of its children.")
+            visited.add(parent_id)
+            current = parent_id
+            depth += 1
+            if depth > MAX_SUBAGENT_DEPTH:
+                raise ValueError(
+                    f"Subagents can be nested at most {MAX_SUBAGENT_DEPTH} levels below Mounir."
+                )
+
+
 def _add_subagent(
     conn: sqlite3.Connection,
     name: str,
@@ -2831,7 +2982,7 @@ def _add_subagent(
     model_id: int,
     mcp_server_id: int,
     confirm_tool_calls: bool = True,
-    parent: str = "supervisor",
+    parent_agent_id: int | None = None,
     confirm_tools=None,
     icon_data: bytes = b"",
     icon_mime: str = "",
@@ -2859,13 +3010,14 @@ def _add_subagent(
     confirm_tools_json = _json_string_list(confirm_tools, "confirmation tools")
     dedupe_tools_json = _json_string_list(dedupe_tools or [], "duplicate protection tools")
     has_confirmations = bool(json.loads(confirm_tools_json))
+    selected_parent_id = _validate_subagent_parent(conn, parent_agent_id)
     try:
         cur = conn.execute(
             """
             INSERT INTO subagents
                 (name, description, system_prompt, icon_data, icon_mime,
                  model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
-                 dedupe_tools, enabled, parent, created_at)
+                 dedupe_tools, enabled, parent_agent_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -2880,7 +3032,7 @@ def _add_subagent(
                 confirm_tools_json,
                 dedupe_tools_json,
                 int(_bool(enabled, "enabled")),
-                (parent or "supervisor").strip() or "supervisor",
+                selected_parent_id,
                 _now(),
             ),
         )
@@ -2897,7 +3049,7 @@ def add_subagent(
     model_id: int,
     mcp_server_id: int,
     confirm_tool_calls: bool = True,
-    parent: str = "supervisor",
+    parent_agent_id: int | None = None,
     confirm_tools=None,
     icon_data: bytes = b"",
     icon_mime: str = "",
@@ -2907,7 +3059,7 @@ def add_subagent(
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
-            confirm_tool_calls, parent, confirm_tools, icon_data, icon_mime,
+            confirm_tool_calls, parent_agent_id, confirm_tools, icon_data, icon_mime,
             dedupe_tools, enabled,
         )
         return get_subagent(aid)
@@ -2917,7 +3069,9 @@ _SUBAGENT_SELECT = """
     SELECT s.id, s.name, s.description, s.system_prompt,
            s.model_id, s.mcp_server_id, s.confirm_tool_calls, s.confirm_tools,
            s.dedupe_tools, s.enabled,
-           s.parent, s.created_at,
+           s.parent_agent_id, parent.name AS parent_name, s.created_at,
+           (SELECT COUNT(*) FROM subagents child
+            WHERE child.parent_agent_id = s.id) AS child_count,
            CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
            m.name AS model_name, m.model, m.provider, m.base_url, m.api_key,
            srv.name AS server_name, srv.transport, srv.connection,
@@ -2925,6 +3079,7 @@ _SUBAGENT_SELECT = """
     FROM subagents s
     JOIN models m ON s.model_id = m.id
     JOIN mcp_servers srv ON s.mcp_server_id = srv.id
+    LEFT JOIN subagents parent ON s.parent_agent_id = parent.id
 """
 
 
@@ -2967,13 +3122,23 @@ def get_subagent_icon(subagent_id: int) -> tuple[bytes, str] | None:
 
 
 def update_subagent(subagent_id: int, **kwargs) -> dict | None:
+    child_selection_supplied = "child_agent_ids" in kwargs
+    selected_child_ids = (
+        _child_agent_ids(kwargs.pop("child_agent_ids"))
+        if child_selection_supplied
+        else set()
+    )
     allowed = {
         "name", "description", "system_prompt", "model_id",
-        "mcp_server_id", "confirm_tool_calls", "confirm_tools", "parent",
+        "mcp_server_id", "confirm_tool_calls", "confirm_tools", "parent_agent_id",
         "icon_data", "icon_mime", "dedupe_tools", "enabled",
     }
-    fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
-    if not fields:
+    fields = {
+        k: v
+        for k, v in kwargs.items()
+        if k in allowed and (v is not None or k == "parent_agent_id")
+    }
+    if not fields and not child_selection_supplied:
         return get_subagent(subagent_id)
     if "name" in fields:
         fields["name"] = _required(fields["name"], "name")
@@ -3009,6 +3174,44 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     if "enabled" in fields:
         fields["enabled"] = int(_bool(fields["enabled"], "enabled"))
     with _connect() as conn:
+        # Relationship edits may move several agents. Reserve the write lock
+        # before reading the tree so validation and updates use one snapshot.
+        conn.execute("BEGIN IMMEDIATE")
+        hierarchy_rows = conn.execute(
+            "SELECT id, parent_agent_id FROM subagents"
+        ).fetchall()
+        parents = {
+            int(row["id"]): (
+                int(row["parent_agent_id"])
+                if row["parent_agent_id"] is not None
+                else None
+            )
+            for row in hierarchy_rows
+        }
+        if subagent_id not in parents:
+            return None
+        if "parent_agent_id" in fields:
+            fields["parent_agent_id"] = _subagent_parent_id(fields["parent_agent_id"])
+            parents[subagent_id] = fields["parent_agent_id"]
+        child_parent_updates: dict[int, int | None] = {}
+        if child_selection_supplied:
+            if subagent_id in selected_child_ids:
+                raise ValueError("A subagent cannot be its own child.")
+            missing = selected_child_ids - parents.keys()
+            if missing:
+                raise ValueError("Every selected child must be an existing subagent.")
+            current_child_ids = {
+                child_id
+                for child_id, parent_id in parents.items()
+                if parent_id == subagent_id
+            }
+            for child_id in current_child_ids - selected_child_ids:
+                parents[child_id] = None
+                child_parent_updates[child_id] = None
+            for child_id in selected_child_ids:
+                parents[child_id] = subagent_id
+                child_parent_updates[child_id] = subagent_id
+        _validate_subagent_hierarchy(parents)
         if "model_id" in fields and conn.execute(
             "SELECT 1 FROM models WHERE id = ?", (fields["model_id"],)
         ).fetchone() is None:
@@ -3020,10 +3223,19 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
             raise ValueError("Select an existing MCP server for the subagent.")
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
-            conn.execute(
-                f"UPDATE subagents SET {sets} WHERE id = ?",
-                (*fields.values(), subagent_id),
-            )
+            if fields:
+                conn.execute(
+                    f"UPDATE subagents SET {sets} WHERE id = ?",
+                    (*fields.values(), subagent_id),
+                )
+            if child_parent_updates:
+                conn.executemany(
+                    "UPDATE subagents SET parent_agent_id = ? WHERE id = ?",
+                    [
+                        (parent_id, child_id)
+                        for child_id, parent_id in child_parent_updates.items()
+                    ],
+                )
         except sqlite3.IntegrityError as exc:
             raise _friendly_integrity_error(exc) from exc
         conn.commit()
@@ -3032,6 +3244,18 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
 
 def delete_subagent(subagent_id: int) -> bool:
     with _connect() as conn:
+        children = [
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM subagents WHERE parent_agent_id = ? ORDER BY name",
+                (subagent_id,),
+            )
+        ]
+        if children:
+            names = ", ".join(children)
+            raise ValueError(
+                f"Move or delete this subagent's children first: {names}."
+            )
         cur = conn.execute("DELETE FROM subagents WHERE id = ?", (subagent_id,))
         if cur.rowcount:
             conn.execute(
@@ -3115,7 +3339,8 @@ def build_specs() -> list[dict]:
                 "headers": _resolved_json_object(s.get("headers") or "{}"),
                 "env": _resolved_json_object(s.get("env") or "{}"),
 
-                "parent": s.get("parent") or "supervisor",
+                "parent_agent_id": s.get("parent_agent_id"),
+                "parent_name": s.get("parent_name") or "Mounir",
 
                 "model": (s.get("model") or "").strip() or s["model_name"],
                 "base_url": s["base_url"],

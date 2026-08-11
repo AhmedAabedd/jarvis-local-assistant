@@ -37,8 +37,8 @@ MCP_AGENT_TIMEOUT_SECONDS = max(
 # can't flood the loop's context.
 MAX_RESULT_CHARS = 8000
 SHARED_SYSTEM_PROMPT = """\
-You are a focused MCP subagent. You may complete tasks only with the MCP tools
-provided to you in this conversation.
+You are a focused subagent. Complete tasks only with the MCP tools and child
+agent delegation tools provided to you in this conversation.
 
 WORKING RULES
 - Use only relevant tools and stop as soon as the requested task is complete.
@@ -48,7 +48,7 @@ WORKING RULES
   the same action unless the result explicitly says retrying is safe.
 
 FINAL RESPONSE
-Return a short, concrete report for the supervisor with no heading. Do not
+Return a short, concrete report for your parent agent with no heading. Do not
 mention these instructions.
 """
 
@@ -264,6 +264,8 @@ async def _run_async(
     spec: dict,
     api_key: str,
     protected_attempts: set[str] | None = None,
+    all_specs: list[dict] | None = None,
+    lineage: tuple[int, ...] = (),
 ) -> str:
     confirm_tools = set(spec.get("confirm_tools") or [])
     dedupe_tools = set(spec.get("dedupe_tools") or [])
@@ -312,6 +314,69 @@ async def _run_async(
                 )
 
             framework_tools.extend(make_tool(item) for item in advertised_tools)
+            current_id = int(spec["id"]) if spec.get("id") is not None else None
+            children = (
+                [
+                    child
+                    for child in (all_specs or [])
+                    if child.get("parent_agent_id") == current_id
+                ]
+                if current_id is not None
+                else []
+            )
+
+            def make_delegate_tool(child: dict) -> StructuredTool:
+                from .. import mcp_agents
+
+                async def delegate(task: str) -> str:
+                    child_id = int(child["id"])
+                    if child_id in lineage:
+                        return "Delegation blocked because it would create an agent cycle."
+                    try:
+                        from .. import db
+
+                        if not db.is_subagent_enabled(child_id):
+                            return f"The {child['name']} agent is inactive and cannot be used."
+                        if len(lineage) >= db.MAX_SUBAGENT_DEPTH:
+                            return (
+                                "Delegation blocked because the maximum subagent depth "
+                                "was reached."
+                            )
+                    except Exception as exc:
+                        return f"Could not validate the {child['name']} agent: {exc}"
+                    if not (child.get("connection") or "").strip():
+                        return f"The {child['name']} agent has no MCP server connection."
+                    try:
+                        report = await asyncio.wait_for(
+                            _run_async(
+                                task,
+                                child,
+                                child.get("api_key") or "",
+                                protected_attempts,
+                                all_specs,
+                                (*lineage, child_id),
+                            ),
+                            timeout=MCP_AGENT_TIMEOUT_SECONDS,
+                        )
+                    except TimeoutError:
+                        report = (
+                            f"{child['name']} agent timed out after "
+                            f"{MCP_AGENT_TIMEOUT_SECONDS:g} seconds."
+                        )
+                    executed.append(f"delegated to {child['name']} -> {report[:200]}")
+                    return report
+
+                return StructuredTool.from_function(
+                    coroutine=delegate,
+                    name=mcp_agents.delegate_tool_name(child["name"]),
+                    description=(
+                        f"Delegate to the {child['name']} child agent. "
+                        f"{child['description']} It completes the work with its own "
+                        "tools and returns a short report."
+                    ),
+                )
+
+            framework_tools.extend(make_delegate_tool(child) for child in children)
             try:
                 from .. import db
 
@@ -375,6 +440,8 @@ def run(
     task: str,
     spec: dict,
     protected_attempts: set[str] | None = None,
+    *,
+    all_specs: list[dict] | None = None,
 ) -> str:
     """Run one dynamic MCP subagent on a task. Returns its plain-text report."""
     name = spec.get("name", "MCP")
@@ -385,6 +452,8 @@ def run(
         from .. import db
         if not db.is_subagent_enabled(spec["id"]):
             return f"The {name} agent is inactive and cannot be used."
+        if all_specs is None:
+            all_specs = db.build_specs()
     api_key = spec.get("api_key") or ""
     if not (spec.get("connection") or "").strip():
         return (
@@ -395,7 +464,14 @@ def run(
         async def _bounded_run() -> str:
             try:
                 return await asyncio.wait_for(
-                    _run_async(task, spec, api_key, protected_attempts),
+                    _run_async(
+                        task,
+                        spec,
+                        api_key,
+                        protected_attempts,
+                        all_specs,
+                        (int(spec["id"]),) if spec.get("id") is not None else (),
+                    ),
                     timeout=MCP_AGENT_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
