@@ -105,6 +105,24 @@ The graph is rebuilt from the database before every turn. Adding, editing,
 activating, deactivating, or deleting a dynamic subagent changes the supervisor's
 available capability schema immediately.
 
+### Backend agent architecture
+
+The execution layer uses LangGraph v1 primitives directly:
+
+- `MessagesState` and the built-in message reducer keep tool calls and results
+  paired in canonical LangChain messages.
+- Python tools use `@tool` or `StructuredTool`; JSON schemas are inferred from
+  type annotations instead of being maintained by hand.
+- `ToolNode` validates arguments, executes tool batches, converts failures into
+  tool results, and powers both built-in and dynamic MCP specialist loops.
+- Conditional graph edges enforce tool-round limits, declined-action handling,
+  and supervisor-to-specialist routing.
+- LangGraph custom streams carry provider tokens directly to every interface;
+  there is no separate queue/thread streaming bridge in the agent runtime.
+
+Provider adapters remain isolated in `mounir/llm.py`, so the same graph works
+with Ollama, Mistral, Groq, NVIDIA, Gemini, and OpenAI-compatible endpoints.
+
 ---
 
 ## Dynamic MCP specialists

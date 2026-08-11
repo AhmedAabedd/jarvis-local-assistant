@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import re
 import time
 from typing import Iterator
@@ -286,7 +287,7 @@ def _mistral_stream(
                     "content": m.get("content") or "",
                     "tool_calls": [
                         {
-                            "id": f"call_{i}",
+                            "id": tc.get("id") or f"call_{i}",
                             "type": "function",
                             "function": {
                                 "name": tc["function"]["name"],
@@ -327,30 +328,52 @@ def _mistral_stream(
                         collected_calls[idx]["arguments"] += tc.function.arguments
 
         if tool_calls_out is not None and collected_calls:
-            import json
             for call in collected_calls.values():
-                tool_calls_out.append(_wrap_tool_call(call["name"], json.loads(call["arguments"])))
+                tool_calls_out.append(
+                    _canonical_tool_call(
+                        call["name"],
+                        json.loads(call["arguments"]),
+                        call.get("id"),
+                    )
+                )
 
     except Exception as exc:
         raise OllamaError(f"Mistral call failed: {exc}") from exc
 
-def _wrap_tool_call(name: str, arguments: dict):
-    class _Fn:
-        pass
-    fn = _Fn()
-    fn.name = name
-    fn.arguments = arguments
-    class _TC:
-        pass
-    tc = _TC()
-    tc.function = fn
-    return tc
+def _canonical_tool_call(
+    name: str, arguments: dict, call_id: str | None = None
+) -> dict:
+    """Return one provider-independent OpenAI-style tool call."""
+
+    return {
+        "id": call_id or "call_0",
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
 
 def _ollama_stream(
     messages, *, model, think, tools, tool_calls_out, base_url=None, api_key=None
 ) -> Iterator[str]:
     try:
-        kwargs = dict(model=model, messages=messages, stream=True, options={"num_ctx": 32768},
+        clean_messages = []
+        for message in messages:
+            entry = dict(message)
+            if message.get("tool_calls"):
+                entry["tool_calls"] = [
+                    {
+                        "function": {
+                            "name": call["function"]["name"],
+                            "arguments": (
+                                json.loads(call["function"]["arguments"] or "{}")
+                                if isinstance(call["function"].get("arguments"), str)
+                                else call["function"].get("arguments") or {}
+                            ),
+                        }
+                    }
+                    for call in message["tool_calls"]
+                ]
+            clean_messages.append(entry)
+        kwargs = dict(model=model, messages=clean_messages, stream=True, options={"num_ctx": 32768},
                       think=config.THINK if think is None else think)
         if tools:
             kwargs["tools"] = tools
@@ -366,7 +389,14 @@ def _ollama_stream(
             if message.content:
                 yield message.content
             if tool_calls_out is not None and message.tool_calls:
-                tool_calls_out.extend(message.tool_calls)
+                tool_calls_out.extend(
+                    _canonical_tool_call(
+                        call.function.name,
+                        dict(call.function.arguments or {}),
+                        getattr(call, "id", None),
+                    )
+                    for call in message.tool_calls
+                )
     except Exception as exc:
         raise OllamaError(f"Ollama call failed (model {model}): {exc}") from exc
 
@@ -382,16 +412,12 @@ def _groq_stream(
         )
 
         clean_messages = []
-        last_tool_call_ids: list[str] = []  # ids generated for the most recent assistant tool_calls
-
         for m in messages:
             if m["role"] == "tool":
-                # Pop ids in order — matches the order tools were dispatched in agent.py
-                tool_call_id = last_tool_call_ids.pop(0) if last_tool_call_ids else "call_0"
                 clean_messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": m.get("tool_name", ""),
+                    "tool_call_id": m.get("tool_call_id", "call_0"),
+                    "name": m.get("name") or m.get("tool_name", ""),
                     "content": m.get("content") or "",
                 })
                 continue
@@ -399,11 +425,9 @@ def _groq_stream(
             entry = {"role": m["role"], "content": m.get("content") or ""}
 
             if m.get("tool_calls"):
-                ids = [f"call_{i}" for i in range(len(m["tool_calls"]))]
-                last_tool_call_ids = ids.copy()
                 entry["tool_calls"] = [
                     {
-                        "id": ids[i],
+                        "id": tc.get("id") or f"call_{i}",
                         "type": "function",
                         "function": {
                             "name": tc["function"]["name"],
@@ -436,35 +460,32 @@ def _groq_stream(
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in collected_calls:
-                        collected_calls[idx] = {"name": "", "arguments": ""}
+                        collected_calls[idx] = {
+                            "id": tc.id or f"call_{idx}",
+                            "name": "",
+                            "arguments": "",
+                        }
+                    elif tc.id:
+                        collected_calls[idx]["id"] = tc.id
                     if tc.function.name:
                         collected_calls[idx]["name"] += tc.function.name
                     if tc.function.arguments:
                         collected_calls[idx]["arguments"] += tc.function.arguments
 
         if tool_calls_out is not None and collected_calls:
-            import json
             for call in collected_calls.values():
-                tool_calls_out.append(_wrap_groq_tool_call(call["name"], json.loads(call["arguments"])))
+                tool_calls_out.append(
+                    _canonical_tool_call(
+                        call["name"],
+                        json.loads(call["arguments"]),
+                        call.get("id"),
+                    )
+                )
 
     except Exception as exc:
         raise OllamaError(f"Groq call failed: {exc}") from exc
 
 def _to_json_str(args) -> str:
-    import json
     if isinstance(args, str):
         return args
     return json.dumps(args)
-
-def _wrap_groq_tool_call(name: str, arguments: dict):
-    """Wrap a Groq tool call into the same shape agent.py expects."""
-    class _Fn:
-        pass
-    fn = _Fn()
-    fn.name = name
-    fn.arguments = arguments
-    class _TC:
-        pass
-    tc = _TC()
-    tc.function = fn
-    return tc

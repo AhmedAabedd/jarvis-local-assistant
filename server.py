@@ -790,16 +790,13 @@ async def run_heartbeat_now():
 async def agent_overview():
     """Return the configured, user-visible agent topology for Agent Studio."""
     supervisor_tools = []
-    for schema in tools.SCHEMAS:
-        function = schema.get("function") or {}
-        name = str(function.get("name") or "").strip()
-        if name and not name.startswith("delegate_to_"):
-            supervisor_tools.append(
-                {
-                    "name": name,
-                    "description": str(function.get("description") or ""),
-                }
-            )
+    for registered_tool in tools.GENERAL_TOOLS:
+        supervisor_tools.append(
+            {
+                "name": registered_tool.name,
+                "description": registered_tool.description,
+            }
+        )
 
     profile = db.get_profile()
     supervisor = db.get_supervisor_config()

@@ -1,63 +1,44 @@
-"""LangGraph orchestration for Mounir: a supervisor that also does the general
-work, plus an isolated coder node, wired together with ``Command`` handoffs.
+"""LangGraph orchestration for Mounir.
 
-Graph shape::
-
-    START ─> supervisor ─┬─(answers)──────────────> END
-                         └─(needs code)──> coder ─> supervisor ─> END
-
-The supervisor is a single node that runs its own tool loop (web, browser,
-shell, and delegation). When it decides code is needed it calls the ``delegate_to_coder``
-tool — instead of running that inline we hand off to the ``coder`` node via
-``Command(goto="coder")``. The coder does its isolated work and hands back with
-``Command(goto="supervisor")``, returning ONLY its structured report. The
-supervisor then sees that report and finishes the turn.
-
-State is just the shared ``messages`` bus (concatenated via a reducer). Routing
-is never stored in state — ``Command.goto`` carries it. The coder's internal
-file-tool chatter stays local to that node and never enters ``messages``; only
-its report crosses back, keeping the orchestrator's context small.
-
-The public API is unchanged: ``Agent.respond()`` still yields reply chunks, so
-the CLI, voice loop, and web server keep working without knowing about the graph.
+The graph owns the complete supervisor workflow: canonical message state,
+conditional routing, typed tool execution, specialist hand-offs, safety caps,
+and token streaming.  Provider-specific HTTP/SDK calls remain in ``llm.py``;
+everything around them uses LangGraph and LangChain primitives.
 """
 
 from __future__ import annotations
 
-import json
 import operator
-import queue
 import threading
-from contextvars import copy_context
-from importlib import import_module
-from typing import Annotated, Iterator, TypedDict
+from typing import Annotated, Iterator
 
-from . import config as cfg, db, llm, mcp_agents, tools
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    ToolMessage,
+    convert_to_messages,
+)
+from langchain_core.tools import BaseTool
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+from langgraph.types import Command
+
+from . import config as cfg, db, graph_runtime, llm, mcp_agents, tools, trace
 from .memory import Conversation
 from .specialists.coder import run as run_coder
 from .specialists.knowledge import run as run_knowledge
 from .specialists.media import run as run_media
 from .specialists.mcp_agent import run as run_mcp_agent
 from .specialists.system import run as run_system
-from . import trace
 
-_langgraph_graph = import_module("langgraph.graph")
-END = _langgraph_graph.END
-START = _langgraph_graph.START
-StateGraph = _langgraph_graph.StateGraph
-Command = import_module("langgraph.types").Command
-
-# Safety cap on tool rounds inside one supervisor invocation.
 MAX_TOOL_ROUNDS = 10
-# Safety cap on supervisor -> specialist -> supervisor hand-offs per turn, so a
-# model that keeps re-delegating can't loop forever.
 MAX_DELEGATIONS = 3
 VOICE_RESPONSE_INSTRUCTION = (
     "MANDATORY VOICE MODE: Reply as natural spoken language only. "
     "Never use Markdown, bullets, tables, code formatting, emojis, or decorative symbols."
 )
 
-# Delegation tools mapped to the node they hand off to.
 _DELEGATES = {
     "delegate_to_coder": "coder",
     "delegate_to_media": "media",
@@ -66,366 +47,244 @@ _DELEGATES = {
 }
 
 
-class TurnState(TypedDict):
-    # Single shared bus. Each node returns only the NEW messages it produced;
-    # the reducer concatenates them. (operator.add keeps our raw dict messages
-    # intact rather than coercing them to LangChain message objects.)
-    messages: Annotated[list[dict], operator.add]
+class TurnState(MessagesState):
+    """Canonical LangGraph message state plus bounded-loop counters."""
+
+    tool_rounds: Annotated[int, operator.add]
+    delegations: Annotated[int, operator.add]
 
 
-# --- helpers ----------------------------------------------------------------
-
-def _count_delegations(messages: list[dict]) -> int:
-    # Prefix match covers both the built-in delegates and the dynamic
-    # delegate_to_<slug> tools of registered MCP agents.
-    return sum(
-        1
-        for m in messages
-        if m.get("role") == "tool" and str(m.get("tool_name", "")).startswith("delegate_to_")
-    )
+def _tool_calls(message: BaseMessage | dict) -> list[dict]:
+    if isinstance(message, AIMessage):
+        return list(message.tool_calls)
+    if isinstance(message, dict):
+        normalized = graph_runtime.ai_message(message)
+        return list(normalized.tool_calls)
+    return []
 
 
-def _extract_delegate(messages: list[dict], tool_name: str) -> tuple[str, str]:
-    """Find the most recent call to `tool_name`; return (task, call_id)."""
+def _extract_delegate(
+    messages: list[BaseMessage | dict], tool_name: str
+) -> tuple[str, str]:
+    """Return the task and call ID from the latest matching delegation."""
+
     for message in reversed(messages):
-        if message.get("role") != "assistant" or not message.get("tool_calls"):
-            continue
-        for call in message["tool_calls"]:
-            fn = call.get("function", {})
-            if fn.get("name") != tool_name:
-                continue
-            args = fn.get("arguments")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except Exception:
-                    args = {}
-            return str((args or {}).get("task", "")), call.get("id", "call_0")
+        for call in _tool_calls(message):
+            if call.get("name") == tool_name:
+                return str((call.get("args") or {}).get("task", "")), str(
+                    call.get("id") or "call_0"
+                )
     return "", "call_0"
 
 
-# --- supervisor node --------------------------------------------------------
+def _stream_text(content: str) -> None:
+    if content:
+        get_stream_writer()(content)
+
 
 def _supervisor(
     state: TurnState,
-    stream_q: queue.Queue | None,
     model: str,
     use_tools: bool,
     delegates: dict[str, str],
-    dynamic: list[dict],
+    available_tools: list[BaseTool],
 ) -> Command:
-    supervisor_runtime = db.get_supervisor_runtime(model)
-    chat_runtime = {
-        "model": supervisor_runtime["model"],
-        "provider": supervisor_runtime["provider"],
-        "base_url": supervisor_runtime["base_url"],
-        "api_key": supervisor_runtime["api_key"],
-    }
-    schemas = list(tools.SCHEMAS) if use_tools else []
-    # Built-in delegation schemas are static definitions, but availability is
-    # user-controlled. Never advertise a delegate that is absent from this
-    # turn's executable graph.
-    schemas = [
-        schema for schema in schemas
-        if not str((schema.get("function") or {}).get("name") or "").startswith(
-            "delegate_to_"
+    """Run one supervisor model step and route its canonical tool calls."""
+
+    runtime = db.get_supervisor_runtime(model)
+    advertised = list(available_tools) if use_tools else []
+    if state.get("delegations", 0) >= MAX_DELEGATIONS:
+        advertised = [item for item in advertised if item.name not in delegates]
+
+    raw_calls: list = []
+    chunks: list[str] = []
+    for chunk in llm.chat_stream(
+        graph_runtime.message_dicts(state["messages"]),
+        tools=graph_runtime.tool_schemas(advertised) or None,
+        tool_calls_out=raw_calls,
+        model=runtime["model"],
+        provider=runtime["provider"],
+        base_url=runtime["base_url"],
+        api_key=runtime["api_key"],
+    ):
+        chunks.append(chunk)
+        _stream_text(chunk)
+
+    response = graph_runtime.ai_message(
+        {"content": "".join(chunks), "tool_calls": raw_calls},
+        call_prefix=f"call_{state.get('tool_rounds', 0)}",
+    )
+    if not response.tool_calls:
+        return Command(goto=END, update={"messages": [response]})
+
+    delegate = next(
+        (call for call in response.tool_calls if call.get("name") in delegates),
+        None,
+    )
+    if delegate is not None:
+        target = delegates[str(delegate["name"])]
+        # A provider may mix delegation and ordinary calls in one response.
+        # Handoffs are exclusive so the history contains one valid call/result pair.
+        handoff = AIMessage(content=response.content, tool_calls=[delegate])
+        trace.gap()
+        trace.event(f"→ delegating to {target}")
+        return Command(
+            goto=target,
+            update={"messages": [handoff], "delegations": 1},
         )
-        or str((schema.get("function") or {}).get("name") or "") in delegates
-    ]
-    # Registered MCP agents each contribute one delegate schema — the only
-    # thing the supervisor ever sees of them.
-    if use_tools:
-        schemas += [mcp_agents.delegate_schema(spec) for spec in dynamic]
-    # Stop offering specialists once we've delegated enough this turn.
-    if _count_delegations(state["messages"]) >= MAX_DELEGATIONS:
-        schemas = [s for s in schemas if s["function"]["name"] not in delegates]
 
-    convo = [dict(m) for m in state["messages"]]
-    new_messages: list[dict] = []
+    return Command(
+        goto="tools",
+        update={"messages": [response], "tool_rounds": 1},
+    )
 
-    for _ in range(MAX_TOOL_ROUNDS):
-        tool_calls: list = []
-        parts: list[str] = []
-        for chunk in llm.chat_stream(
-            convo, tools=schemas or None, tool_calls_out=tool_calls,
-            **chat_runtime,
-        ):
-            parts.append(chunk)
-            if stream_q is not None:
-                stream_q.put(chunk)
 
-        if not tool_calls:
-            final = "".join(parts).strip()
-            new_messages.append({"role": "assistant", "content": final})
-            return Command(goto=END, update={"messages": new_messages})
+def _after_tools(state: TurnState) -> str:
+    """Trace the latest batch and decide whether the loop continues."""
 
-        # Hand off to a specialist node instead of running the delegate inline.
-        delegate = next(
-            (tc for tc in tool_calls if tc.function.name in delegates), None
-        )
-        if delegate is not None:
-            target = delegates[delegate.function.name]
-            new_messages.append(
-                {
-                    "role": "assistant",
-                    "content": "".join(parts),
-                    "tool_calls": [
-                        {
-                            "id": "call_0",
-                            "function": {
-                                "name": delegate.function.name,
-                                "arguments": delegate.function.arguments,
-                            },
-                        }
-                    ],
-                }
-            )
-            trace.gap()  # separate the delegation from the thinking spinner
-            trace.event(f"→ delegating to {target}")
-            return Command(goto=target, update={"messages": new_messages})
+    latest: list[ToolMessage] = []
+    caller: AIMessage | None = None
+    for message in reversed(state["messages"]):
+        if isinstance(message, AIMessage):
+            caller = message
+            break
+        if isinstance(message, ToolMessage):
+            latest.append(message)
+    graph_runtime.trace_tool_messages(
+        [*([caller] if caller is not None else []), *reversed(latest)]
+    )
+    if any(str(message.content) == tools.USER_DECLINED for message in latest):
+        return "declined"
+    if state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS:
+        return "force_final"
+    return "supervisor"
 
-        # Otherwise run the general tools inline and loop with their results.
-        assistant_msg = {
-            "role": "assistant",
-            "content": "".join(parts),
-            "tool_calls": [
-                {
-                    "id": f"call_{i}",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
-                for i, tc in enumerate(tool_calls)
-            ],
-        }
-        convo.append(assistant_msg)
-        new_messages.append(assistant_msg)
-        declined = False
-        for i, call in enumerate(tool_calls):
-            args = dict(call.function.arguments)
-            # After a decline, don't run the rest of the batch — but every
-            # tool_call still needs a result message for the history to be valid.
-            result = (
-                "Skipped — the user declined a command in this batch."
-                if declined
-                else tools.dispatch(call.function.name, args)
-            )
-            trace.tool(call.function.name, args, result)
-            tool_msg = {
-                "role": "tool",
-                "tool_name": call.function.name,
-                "tool_call_id": f"call_{i}",
-                "content": result,
-            }
-            convo.append(tool_msg)
-            new_messages.append(tool_msg)
-            if result == tools.USER_DECLINED:
-                declined = True
-        if declined:
-            # End the turn with a FIXED reply instead of letting the model
-            # react to the decline (it tends to retry the command or argue).
-            notice = "Okay, I didn't run it — you declined the command. Tell me how you'd like to proceed."
-            if stream_q is not None:
-                stream_q.put(notice)
-            new_messages.append({"role": "assistant", "content": notice})
-            return Command(goto=END, update={"messages": new_messages})
 
-    # Tool-round cap hit — force a final, tool-free answer.
-    parts = []
-    for chunk in llm.chat_stream(convo, tools=None, **chat_runtime):
+def _declined(_state: TurnState) -> dict:
+    notice = (
+        "Okay, I didn't run it — you declined the command. "
+        "Tell me how you'd like to proceed."
+    )
+    _stream_text(notice)
+    return {"messages": [AIMessage(content=notice)]}
+
+
+def _force_final(state: TurnState, model: str) -> dict:
+    runtime = db.get_supervisor_runtime(model)
+    parts: list[str] = []
+    for chunk in llm.chat_stream(
+        graph_runtime.message_dicts(state["messages"]),
+        tools=None,
+        model=runtime["model"],
+        provider=runtime["provider"],
+        base_url=runtime["base_url"],
+        api_key=runtime["api_key"],
+    ):
         parts.append(chunk)
-        if stream_q is not None:
-            stream_q.put(chunk)
-    final = "".join(parts).strip()
-    new_messages.append({"role": "assistant", "content": final})
-    return Command(goto=END, update={"messages": new_messages})
+        _stream_text(chunk)
+    return {"messages": [AIMessage(content="".join(parts).strip())]}
 
 
-# --- coder node -------------------------------------------------------------
+def _specialist_result(
+    state: TurnState,
+    tool_name: str,
+    node_name: str,
+    runner,
+    unavailable: str | None = None,
+) -> Command:
+    task, call_id = _extract_delegate(state["messages"], tool_name)
+    trace.node(node_name)
+    trace.block("received  ← supervisor", task)
+    if unavailable:
+        report = unavailable
+    elif task:
+        report = runner(task).strip()
+    else:
+        report = f"No task was provided to the {node_name} agent."
+    trace.block("returned  → supervisor", report)
+    trace.gap()
+    return Command(
+        goto="supervisor",
+        update={
+            "messages": [
+                ToolMessage(
+                    content=report,
+                    name=tool_name,
+                    tool_call_id=call_id,
+                )
+            ]
+        },
+    )
+
 
 def _coder(state: TurnState) -> Command:
-    task, call_id = _extract_delegate(state["messages"], "delegate_to_coder")
-    trace.node("coder")
-    trace.block("received  ← supervisor", task)
-
-    report = run_coder(task).strip() if task else "No task was provided to the coder."
-
-    trace.block("returned  → supervisor", report)
-    trace.gap()  # breathing room before the supervisor's reply streams in
-    # The report is the result of the delegate_to_coder tool call, handed back
-    # to the supervisor. The coder's own file-tool chatter never leaves the node.
-    return Command(
-        goto="supervisor",
-        update={
-            "messages": [
-                {
-                    "role": "tool",
-                    "tool_name": "delegate_to_coder",
-                    "tool_call_id": call_id,
-                    "content": report,
-                }
-            ]
-        },
+    return _specialist_result(
+        state, "delegate_to_coder", "coder", run_coder
     )
 
-
-# --- media node -------------------------------------------------------------
 
 def _media(state: TurnState) -> Command:
-    task, call_id = _extract_delegate(state["messages"], "delegate_to_media")
-    trace.node("media")
-    trace.block("received  ← supervisor", task)
-
-    if not db.is_builtin_agent_enabled("media"):
-        report = "The Media agent is inactive and cannot be used."
-    else:
-        report = run_media(task).strip() if task else "No task was provided to the media agent."
-
-    trace.block("returned  → supervisor", report)
-    trace.gap()  # breathing room before the supervisor's reply streams in
-    # Only the text report crosses back; the raw image/audio bytes loaded inside
-    # the node never enter `messages`, keeping the orchestrator's context small.
-    return Command(
-        goto="supervisor",
-        update={
-            "messages": [
-                {
-                    "role": "tool",
-                    "tool_name": "delegate_to_media",
-                    "tool_call_id": call_id,
-                    "content": report,
-                }
-            ]
-        },
+    enabled = db.is_builtin_agent_enabled("media")
+    return _specialist_result(
+        state,
+        "delegate_to_media",
+        "media",
+        run_media,
+        None if enabled else "The Media agent is inactive and cannot be used.",
     )
 
-
-# --- knowledge agent node ---------------------------------------------------------
 
 def _knowledge(state: TurnState) -> Command:
-    task, call_id = _extract_delegate(state["messages"], "delegate_to_knowledge")
-    trace.node("knowledge")
-    trace.block("received  ← supervisor", task)
-
-    if not db.is_builtin_agent_enabled("knowledge"):
-        report = "The Knowledge agent is inactive and cannot be used."
-    else:
-        report = run_knowledge(task).strip() if task else "No task was provided to the knowledge agent."
-
-    trace.block("returned  → supervisor", report)
-    trace.gap()  # breathing room before the supervisor's reply streams in
-    # Only the short curation report crosses back; the knowledge agent's file reads
-    # and index bookkeeping stay inside this node.
-    return Command(
-        goto="supervisor",
-        update={
-            "messages": [
-                {
-                    "role": "tool",
-                    "tool_name": "delegate_to_knowledge",
-                    "tool_call_id": call_id,
-                    "content": report,
-                }
-            ]
-        },
+    enabled = db.is_builtin_agent_enabled("knowledge")
+    return _specialist_result(
+        state,
+        "delegate_to_knowledge",
+        "knowledge",
+        run_knowledge,
+        None if enabled else "The Knowledge agent is inactive and cannot be used.",
     )
 
-
-# --- system node ------------------------------------------------------------
 
 def _system(state: TurnState) -> Command:
-    task, call_id = _extract_delegate(state["messages"], "delegate_to_system")
-    trace.node("system")
-    trace.block("received  ← supervisor", task)
-
-    if not db.is_builtin_agent_enabled("system"):
-        report = "The System agent is inactive and cannot be used."
-    else:
-        report = run_system(task).strip() if task else "No task was provided to the system agent."
-
-    trace.block("returned  → supervisor", report)
-    trace.gap()  # breathing room before the supervisor's reply streams in
-    # Only the short hardware report crosses back; the command chatter stays here.
-    return Command(
-        goto="supervisor",
-        update={
-            "messages": [
-                {
-                    "role": "tool",
-                    "tool_name": "delegate_to_system",
-                    "tool_call_id": call_id,
-                    "content": report,
-                }
-            ]
-        },
+    enabled = db.is_builtin_agent_enabled("system")
+    return _specialist_result(
+        state,
+        "delegate_to_system",
+        "system",
+        run_system,
+        None if enabled else "The System agent is inactive and cannot be used.",
     )
 
-
-# --- dynamic MCP agent nodes ---------------------------------------------------
 
 def _make_mcp_node(
     spec: dict,
     valid_parents: set[str],
     protected_attempts: set[str],
 ):
-    """Build a graph node for one registered MCP agent.
-
-    Same contract as the built-in specialist nodes: receive the task from the
-    delegate tool call, run the generic MCP specialist, hand its report back
-    to the PARENT node as the tool result. The server's tool chatter never
-    enters `messages`. The parent comes from the registry entry, falling back
-    to the supervisor when it names a node that doesn't exist.
-    """
     tool_name = mcp_agents.delegate_tool_name(spec["name"])
     parent = spec.get("parent") or "supervisor"
     if parent not in valid_parents:
         parent = "supervisor"
 
-    def _node(state: TurnState) -> Command:
-        task, call_id = _extract_delegate(state["messages"], tool_name)
-        trace.node(spec["name"])
-        trace.block("received  ← supervisor", task)
-
-        if not db.is_subagent_enabled(spec["id"]):
-            report = f"The {spec['name']} agent is inactive and cannot be used."
-        else:
-            report = (
-                run_mcp_agent(task, spec, protected_attempts).strip()
-                if task
-                else f"No task was provided to the {spec['name']} agent."
-            )
-
-        trace.block(f"returned  → {parent}", report)
-        trace.gap()  # breathing room before the parent's reply streams in
-        return Command(
-            goto=parent,
-            update={
-                "messages": [
-                    {
-                        "role": "tool",
-                        "tool_name": tool_name,
-                        "tool_call_id": call_id,
-                        "content": report,
-                    }
-                ]
-            },
+    def node(state: TurnState) -> Command:
+        enabled = db.is_subagent_enabled(spec["id"])
+        unavailable = (
+            None
+            if enabled
+            else f"The {spec['name']} agent is inactive and cannot be used."
+        )
+        return _specialist_result(
+            state,
+            tool_name,
+            spec["name"],
+            lambda task: run_mcp_agent(task, spec, protected_attempts),
+            unavailable,
         )
 
-    return _node
+    return node
 
 
-# --- graph ------------------------------------------------------------------
-
-def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
-    """Compile the supervisor/coder graph, binding this turn's runtime values.
-
-    The runtime values (stream queue, model, tool toggle) are captured by the
-    node closures rather than threaded through state or config — simplest and
-    most robust with LangGraph's node-signature handling. The supervisor and the
-    specialist nodes route dynamically via Command(goto=...).
-
-    Registered MCP agents (mounir/mcp_agents.py) are loaded here — i.e. once
-    per turn — so a freshly added agent is routable from the next message:
-    one node per agent, one delegate tool per agent in the merged map.
-    """
+def _compile_graph(model: str, use_tools: bool):
     dynamic = mcp_agents.load()
     enabled_builtins = db.enabled_builtin_agent_keys()
     delegates = {
@@ -433,14 +292,55 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
         for name, node in _DELEGATES.items()
         if node == "coder" or node in enabled_builtins
     }
+    dynamic_tools = []
     for spec in dynamic:
-        delegates[mcp_agents.delegate_tool_name(spec["name"])] = mcp_agents.node_name(spec["name"])
+        name = mcp_agents.delegate_tool_name(spec["name"])
+        delegates[name] = mcp_agents.node_name(spec["name"])
+        dynamic_tools.append(mcp_agents.delegate_tool(spec))
+
+    builtin_tools = [
+        item
+        for item in tools.DELEGATE_TOOLS
+        if item.name in delegates
+    ]
+    advertised_tools = [*tools.GENERAL_TOOLS, *builtin_tools, *dynamic_tools]
+
+    declined_batch = threading.Event()
+    general_tool_lock = threading.Lock()
+
+    def execute_general_tool(request, execute):
+        with general_tool_lock:
+            if declined_batch.is_set():
+                return ToolMessage(
+                    content="Skipped — the user declined a command in this batch.",
+                    name=request.tool_call["name"],
+                    tool_call_id=request.tool_call["id"],
+                )
+            result = execute(request)
+            if (
+                isinstance(result, ToolMessage)
+                and str(result.content) == tools.USER_DECLINED
+            ):
+                declined_batch.set()
+            return result
 
     graph = StateGraph(TurnState)
     graph.add_node(
         "supervisor",
-        lambda state: _supervisor(state, stream_q, model, use_tools, delegates, dynamic),
+        lambda state: _supervisor(
+            state, model, use_tools, delegates, advertised_tools
+        ),
     )
+    graph.add_node(
+        "tools",
+        ToolNode(
+            tools.GENERAL_TOOLS,
+            handle_tool_errors=True,
+            wrap_tool_call=execute_general_tool,
+        ),
+    )
+    graph.add_node("declined", _declined)
+    graph.add_node("force_final", lambda state: _force_final(state, model))
     graph.add_node("coder", _coder)
     if "media" in enabled_builtins:
         graph.add_node("media", _media)
@@ -448,22 +348,34 @@ def _compile_graph(stream_q: queue.Queue | None, model: str, use_tools: bool):
         graph.add_node("knowledge", _knowledge)
     if "system" in enabled_builtins:
         graph.add_node("system", _system)
-    # Today only the supervisor is a valid parent: a specialist node re-extracts
-    # its OWN delegate call on entry, so routing a child's report into another
-    # specialist would arrive with no matching call. Nested parents (subagent
-    # reporting to subagent) need that hand-off protocol first — future work.
-    valid_parents = {"supervisor"}
-    # One set for the complete user turn, shared by every dynamic MCP node.
-    # This also catches repeats after a second delegation or through another
-    # subagent connected to the same server.
+
     protected_attempts: set[str] = set()
     for spec in dynamic:
         graph.add_node(
             mcp_agents.node_name(spec["name"]),
-            _make_mcp_node(spec, valid_parents, protected_attempts),
+            _make_mcp_node(spec, {"supervisor"}, protected_attempts),
         )
+
     graph.add_edge(START, "supervisor")
+    graph.add_conditional_edges(
+        "tools",
+        _after_tools,
+        {
+            "supervisor": "supervisor",
+            "declined": "declined",
+            "force_final": "force_final",
+        },
+    )
+    graph.add_edge("declined", END)
+    graph.add_edge("force_final", END)
     return graph.compile()
+
+
+def _stored_message(message: BaseMessage) -> dict:
+    rendered = graph_runtime.message_dicts([message])[0]
+    if isinstance(message, ToolMessage):
+        rendered["tool_name"] = message.name or "tool"
+    return rendered
 
 
 class Agent:
@@ -475,9 +387,7 @@ class Agent:
     ) -> None:
         db.init()
         if conversation is None:
-            conversation = Conversation(
-                system_prompt=cfg.build_system_prompt(db.get_profile())
-            )
+            conversation = Conversation(system_prompt=cfg.build_system_prompt(db.get_profile()))
             self._profile_managed_prompt = True
         else:
             self._profile_managed_prompt = False
@@ -486,15 +396,13 @@ class Agent:
         self.use_tools = use_tools
 
     def respond(self, user_input: str, *, voice: bool = False) -> Iterator[str]:
-        """Run one user turn through the graph, streaming the reply chunks."""
+        """Run and stream one complete LangGraph turn."""
+
         if self._profile_managed_prompt:
             self.conversation.system_prompt = cfg.build_system_prompt(db.get_profile())
         self.conversation.add_user(user_input)
-        stream_q: queue.Queue[str | None] = queue.Queue()
         messages = self.conversation.to_messages()
         if voice:
-            # Keep the instruction turn-local: the real transcription remains
-            # clean in shared conversation memory and in the visible transcript.
             messages = [dict(message) for message in messages]
             for message in reversed(messages):
                 if message.get("role") == "user":
@@ -502,50 +410,46 @@ class Agent:
                         f"{message.get('content') or ''}\n\n{VOICE_RESPONSE_INSTRUCTION}"
                     )
                     break
-        state: TurnState = {"messages": messages}
-        input_len = len(state["messages"])  # everything after this is new this turn
-        graph = _compile_graph(stream_q, self.model, self.use_tools)
-        result: dict = {}
 
-        def _run_graph() -> None:
-            try:
-                result["state"] = graph.invoke(state)
-            except Exception as exc:  # surface failures to the stream
-                stream_q.put(f"\n[agent error: {exc}]")
-            finally:
-                stream_q.put(None)
+        initial_messages = convert_to_messages(messages)
+        state: TurnState = {
+            "messages": initial_messages,
+            "tool_rounds": 0,
+            "delegations": 0,
+        }
+        input_len = len(initial_messages)
+        graph = _compile_graph(self.model, self.use_tools)
+        result_state: TurnState | None = None
+        streamed: list[str] = []
 
-        # Preserve request-scoped state (notably the confirmation destination)
-        # when the graph moves onto its worker thread.
-        turn_context = copy_context()
-        worker = threading.Thread(target=turn_context.run, args=(_run_graph,), daemon=True)
-        worker.start()
-
-        chunks: list[str] = []
-        while True:
-            chunk = stream_q.get()
-            if chunk is None:
-                break
-            chunks.append(chunk)
+        try:
+            for event in graph.stream(
+                state,
+                stream_mode=["custom", "values"],
+                version="v2",
+            ):
+                if event["type"] == "custom":
+                    chunk = str(event["data"])
+                    streamed.append(chunk)
+                    yield chunk
+                elif event["type"] == "values":
+                    result_state = event["data"]
+        except Exception as exc:
+            chunk = f"\n[agent error: {exc}]"
+            streamed.append(chunk)
             yield chunk
-        worker.join()
 
-        # Persist the FULL turn — every assistant tool-call and tool result this
-        # turn produced, not just the final reply — so the next turn replays the
-        # real history and the supervisor keeps the paths/values/sources it found.
-        # Specialist internals (file/web chatter) never entered `messages`, so only
-        # their compact reports cross over. to_messages() trims this to the window
-        # and re-pairs any tool result whose call got trimmed off.
-        produced = (result.get("state") or {}).get("messages", [])[input_len:]
+        produced = (result_state or {}).get("messages", [])[input_len:]
         if produced:
             for message in produced:
-                self.conversation.add_message(message)
-        else:  # graph errored before returning state — at least keep the reply
-            reply = "".join(chunks).strip()
+                self.conversation.add_message(_stored_message(message))
+        else:
+            reply = "".join(streamed).strip()
             if reply:
                 self.conversation.add_assistant(reply)
 
 
 def build_graph():
-    """Expose a compiled graph for tests/inspection (no streaming bound)."""
-    return _compile_graph(None, cfg.MODEL, True)
+    """Expose the current compiled graph for tests and topology inspection."""
+
+    return _compile_graph(cfg.MODEL, True)

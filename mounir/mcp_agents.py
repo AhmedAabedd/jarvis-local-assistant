@@ -20,6 +20,9 @@ The management CLI is::
 from __future__ import annotations
 
 import re
+from typing import Annotated
+
+from langchain_core.tools import StructuredTool
 
 from . import config as cfg, db
 from .db import add_model, add_server, add_subagent  # exposed for callers
@@ -70,30 +73,26 @@ def load() -> list[dict]:
     return db.build_specs()
 
 
-def delegate_schema(spec: dict) -> dict:
-    """The ONE tool the parent sees for this agent — same shape as the built-in
-    delegate schemas in tools.py. The description is the routing signal."""
-    return {
-        "type": "function",
-        "function": {
-            "name": delegate_tool_name(spec["name"]),
-            "description": (
-                f"Delegate to the {spec['name']} agent. {spec['description']} "
-                "It does the work with its own tools and returns a short report. "
-                "Describe the outcome you want, with all details it needs."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The task for this agent, with every detail needed to complete it.",
-                    },
-                },
-                "required": ["task"],
-            },
-        },
-    }
+def delegate_tool(spec: dict) -> StructuredTool:
+    """Build the typed routing tool advertised for one dynamic subagent.
+
+    The graph intercepts this call and routes to the subagent node, so the
+    function is only a defensive fallback for direct invocation.
+    """
+
+    def route(
+        task: Annotated[str, "Task with every detail the subagent needs."]
+    ) -> str:
+        return f"Delegation for {spec['name']} must run inside the agent graph: {task}"
+
+    return StructuredTool.from_function(
+        func=route,
+        name=delegate_tool_name(spec["name"]),
+        description=(
+            f"Delegate to the {spec['name']} agent. {spec['description']} "
+            "It completes the work with its own tools and returns a short report."
+        ),
+    )
 
 
 # --- management CLI -----------------------------------------------------------

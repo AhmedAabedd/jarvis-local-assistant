@@ -9,12 +9,13 @@ File tools are ISOLATED to this agent. The orchestrator has no access to them.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
+from typing import Annotated
 
-from .. import config, llm
-from .. import trace
+from langchain_core.tools import tool
+
+from .. import config, graph_runtime, llm
 
 MAX_TOOL_ROUNDS = 10
 # The coder runs on a capable cloud model (large context) doing real code work,
@@ -207,134 +208,66 @@ def search_file(path: str, pattern: str, context: int = 2) -> str:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Tool schemas (for ollama function calling)
-# ---------------------------------------------------------------------------
+# Typed LangChain tools are the source of truth.  Their annotations generate the
+# provider schema and ToolNode handles validation/execution.
+@tool("read_file")
+def read_file_tool(
+    path: Annotated[str, "File path; ~ is allowed."],
+    start_line: Annotated[int, "First line to read, starting at 1."] = 1,
+    end_line: Annotated[int | None, "Optional inclusive final line."] = None,
+) -> str:
+    """Read a narrow file range with line numbers; use search_file to navigate."""
+
+    return read_file(path, start_line, end_line)
+
+
+@tool("create_file")
+def create_file_tool(
+    path: Annotated[str, "New file path; ~ is allowed."],
+    content: Annotated[str, "Complete text to write."],
+) -> str:
+    """Create a new file; fail rather than overwrite an existing file."""
+
+    return create_file(path, content)
+
+
+@tool("modify_file")
+def modify_file_tool(
+    path: Annotated[str, "Existing file path."],
+    old_str: Annotated[str, "Exact text to replace."],
+    new_str: Annotated[str, "Replacement text."],
+    replace_all: Annotated[bool, "Replace every occurrence."] = False,
+) -> str:
+    """Surgically replace exact text after reading or searching the file."""
+
+    return modify_file(path, old_str, new_str, replace_all)
+
+
+@tool("delete_file")
+def delete_file_tool(path: Annotated[str, "File path to delete."]) -> str:
+    """Delete one file from disk."""
+
+    return delete_file(path)
+
+
+@tool("search_file")
+def search_file_tool(
+    path: Annotated[str, "File path to search."],
+    pattern: Annotated[str, "Regular expression to find."],
+    context: Annotated[int, "Surrounding lines for every match."] = 2,
+) -> str:
+    """Find a regex with numbered context for a precise subsequent edit."""
+
+    return search_file(path, pattern, context)
+
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": (
-                "Read a file with line numbers. Pass start_line/end_line to read only a "
-                "range — read a narrow slice, not the whole file. Use search_file to find "
-                "where to look first."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file (~ allowed)."},
-                    "start_line": {"type": "integer", "description": "First line to read (1-based). Optional."},
-                    "end_line": {"type": "integer", "description": "Last line to read (inclusive). Optional; defaults to end of file."},
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_file",
-            "description": "Create a new file with the given content. Fails if the file already exists.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to create (~ allowed)."},
-                    "content": {"type": "string", "description": "Full content to write into the file."},
-                },
-                "required": ["path", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "modify_file",
-            "description": (
-                "Surgically edit a file by replacing an exact string with a new one. "
-                "old_str must match exactly once in the file — use search_file first if unsure. "
-                "Use this for changing a line, a word, or a block without rewriting the whole file. "
-                "Set replace_all to change every occurrence (e.g. renaming a symbol)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file."},
-                    "old_str": {"type": "string", "description": "The exact string to find and replace (must be unique unless replace_all is set)."},
-                    "new_str": {"type": "string", "description": "The string to replace it with."},
-                    "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique match. Defaults to false."},
-                },
-                "required": ["path", "old_str", "new_str"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_file",
-            "description": "Delete a file from disk.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file to delete."}
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_file",
-            "description": (
-                "Find a regex in a file. Returns each match WITH surrounding context lines "
-                "and line numbers ('>' marks the matched line). Use this to locate code and "
-                "copy an exact, unique block into modify_file — no full re-read needed."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file to search."},
-                    "pattern": {"type": "string", "description": "Regex pattern to search for."},
-                    "context": {"type": "integer", "description": "Lines of context to show around each match (default 2)."},
-                },
-                "required": ["path", "pattern"],
-            },
-        },
-    },
+    read_file_tool,
+    create_file_tool,
+    modify_file_tool,
+    delete_file_tool,
+    search_file_tool,
 ]
-
-_REGISTRY = {
-    "read_file": read_file,
-    "create_file": create_file,
-    "modify_file": modify_file,
-    "delete_file": delete_file,
-    "search_file": search_file,
-}
-
-
-def _dispatch(name: str, arguments: dict) -> str:
-    fn = _REGISTRY.get(name)
-    if fn is None:
-        return f"Unknown tool: {name}"
-    try:
-        return fn(**arguments)
-    except TypeError as exc:
-        return f"Bad arguments for {name}: {exc}"
-    except Exception as exc:
-        return f"Tool {name} failed: {exc}"
-
-
-# ---------------------------------------------------------------------------
-# Model call (NVIDIA build.nvidia.com — OpenAI-compatible chat completions)
-# ---------------------------------------------------------------------------
-
-def _nvidia_chat(messages: list[dict]) -> dict:
-    """One non-streaming call to the coder's model. Returns the message dict."""
-    return llm.nvidia_chat(
-        messages, tools=TOOLS, model=config.CODER_MODEL, disable_thinking=True
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -351,40 +284,17 @@ def run(task: str) -> str:
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
         {"role": "user", "content": task},
     ]
-
-    for round_num in range(MAX_TOOL_ROUNDS):
-        try:
-            message = _nvidia_chat(messages)
-        except Exception as exc:
-            return f"Coder failed: {exc}"
-
-        content = message.get("content") or ""
-        tool_calls = message.get("tool_calls") or []
-
-        if not tool_calls:
-            trace.event(f"{round_num + 1} round(s)")
-            return content.strip() or "Done."
-
-        # Record the assistant turn (with its tool calls) verbatim.
-        messages.append(
-            {"role": "assistant", "content": content, "tool_calls": tool_calls}
-        )
-
-        # Execute each requested tool and feed the result back.
-        for tc in tool_calls:
-            name = tc["function"]["name"]
-            try:
-                args = json.loads(tc["function"].get("arguments") or "{}")
-            except Exception:
-                args = {}
-            result = _dispatch(name, args)
-            trace.tool(name, args, result)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", "call_0"),
-                    "content": result,
-                }
-            )
-
-    return "Coder reached max tool rounds — task may be incomplete."
+    return graph_runtime.run_tool_agent(
+        messages,
+        TOOLS,
+        lambda history, schemas: llm.nvidia_chat(
+            history,
+            tools=schemas,
+            model=config.CODER_MODEL,
+            disable_thinking=True,
+        ),
+        max_rounds=MAX_TOOL_ROUNDS,
+        empty_response="Done.",
+        exhausted_response="Coder reached max tool rounds — task may be incomplete.",
+        error_formatter=lambda _executed, error: f"Coder failed: {error}",
+    )

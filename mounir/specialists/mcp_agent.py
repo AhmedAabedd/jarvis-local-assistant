@@ -1,7 +1,8 @@
 """Generic MCP specialist — one dynamic subagent instance per registry entry.
 
-Connect to the configured server for the task, adopt whatever tools it advertises as OpenAI
-schemas, loop with the LLM until it reports, and return ONLY the short report.
+Connect to the configured server for the task, convert its advertised input
+schemas into ``StructuredTool`` objects, run them through a LangGraph
+``ToolNode`` workflow, and return only the short report.
 The server's tool schemas and raw results never leave this module — the parent
 just sees its delegate tool and the report.
 
@@ -20,8 +21,9 @@ import shlex
 import traceback
 from contextlib import asynccontextmanager
 
-from .. import config, llm
-from .. import trace
+from langchain_core.tools import StructuredTool
+
+from .. import config, graph_runtime, llm
 
 MAX_TOOL_ROUNDS = 8
 MCP_TOOL_TIMEOUT_SECONDS = max(
@@ -60,21 +62,6 @@ def _system_prompt(custom_prompt: str = "", profile: dict | None = None) -> str:
     sections.append(config.SUBAGENT_CAPABILITY_PROMPT)
     sections.append(config.profile_instruction(profile))
     return "\n\n".join(sections)
-
-
-def _openai_tools(mcp_tools) -> list[dict]:
-    """Convert the server's MCP tool list to the OpenAI schema the LLM eats."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description or "",
-                "parameters": t.inputSchema or {"type": "object", "properties": {}},
-            },
-        }
-        for t in mcp_tools
-    ]
 
 
 def _result_text(result) -> str:
@@ -280,8 +267,7 @@ async def _run_async(
 ) -> str:
     confirm_tools = set(spec.get("confirm_tools") or [])
     dedupe_tools = set(spec.get("dedupe_tools") or [])
-    executed: list[str] = []  # tool results so far — actions that REALLY happened
-    retried_empty = False
+    executed: list[str] = []
     protected_attempts = protected_attempts if protected_attempts is not None else set()
     action_namespace = str(
         spec.get("mcp_server_id")
@@ -299,7 +285,33 @@ async def _run_async(
                 advertised_tools = [
                     tool for tool in advertised_tools if tool.name in allowed_names
                 ]
-            tools = _openai_tools(advertised_tools)
+            framework_tools: list[StructuredTool] = []
+
+            def make_tool(advertised) -> StructuredTool:
+                async def invoke(**arguments):
+                    result, was_executed = await _call(
+                        session,
+                        advertised.name,
+                        arguments,
+                        confirm_tools,
+                        protected_attempts,
+                        action_namespace,
+                        dedupe_tools,
+                        MCP_TOOL_TIMEOUT_SECONDS,
+                    )
+                    if was_executed:
+                        executed.append(f"{advertised.name} -> {result[:200]}")
+                    return result
+
+                return StructuredTool.from_function(
+                    coroutine=invoke,
+                    name=advertised.name,
+                    description=advertised.description or f"Run {advertised.name}.",
+                    args_schema=advertised.inputSchema
+                    or {"type": "object", "properties": {}},
+                )
+
+            framework_tools.extend(make_tool(item) for item in advertised_tools)
             try:
                 from .. import db
 
@@ -315,104 +327,48 @@ async def _run_async(
                 {"role": "user", "content": task},
             ]
 
-            for round_num in range(MAX_TOOL_ROUNDS):
-                try:
-                    # the LLM call blocks on HTTP — keep the MCP loop breathing.
-                    message = await asyncio.to_thread(
-                        llm.openai_chat,
-                        messages,
-                        tools=tools or None,
-                        model=spec["model"],
-                        base_url=spec["base_url"],
-                        api_key=api_key,
-                    )
-                except Exception as exc:
-                    if executed:
-                        # The LLM died AFTER tools ran (e.g. rate limit on the
-                        # report call). Saying "failed" would make the parent
-                        # redo actions that already happened.
-                        return (
-                            f"{spec['name']} agent was cut off by an LLM error while "
-                            "reporting, but these actions DID run: "
-                            + "; ".join(executed) + ". Do NOT redo them."
-                        )
-                    return f"{spec['name']} agent failed: {_exc_detail(exc)}"
-
-                content = message.get("content") or ""
-                tool_calls = message.get("tool_calls") or []
-
-                if not content.strip() and not tool_calls:
-                    if retried_empty:
-                        return f"{spec['name']} agent failed: the LLM returned an empty response twice."
-                    retried_empty = True
-                    continue
-
-                if not tool_calls:
-                    trace.event(f"{round_num + 1} round(s)")
-                    return re.sub(r"(?i)^\s*final report:?\s*", "", content.strip())
-
-                messages.append(
-                    {"role": "assistant", "content": content, "tool_calls": tool_calls}
+            async def call_model(history: list[dict], schemas: list[dict] | None):
+                return await asyncio.to_thread(
+                    llm.openai_chat,
+                    history,
+                    tools=schemas,
+                    model=spec["model"],
+                    base_url=spec["base_url"],
+                    api_key=api_key,
                 )
 
-                for tc in tool_calls:
-                    name = tc["function"]["name"]
-                    if allowed_tools is not None and name not in allowed_names:
-                        result = (
-                            f"Tool {name} is not allowed in this restricted run. "
-                            "Do not retry it."
-                        )
-                        trace.tool(name, {}, result)
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", "call_0"),
-                                "content": result,
-                            }
-                        )
-                        continue
-                    try:
-                        args = json.loads(tc["function"].get("arguments") or "{}")
-                        if not isinstance(args, dict):
-                            raise ValueError("tool arguments must be a JSON object")
-                    except Exception as exc:
-                        result = f"Tool {name} was not called: invalid arguments ({exc})."
-                        trace.tool(name, {}, result)
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", "call_0"),
-                                "content": result,
-                            }
-                        )
-                        continue
-                    result, was_executed = await _call(
-                        session,
-                        name,
-                        args,
-                        confirm_tools,
-                        protected_attempts,
-                        action_namespace,
-                        dedupe_tools,
-                        MCP_TOOL_TIMEOUT_SECONDS,
+            def error_report(_tool_messages: list[str], error: str) -> str:
+                if executed:
+                    return (
+                        f"{spec['name']} agent was cut off by an LLM error while "
+                        "reporting, but these actions DID run: "
+                        + "; ".join(executed)
+                        + ". Do NOT redo them."
                     )
-                    trace.tool(name, args, result)
-                    if was_executed:
-                        executed.append(f"{name} -> {result[:200]}")
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.get("id", "call_0"),
-                            "content": result,
-                        }
-                    )
+                return f"{spec['name']} agent failed: {_exc_detail(Exception(error))}"
+
+            return await graph_runtime.arun_tool_agent(
+                messages,
+                framework_tools,
+                call_model,
+                max_rounds=MAX_TOOL_ROUNDS,
+                empty_response=(
+                    f"{spec['name']} agent failed: the LLM returned an empty "
+                    "response twice."
+                ),
+                exhausted_response=(
+                    f"{spec['name']} agent reached max tool rounds — partial outcome only."
+                ),
+                error_formatter=error_report,
+                finalizer=lambda content: re.sub(
+                    r"(?i)^\s*final report:?\s*", "", content.strip()
+                ),
+            )
     except Exception as exc:
         return (
             f"{spec['name']} agent failed to connect to its MCP server: "
             f"{_exc_detail(exc)}"
         )
-
-    return f"{spec['name']} agent reached max tool rounds — partial outcome only."
 
 
 def run(

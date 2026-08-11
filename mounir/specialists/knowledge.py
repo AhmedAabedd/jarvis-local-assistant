@@ -17,13 +17,14 @@ changes go through here.
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import date
 from pathlib import Path
+from typing import Annotated
 
-from .. import config, llm
-from .. import trace
+from langchain_core.tools import tool
+
+from .. import config, graph_runtime, llm
 
 MAX_TOOL_ROUNDS = 8
 
@@ -283,121 +284,69 @@ def delete_knowledge(name: str) -> str:
     return f"Deleted {path.name} and removed its index line."
 
 
-# ---------------------------------------------------------------------------
-# Tool schemas + dispatch
-# ---------------------------------------------------------------------------
+@tool("list_knowledge")
+def list_knowledge_tool() -> str:
+    """Show the current knowledge tree and index."""
+
+    return list_knowledge()
+
+
+@tool("read_knowledge")
+def read_knowledge_tool(
+    name: Annotated[str, "File name inside the knowledge folder."]
+) -> str:
+    """Read one knowledge file before changing or appending to it."""
+
+    return read_knowledge(name)
+
+
+@tool("search_knowledge")
+def search_knowledge_tool(
+    query: Annotated[str, "Case-insensitive text to find."]
+) -> str:
+    """Search all knowledge before writing so facts are not duplicated."""
+
+    return search_knowledge(query)
+
+
+@tool("save_knowledge")
+def save_knowledge_tool(
+    name: Annotated[str, "Short kebab-case Markdown file name."],
+    description: Annotated[str, "One-line index description and when to read it."],
+    content: Annotated[str, "Complete Markdown content."],
+) -> str:
+    """Create or rewrite a knowledge file and update its index entry."""
+
+    return save_knowledge(name, description, content)
+
+
+@tool("append_knowledge")
+def append_knowledge_tool(
+    name: Annotated[str, "Existing knowledge file name."],
+    content: Annotated[str, "Lines to append."],
+) -> str:
+    """Append a small addition to an existing knowledge file."""
+
+    return append_knowledge(name, content)
+
+
+@tool("delete_knowledge")
+def delete_knowledge_tool(
+    name: Annotated[str, "Knowledge file name to delete."]
+) -> str:
+    """Delete a knowledge file and remove its index entry."""
+
+    return delete_knowledge(name)
+
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_knowledge",
-            "description": "Fresh tree of the knowledge folder plus the current index. Use when your context view may be stale.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_knowledge",
-            "description": "Read one knowledge file in full. Always read a file before rewriting or appending to it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "File name inside the knowledge folder, e.g. contacts.md."},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_knowledge",
-            "description": (
-                "Grep the whole knowledge folder for a text (case-insensitive). "
-                "Returns file:line: text for every match. Use BEFORE any write to "
-                "find where a fact already lives and avoid duplicates."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The text to look for, e.g. a name or email."},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_knowledge",
-            "description": (
-                "Create a NEW knowledge file or REWRITE an existing one in full. "
-                "The index line is added/updated automatically from `description`."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "short-kebab-case.md file name, e.g. gym-schedule.md."},
-                    "description": {"type": "string", "description": "ONE line for the index saying what the file is and WHEN to read it."},
-                    "content": {"type": "string", "description": "The full Markdown content of the file."},
-                },
-                "required": ["name", "description", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "append_knowledge",
-            "description": "Append lines to the END of an existing file, leaving the rest untouched. For small additions like one new contact.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Existing file name, e.g. contacts.md."},
-                    "content": {"type": "string", "description": "The line(s) to add at the end."},
-                },
-                "required": ["name", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_knowledge",
-            "description": "Delete a knowledge file. Its index line is removed automatically. Only when asked or when merging leftovers.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "File name to delete, e.g. old-notes.md."},
-                },
-                "required": ["name"],
-            },
-        },
-    },
+    list_knowledge_tool,
+    read_knowledge_tool,
+    search_knowledge_tool,
+    save_knowledge_tool,
+    append_knowledge_tool,
+    delete_knowledge_tool,
 ]
-
-_REGISTRY = {
-    "list_knowledge": list_knowledge,
-    "read_knowledge": read_knowledge,
-    "search_knowledge": search_knowledge,
-    "save_knowledge": save_knowledge,
-    "append_knowledge": append_knowledge,
-    "delete_knowledge": delete_knowledge,
-}
-
-
-def _dispatch(name: str, arguments: dict) -> str:
-    fn = _REGISTRY.get(name)
-    if fn is None:
-        return f"Unknown tool: {name}"
-    try:
-        return fn(**arguments)
-    except TypeError as exc:
-        return f"Bad arguments for {name}: {exc}"
-    except Exception as exc:
-        return f"Tool {name} failed: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -416,88 +365,40 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     if not runtime["api_key"]:
         return "Knowledge agent failed: its Gemini API key is not set."
 
-    allowed = (
-        {str(name) for name in allowed_tools}
-        if allowed_tools is not None
-        else set(_REGISTRY)
-    )
-    tool_schemas = [
-        schema for schema in TOOLS
-        if schema["function"]["name"] in allowed
-    ]
+    selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
 
     _files_read.clear()  # fresh task — must read a file before modifying it
-    retried_empty = False
-    executed: list[str] = []  # tool results so far — writes that REALLY happened
 
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
         {"role": "user", "content": f"{_context()}\n\nTASK FROM SUPERVISOR:\n{task}"},
     ]
 
-    for round_num in range(MAX_TOOL_ROUNDS):
-        try:
-            message = llm.gemini_chat(
-                messages,
-                tools=tool_schemas or None,
-                model=runtime["model"],
-                base_url=runtime["base_url"],
-                api_key=runtime["api_key"],
-            )
-        except Exception as exc:
-            if executed:
-                # The LLM died AFTER tools ran (e.g. rate limit on the report
-                # call). Saying "failed" would make the supervisor redo writes
-                # that already happened — report them instead.
-                return (
-                    "Knowledge agent was cut off by an LLM error while reporting, "
-                    "but these tool calls DID run: " + "; ".join(executed)
-                    + ". Do NOT redo them."
-                )
-            return f"Knowledge agent failed: {exc}"
-
-        content = message.get("content") or ""
-        tool_calls = message.get("tool_calls") or []
-
-        if not tool_calls and not content.strip():
-            # Gemini flake: HTTP 200 but a completely empty message (happens
-            # under load). Retry the same round once, then fail honestly —
-            # never report an empty answer as success.
-            if not retried_empty:
-                retried_empty = True
-                continue
+    def error_report(executed: list[str], error: str) -> str:
+        if executed:
             return (
-                "Knowledge agent failed: the model returned an empty response "
-                "twice — NOTHING was saved or changed. Try again."
+                "Knowledge agent was cut off by an LLM error while reporting, but "
+                f"these tool calls DID run: {'; '.join(executed)}. Do NOT redo them."
             )
+        return f"Knowledge agent failed: {error}"
 
-        if not tool_calls:
-            trace.event(f"{round_num + 1} round(s)")
-            return content.strip()
-
-        messages.append(
-            {"role": "assistant", "content": content, "tool_calls": tool_calls}
-        )
-
-        for tc in tool_calls:
-            name = tc["function"]["name"]
-            try:
-                args = json.loads(tc["function"].get("arguments") or "{}")
-            except Exception:
-                args = {}
-            result = (
-                _dispatch(name, args)
-                if name in allowed
-                else f"Tool {name} is not allowed for this run."
-            )
-            trace.tool(name, args, result)
-            executed.append(f"{name} -> {result}")
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", "call_0"),
-                    "content": result,
-                }
-            )
-
-    return "Knowledge agent reached max tool rounds — the task may be only partly done."
+    return graph_runtime.run_tool_agent(
+        messages,
+        selected_tools,
+        lambda history, schemas: llm.gemini_chat(
+            history,
+            tools=schemas,
+            model=runtime["model"],
+            base_url=runtime["base_url"],
+            api_key=runtime["api_key"],
+        ),
+        max_rounds=MAX_TOOL_ROUNDS,
+        empty_response=(
+            "Knowledge agent failed: the model returned an empty response twice — "
+            "NOTHING was saved or changed. Try again."
+        ),
+        exhausted_response=(
+            "Knowledge agent reached max tool rounds — the task may be only partly done."
+        ),
+        error_formatter=error_report,
+    )

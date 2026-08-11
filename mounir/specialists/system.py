@@ -15,13 +15,14 @@ the Telegram bridge alike.
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
+from typing import Annotated, Literal
 
-from .. import config, llm
-from .. import trace
+from langchain_core.tools import tool
+
+from .. import config, graph_runtime, llm
 
 MAX_TOOL_ROUNDS = 6
 
@@ -304,142 +305,90 @@ def suspend() -> str:
     return "Suspending now." if ok else f"Suspend failed: {out}"
 
 
-# ---------------------------------------------------------------------------
-# Tool schemas + dispatch
-# ---------------------------------------------------------------------------
+@tool("set_volume")
+def set_volume_tool(
+    action: Literal["up", "down", "set", "mute", "unmute"],
+    level: Annotated[int | None, "Target percent from 0 to 100 for set."] = None,
+) -> str:
+    """Change speaker volume and return its resulting state."""
+
+    return set_volume(action, level)
+
+
+@tool("set_brightness")
+def set_brightness_tool(
+    action: Literal["up", "down", "set"],
+    level: Annotated[int | None, "Target percent from 0 to 100 for set."] = None,
+) -> str:
+    """Change screen brightness and return its resulting percentage."""
+
+    return set_brightness(action, level)
+
+
+@tool("set_keyboard_backlight")
+def set_keyboard_backlight_tool(
+    level: Annotated[int, "Target percent from 0 to 100."]
+) -> str:
+    """Set keyboard backlight brightness; zero turns it off."""
+
+    return set_keyboard_backlight(level)
+
+
+@tool("media_control")
+def media_control_tool(
+    action: Literal["play_pause", "next", "previous", "stop"],
+) -> str:
+    """Control media playing on the computer, including browser media."""
+
+    return media_control(action)
+
+
+@tool("system_status")
+def system_status_tool() -> str:
+    """Report battery, disk, memory, Wi-Fi, CPU, and media-player status."""
+
+    return system_status()
+
+
+@tool("set_wifi")
+def set_wifi_tool(state: Literal["on", "off"]) -> str:
+    """Turn Wi-Fi on or off only when explicitly requested."""
+
+    return set_wifi(state)
+
+
+@tool("set_bluetooth")
+def set_bluetooth_tool(state: Literal["on", "off"]) -> str:
+    """Turn Bluetooth on or off only when explicitly requested."""
+
+    return set_bluetooth(state)
+
+
+@tool("lock_screen")
+def lock_screen_tool() -> str:
+    """Lock the screen while keeping the session running."""
+
+    return lock_screen()
+
+
+@tool("suspend")
+def suspend_tool() -> str:
+    """Suspend the laptop after obtaining user confirmation."""
+
+    return suspend()
+
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "set_volume",
-            "description": "Change speaker volume. Actions: up/down (one 5% step), set (needs level 0-100), mute, unmute. Returns the resulting volume.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["up", "down", "set", "mute", "unmute"]},
-                    "level": {"type": "integer", "description": "Target percent 0-100, only with action=set."},
-                },
-                "required": ["action"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_brightness",
-            "description": "Change screen brightness. Actions: up/down (one step), set (needs level 0-100). Returns the resulting percent.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["up", "down", "set"]},
-                    "level": {"type": "integer", "description": "Target percent 0-100, only with action=set."},
-                },
-                "required": ["action"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_keyboard_backlight",
-            "description": "Set the keyboard backlight brightness as a percent; 0 turns it off.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "level": {"type": "integer", "description": "Percent 0-100."},
-                },
-                "required": ["level"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "media_control",
-            "description": "Control the media currently playing (including YouTube in the browser): play_pause, next, previous, stop.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["play_pause", "next", "previous", "stop"]},
-                },
-                "required": ["action"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "system_status",
-            "description": "Snapshot of battery, disk, memory, Wi-Fi network, CPU load, and running media players.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_wifi",
-            "description": "Turn Wi-Fi on or off. Only when explicitly asked.",
-            "parameters": {
-                "type": "object",
-                "properties": {"state": {"type": "string", "enum": ["on", "off"]}},
-                "required": ["state"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_bluetooth",
-            "description": "Turn Bluetooth on or off. Only when explicitly asked.",
-            "parameters": {
-                "type": "object",
-                "properties": {"state": {"type": "string", "enum": ["on", "off"]}},
-                "required": ["state"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lock_screen",
-            "description": "Lock the screen (session keeps running). Only when explicitly asked.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "suspend",
-            "description": "Suspend the laptop. Asks the user to confirm by itself. Only when explicitly asked.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
+    set_volume_tool,
+    set_brightness_tool,
+    set_keyboard_backlight_tool,
+    media_control_tool,
+    system_status_tool,
+    set_wifi_tool,
+    set_bluetooth_tool,
+    lock_screen_tool,
+    suspend_tool,
 ]
-
-_REGISTRY = {
-    "set_volume": set_volume,
-    "set_brightness": set_brightness,
-    "set_keyboard_backlight": set_keyboard_backlight,
-    "media_control": media_control,
-    "system_status": system_status,
-    "set_wifi": set_wifi,
-    "set_bluetooth": set_bluetooth,
-    "lock_screen": lock_screen,
-    "suspend": suspend,
-}
-
-
-def _dispatch(name: str, arguments: dict) -> str:
-    fn = _REGISTRY.get(name)
-    if fn is None:
-        return f"Unknown tool: {name}"
-    try:
-        return fn(**arguments)
-    except TypeError as exc:
-        return f"Bad arguments for {name}: {exc}"
-    except Exception as exc:
-        return f"Tool {name} failed: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -493,85 +442,40 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     if not runtime["api_key"]:
         return "System agent failed: its NVIDIA API key is not set."
 
-    allowed = (
-        {str(name) for name in allowed_tools}
-        if allowed_tools is not None
-        else set(_REGISTRY)
-    )
-    tool_schemas = [
-        schema for schema in TOOLS
-        if schema["function"]["name"] in allowed
-    ]
+    selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
 
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
         {"role": "user", "content": f"{_context()}\n\nTASK FROM SUPERVISOR:\n{task}"},
     ]
-    retried_empty = False
-    executed: list[str] = []  # tool results so far — actions that REALLY happened
-
-    for round_num in range(MAX_TOOL_ROUNDS):
-        try:
-            message = llm.nvidia_chat(
-                messages,
-                tools=tool_schemas or None,
-                model=runtime["model"],
-                base_url=runtime["base_url"],
-                api_key=runtime["api_key"],
-            )
-        except Exception as exc:
-            if executed:
-                # The LLM died AFTER tools ran (e.g. rate limit on the report
-                # call). Saying "failed" would make the supervisor redo actions
-                # that already happened — report them instead.
-                return (
-                    "System agent was cut off by an LLM error while reporting, "
-                    "but these actions DID run: " + "; ".join(executed)
-                    + ". Do NOT redo them."
-                )
-            return f"System agent failed: {exc}"
-
-        content = message.get("content") or ""
-        tool_calls = message.get("tool_calls") or []
-
-        if not tool_calls and not content.strip():
-            if not retried_empty:
-                retried_empty = True
-                continue
+    def error_report(executed: list[str], error: str) -> str:
+        if executed:
             return (
-                "System agent failed: the model returned an empty response "
-                "twice — nothing was changed. Try again."
+                "System agent was cut off by an LLM error while reporting, but "
+                f"these actions DID run: {'; '.join(executed)}. Do NOT redo them."
             )
+        return f"System agent failed: {error}"
 
-        if not tool_calls:
-            trace.event(f"{round_num + 1} round(s)")
-            # The 8b likes to prefix its report with "FINAL REPORT:" no matter
-            # what the prompt says — strip it in code.
-            return re.sub(r"(?i)^\s*final report:?\s*", "", content.strip())
-
-        messages.append(
-            {"role": "assistant", "content": content, "tool_calls": tool_calls}
-        )
-
-        for tc in tool_calls:
-            name = tc["function"]["name"]
-            try:
-                args = json.loads(tc["function"].get("arguments") or "{}")
-            except Exception:
-                args = {}
-            result = (
-                _dispatch(name, args)
-                if name in allowed
-                else f"Tool {name} is not allowed for this run."
-            )
-            trace.tool(name, args, result)
-            executed.append(f"{name} -> {result}")
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", "call_0"),
-                    "content": result,
-                }
-            )
-
-    return "System agent reached max tool rounds — the task may be only partly done."
+    return graph_runtime.run_tool_agent(
+        messages,
+        selected_tools,
+        lambda history, schemas: llm.nvidia_chat(
+            history,
+            tools=schemas,
+            model=runtime["model"],
+            base_url=runtime["base_url"],
+            api_key=runtime["api_key"],
+        ),
+        max_rounds=MAX_TOOL_ROUNDS,
+        empty_response=(
+            "System agent failed: the model returned an empty response twice — "
+            "nothing was changed. Try again."
+        ),
+        exhausted_response=(
+            "System agent reached max tool rounds — the task may be only partly done."
+        ),
+        error_formatter=error_report,
+        finalizer=lambda content: re.sub(
+            r"(?i)^\s*final report:?\s*", "", content.strip()
+        ),
+    )

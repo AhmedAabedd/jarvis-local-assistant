@@ -6,10 +6,9 @@ heavy lifting (actually *seeing* and *hearing*) is done by an omni model; the
 tools here only LOCATE media and FEED its bytes to that model. Understanding is
 the model's job, not a tool's.
 
-The trick for tool-driven multimodal: a tool can't hand an image back as a text
-string, so when load_media / sample_frames load something, the run loop injects
-the actual image/audio content parts as a follow-up *user* message. The model
-then sees the media on its next round and reasons over it.
+Multimodal tool results use LangChain content blocks, so ``ToolNode`` preserves
+the loaded image/audio parts in the matching tool result. The model sees the
+media on its next graph step and reasons over it.
 
 Media handling is ISOLATED to this agent. The supervisor delegates here and only
 the final text report crosses back — raw bytes never bloat the orchestrator.
@@ -18,12 +17,12 @@ the final text report crosses back — raw bytes never bloat the orchestrator.
 from __future__ import annotations
 
 import base64
-import json
-import mimetypes
 from pathlib import Path
+from typing import Annotated, Literal
 
-from .. import config, llm
-from .. import trace
+from langchain_core.tools import tool
+
+from .. import config, graph_runtime, llm
 
 MAX_TOOL_ROUNDS = 8
 
@@ -184,7 +183,8 @@ def _resolve(path_or_url: str) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# Tools (return (summary_text, media_parts); parts get injected as a user turn)
+# Tool implementations return ``(summary_text, media_parts)``. Typed wrappers
+# below expose those parts as standard LangChain tool-message content blocks.
 # ---------------------------------------------------------------------------
 
 def load_media(path: str) -> tuple[str, list[dict]]:
@@ -265,83 +265,41 @@ def find_media(directory: str, kind: str = "any") -> tuple[str, list[dict]]:
     return "\n".join(lines), []
 
 
-# ---------------------------------------------------------------------------
-# Tool schemas + dispatch
-# ---------------------------------------------------------------------------
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "load_media",
-            "description": (
-                "Load an image, PDF, or audio file so you can analyse it. The "
-                "bytes (or extracted PDF text) are attached to the conversation "
-                "and become visible to you on your next turn."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Absolute or ~ path to the media file."},
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "sample_frames",
-            "description": "Pull evenly-spaced keyframes from a VIDEO as images so you can describe what happens in it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the video file."},
-                    "count": {"type": "integer", "description": "How many frames to sample (1–12). Default 6."},
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_media",
-            "description": "List media files in a folder when you don't have an exact path. Use it, then load the right one.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "directory": {"type": "string", "description": "Folder to look in (e.g. ~/Downloads)."},
-                    "kind": {
-                        "type": "string",
-                        "enum": ["image", "audio", "video", "pdf", "any"],
-                        "description": "Which kind of media to list. Default 'any'.",
-                    },
-                },
-                "required": ["directory"],
-            },
-        },
-    },
-]
-
-_REGISTRY = {
-    "load_media": load_media,
-    "sample_frames": sample_frames,
-    "find_media": find_media,
-}
+def _media_content(result: tuple[str, list[dict]]) -> list[dict]:
+    summary, parts = result
+    return [{"type": "text", "text": summary}, *parts]
 
 
-def _dispatch(name: str, arguments: dict) -> tuple[str, list[dict]]:
-    """Run a media tool. Returns (summary_text, media_parts)."""
-    fn = _REGISTRY.get(name)
-    if fn is None:
-        return f"Unknown tool: {name}", []
-    try:
-        return fn(**arguments)
-    except TypeError as exc:
-        return f"Bad arguments for {name}: {exc}", []
-    except Exception as exc:
-        return f"Tool {name} failed: {exc}", []
+@tool("load_media")
+def load_media_tool(
+    path: Annotated[str, "Absolute path or ~ path to an image, PDF, or audio file."]
+) -> list[dict]:
+    """Load media into the conversation so its contents can be analysed."""
+
+    return _media_content(load_media(path))
+
+
+@tool("sample_frames")
+def sample_frames_tool(
+    path: Annotated[str, "Video file path."],
+    count: Annotated[int, "Number of evenly spaced frames, from 1 through 12."] = 6,
+) -> list[dict]:
+    """Extract evenly spaced video frames for visual analysis."""
+
+    return _media_content(sample_frames(path, count))
+
+
+@tool("find_media")
+def find_media_tool(
+    directory: Annotated[str, "Folder to inspect, such as ~/Downloads."],
+    kind: Literal["image", "audio", "video", "pdf", "any"] = "any",
+) -> list[dict]:
+    """List recent media files when the exact path is not known."""
+
+    return _media_content(find_media(directory, kind))
+
+
+TOOLS = [load_media_tool, sample_frames_tool, find_media_tool]
 
 
 # ---------------------------------------------------------------------------
@@ -360,70 +318,25 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     if not runtime["api_key"]:
         return "Media agent failed: its NVIDIA API key is not set."
 
-    allowed = (
-        {str(name) for name in allowed_tools}
-        if allowed_tools is not None
-        else set(_REGISTRY)
-    )
-    tool_schemas = [
-        schema for schema in TOOLS
-        if schema["function"]["name"] in allowed
-    ]
+    selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
 
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
         {"role": "user", "content": task},
     ]
 
-    for round_num in range(MAX_TOOL_ROUNDS):
-        try:
-            message = llm.nvidia_chat(
-                messages,
-                tools=tool_schemas or None,
-                model=runtime["model"],
-                base_url=runtime["base_url"],
-                api_key=runtime["api_key"],
-            )
-        except Exception as exc:
-            return f"Media agent failed: {exc}"
-
-        content = message.get("content") or ""
-        tool_calls = message.get("tool_calls") or []
-
-        if not tool_calls:
-            trace.event(f"{round_num + 1} round(s)")
-            return content.strip() or "Nothing to report."
-
-        messages.append(
-            {"role": "assistant", "content": content, "tool_calls": tool_calls}
-        )
-
-        # Media parts loaded this round get injected together as one user turn
-        # AFTER all tool results, so the model sees them on its next call.
-        pending_parts: list[dict] = []
-        for tc in tool_calls:
-            name = tc["function"]["name"]
-            try:
-                args = json.loads(tc["function"].get("arguments") or "{}")
-            except Exception:
-                args = {}
-            summary, parts = (
-                _dispatch(name, args)
-                if name in allowed
-                else (f"Tool {name} is not allowed for this run.", [])
-            )
-            trace.tool(name, args, summary)
-            messages.append(
-                {"role": "tool", "tool_call_id": tc.get("id", "call_0"), "content": summary}
-            )
-            pending_parts.extend(parts)
-
-        if pending_parts:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "Here is the media you loaded:"}, *pending_parts],
-                }
-            )
-
-    return "Media agent reached max tool rounds — partial analysis only."
+    return graph_runtime.run_tool_agent(
+        messages,
+        selected_tools,
+        lambda history, schemas: llm.nvidia_chat(
+            history,
+            tools=schemas,
+            model=runtime["model"],
+            base_url=runtime["base_url"],
+            api_key=runtime["api_key"],
+        ),
+        max_rounds=MAX_TOOL_ROUNDS,
+        empty_response="Nothing to report.",
+        exhausted_response="Media agent reached max tool rounds — partial analysis only.",
+        error_formatter=lambda _executed, error: f"Media agent failed: {error}",
+    )

@@ -1,7 +1,7 @@
 """Catalog and restricted runner for Mounir's built-in specialists.
 
-Heartbeat uses this catalog to expose the same real tool schemas as the normal
-specialists while allowing only explicitly selected read-only tools at runtime.
+Heartbeat reads metadata from the same typed LangChain tools used by each
+specialist and applies an explicit read-only allowlist at runtime.
 """
 
 from __future__ import annotations
@@ -87,15 +87,14 @@ def capabilities() -> list[dict]:
         module = import_module(definition["module"])
         safe = definition["safe_tools"]
         tools = []
-        for schema in module.TOOLS:
-            function = schema.get("function") or {}
-            name = str(function.get("name") or "").strip()
+        for registered_tool in module.TOOLS:
+            name = str(registered_tool.name or "").strip()
             if not name:
                 continue
             tools.append(
                 {
                     "name": name,
-                    "description": str(function.get("description") or ""),
+                    "description": str(registered_tool.description or ""),
                     "requires_confirmation": name not in safe,
                 }
             )

@@ -26,6 +26,7 @@ from mounir import (
     browser_control,
     config,
     db,
+    graph_runtime,
     heartbeat as heartbeat_mod,
     langgraph_agent,
     llm as llm_mod,
@@ -222,18 +223,26 @@ class DatabaseTests(TemporaryDatabaseTest):
         db.init()
         observed = {}
 
-        def compile_graph(stream_q, *_args, **_kwargs):
+        def compile_graph(*_args, **_kwargs):
             class Graph:
-                def invoke(self, state):
+                def stream(self, state, **_stream_options):
+                    from langchain_core.messages import AIMessage
+
                     observed["user"] = next(
-                        message["content"]
+                        message.content
                         for message in reversed(state["messages"])
-                        if message["role"] == "user"
+                        if message.type == "human"
                     )
-                    stream_q.put("plain reply")
-                    return {
-                        "messages": state["messages"]
-                        + [{"role": "assistant", "content": "plain reply"}]
+                    yield {"type": "custom", "data": "plain reply"}
+                    yield {
+                        "type": "values",
+                        "data": {
+                            **state,
+                            "messages": [
+                                *state["messages"],
+                                AIMessage(content="plain reply"),
+                            ],
+                        },
                     }
 
             return Graph()
@@ -563,7 +572,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             patch.object(config, "NVIDIA_API_KEY", "test-key"),
             patch.object(system_agent, "_context", return_value="test device"),
             patch.object(system_agent.llm, "nvidia_chat", side_effect=fake_chat),
-            patch.object(system_agent, "_dispatch") as dispatch,
+            patch.object(system_agent, "set_volume") as set_volume,
         ):
             report = system_agent.run(
                 "Check the computer.", allowed_tools=["system_status"]
@@ -575,7 +584,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             ["system_status"],
         )
         self.assertEqual(calls[0]["model"], config.SYSTEM_MODEL)
-        dispatch.assert_not_called()
+        set_volume.assert_not_called()
 
     def test_heartbeat_runner_dispatches_selected_builtin(self):
         db.init()
@@ -975,6 +984,52 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertNotIn("mcp_researcher", node_names)
         self.assertNotIn("email", node_names)
         self.assertNotIn("researcher", node_names)
+
+    def test_typed_tools_generate_schemas_and_toolnode_executes_supervisor_calls(self):
+        db.init()
+        schemas = graph_runtime.tool_schemas(mounir_tools.TOOLS)
+        self.assertEqual(
+            [schema["function"]["name"] for schema in schemas],
+            [registered.name for registered in mounir_tools.TOOLS],
+        )
+        bash_schema = next(
+            schema for schema in schemas if schema["function"]["name"] == "bash"
+        )
+        self.assertEqual(
+            bash_schema["function"]["parameters"]["properties"]["timeout"]["type"],
+            "integer",
+        )
+
+        observed = []
+
+        def fake_chat(messages, tools=None, tool_calls_out=None, **_kwargs):
+            if not any(message.get("role") == "tool" for message in messages):
+                tool_calls_out.append(
+                    SimpleNamespace(
+                        id="list_1",
+                        function=SimpleNamespace(
+                            name="list_directory", arguments={"path": "."}
+                        ),
+                    )
+                )
+                return
+            observed.extend(
+                message.get("content")
+                for message in messages
+                if message.get("role") == "tool"
+            )
+            yield "done"
+
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(mounir_tools, "list_directory", return_value="listing"),
+        ):
+            reply = "".join(
+                Agent(conversation=Conversation(system_prompt="test")).respond("list")
+            )
+
+        self.assertEqual(reply, "done")
+        self.assertEqual(observed, ["listing"])
 
     def test_foreign_keys_prevent_deleting_in_use_presets(self):
         db.init()
@@ -2099,18 +2154,22 @@ class InterfaceRoutingTests(unittest.TestCase):
             ],
         )
 
-    def test_confirmation_handler_reaches_the_agent_graph_worker(self):
+    def test_confirmation_handler_reaches_the_agent_graph_stream(self):
         observed = []
 
-        def compile_graph(stream_q, *_args, **_kwargs):
+        def compile_graph(*_args, **_kwargs):
             class Graph:
-                def invoke(self, state):
+                def stream(self, state, **_stream_options):
+                    from langchain_core.messages import AIMessage
+
                     observed.append(mounir_tools.request_confirmation("safe?"))
-                    stream_q.put("done")
-                    return {
-                        "messages": state["messages"] + [
-                            {"role": "assistant", "content": "done"}
-                        ]
+                    yield {"type": "custom", "data": "done"}
+                    yield {
+                        "type": "values",
+                        "data": {
+                            **state,
+                            "messages": [*state["messages"], AIMessage(content="done")],
+                        },
                     }
 
             return Graph()
@@ -2125,6 +2184,34 @@ class InterfaceRoutingTests(unittest.TestCase):
 
         self.assertEqual(reply, "done")
         self.assertEqual(observed, [True])
+
+    def test_confirmation_context_reaches_toolnode_executor(self):
+        observed = []
+
+        def fake_chat(_messages, tool_calls_out=None, **_kwargs):
+            tool_calls_out.append(
+                SimpleNamespace(
+                    id="bash_1",
+                    function=SimpleNamespace(
+                        name="bash", arguments={"command": "safe-command"}
+                    ),
+                )
+            )
+            if False:
+                yield ""
+
+        agent = Agent(conversation=Conversation(system_prompt="test"))
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(mounir_tools, "confirm_fn", return_value=False),
+            mounir_tools.use_confirmation_handler(
+                lambda action: observed.append(action) or False
+            ),
+        ):
+            reply = "".join(agent.respond("run it"))
+
+        self.assertIn("declined", reply)
+        self.assertEqual(observed, ["safe-command"])
 
     def test_telegram_turn_uses_telegram_confirmation_handler(self):
         db.init()

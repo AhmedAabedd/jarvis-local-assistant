@@ -1121,6 +1121,8 @@ select:disabled {
 /* Chat */
 .chat-shell {
   height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   display: grid;
   grid-template-columns: 270px minmax(420px, 1fr) 300px;
   overflow: hidden;
@@ -1240,10 +1242,13 @@ select:disabled {
 }
 .chat-main {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 .chat-header {
+  flex: 0 0 76px;
   height: 76px;
   display: flex;
   align-items: center;
@@ -1266,8 +1271,29 @@ select:disabled {
 }
 .transcript {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-color: #416e58 transparent;
+  scrollbar-width: thin;
   padding: 26px max(24px, calc((100% - 760px) / 2));
+}
+.transcript::-webkit-scrollbar {
+  width: 8px;
+}
+.transcript::-webkit-scrollbar-track {
+  background: transparent;
+}
+.transcript::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: #416e58;
+  background-clip: padding-box;
+}
+.transcript::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-strong);
+  background-clip: padding-box;
 }
 .message {
   display: flex;
@@ -1304,6 +1330,7 @@ select:disabled {
   }
 }
 .composer-wrap {
+  flex: 0 0 auto;
   padding: 14px max(24px, calc((100% - 760px) / 2)) 22px;
 }
 .composer {
