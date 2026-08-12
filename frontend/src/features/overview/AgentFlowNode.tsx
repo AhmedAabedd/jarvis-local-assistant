@@ -1,5 +1,5 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
-import { BookOpen, Bot, ChevronRight, Image as ImageIcon, Plus, Settings } from 'lucide-react'
+import { BookOpen, Bot, Image as ImageIcon, Plus, Settings } from 'lucide-react'
 
 export type FlowData = {
   label: string
@@ -72,7 +72,6 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
           <img className="flow-node__channel-icon" src="/images/whatsapp.svg" alt="" />
         ) : (
           <>
-            {data.kind === 'dynamic' && <ChevronRight className="flow-node__open" size={12} />}
             <div className="flow-node__head">
               <span className={`avatar ${data.icon ? 'has-image' : ''}`}>
                 {data.icon ? <img src={data.icon} alt="" /> : <Icon size={16} />}

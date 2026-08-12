@@ -1,10 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bot, Cpu, ExternalLink, Pencil, Plus, RefreshCw, Save, Search, X } from 'lucide-react'
+import { Bot, ChevronRight, Cpu, Pencil, Plus, RefreshCw, Save, Search, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../../api/client'
 import type { SubagentNodeRelation } from '../../api/types'
-import { Button } from '../../components/ui/Button'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
 import { Loading } from '../../components/ui/Loading'
@@ -156,13 +155,24 @@ export function AgentNodeDrawer({
   return createPortal(
     <>
       <aside className="node-drawer" role="dialog" aria-modal="false" aria-labelledby="node-title">
-        <header className="node-drawer__header">
-          <h2 id="node-title">Subagent</h2>
+        <header className="node-drawer__compact-header">
+          {subagent && (
+            <a
+              className="node-drawer__open-link"
+              href={`/admin/agents?open=${subagent.id}`}
+              aria-label="Open subagent"
+              onClick={(event) => {
+                event.preventDefault()
+                onOpenSubagent(subagent.id)
+              }}
+            >
+              Open subagent <ChevronRight size={13} aria-hidden="true" />
+            </a>
+          )}
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close">
-            <X size={18} />
+            <X size={16} />
           </button>
         </header>
-
         <div className="node-drawer__body">
           {node.isLoading ? (
             <Loading label="Opening subagent…" />
@@ -181,7 +191,7 @@ export function AgentNodeDrawer({
                   )}
                 </span>
                 <span>
-                  <strong>{subagent.name}</strong>
+                  <strong id="node-title">{subagent.name}</strong>
                   {subagent.description && <small>{subagent.description}</small>}
                 </span>
               </div>
@@ -348,18 +358,6 @@ export function AgentNodeDrawer({
             </>
           )}
         </div>
-
-        {subagent && (
-          <footer className="node-drawer__footer">
-            <Button
-              variant="primary"
-              icon={<ExternalLink size={14} />}
-              onClick={() => onOpenSubagent(subagent.id)}
-            >
-              Open subagent
-            </Button>
-          </footer>
-        )}
       </aside>
       <ConfirmDialog
         open={Boolean(pendingRemoval)}

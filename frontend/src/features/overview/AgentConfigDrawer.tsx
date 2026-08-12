@@ -1,4 +1,4 @@
-import { X } from 'lucide-react'
+import { BookOpen, Bot, Image as ImageIcon, Settings, X } from 'lucide-react'
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { ToolInfo } from '../../api/types'
@@ -15,6 +15,7 @@ export function AgentConfigDrawer({
   open,
   name,
   description,
+  agentKey,
   modelId,
   modelOptions,
   tools,
@@ -30,6 +31,7 @@ export function AgentConfigDrawer({
   open: boolean
   name: string
   description?: string
+  agentKey?: string
   modelId: number
   modelOptions?: ModelOption[]
   tools?: ToolInfo[]
@@ -51,6 +53,15 @@ export function AgentConfigDrawer({
 
   if (!open) return null
 
+  const IdentityIcon =
+    agentKey === 'media'
+      ? ImageIcon
+      : agentKey === 'knowledge'
+        ? BookOpen
+        : agentKey === 'system'
+          ? Settings
+          : Bot
+
   return createPortal(
     <aside
       className="node-drawer agent-config-drawer"
@@ -58,17 +69,25 @@ export function AgentConfigDrawer({
       aria-modal="false"
       aria-labelledby="agent-config-title"
     >
-      <header className="node-drawer__header agent-config-drawer__header">
-        <div>
+      <header className="agent-config-drawer__topbar">
+        <div className="agent-config-drawer__title">
+          <span className="avatar">
+            <IdentityIcon size={18} />
+          </span>
           <h2 id="agent-config-title">{name}</h2>
-          {description && <p>{description}</p>}
         </div>
         <button className="icon-button" type="button" onClick={onClose} aria-label="Close">
-          <X size={18} />
+          <X size={16} />
         </button>
       </header>
 
       <div className="node-drawer__body">
+        {description && (
+          <div className="agent-config-drawer__description">
+            <span className="field__label">Description</span>
+            <p>{description}</p>
+          </div>
+        )}
         <div className="stack">
           {availability && (
             <div className="availability">

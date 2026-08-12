@@ -301,6 +301,7 @@ export function OverviewPage() {
         open={Boolean(selected)}
         name={selected?.name || 'Agent'}
         description={selected?.description}
+        agentKey={selected?.key}
         modelId={modelId}
         modelOptions={selected?.model_options}
         tools={selected?.tools}
