@@ -31,7 +31,10 @@ export function VoicePage() {
       </>
     )
   const sttProvider = stt || query.data?.stt.provider || 'local_whisper',
-    ttsProvider = tts || query.data?.tts.provider || 'piper'
+    ttsProvider = tts || query.data?.tts.provider || 'piper',
+    remoteStt = sttProvider === 'openai_compatible',
+    compatibleTts = ttsProvider === 'openai_compatible',
+    googleTts = ttsProvider === 'google'
   const submit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     setSuccess('')
@@ -47,6 +50,7 @@ export function VoicePage() {
       tts: {
         provider: values.tts_provider,
         model: values.tts_model,
+        voice: values.tts_voice,
         language: values.tts_language,
         base_url: values.tts_base_url,
         api_key: values.tts_api_key,
@@ -61,26 +65,59 @@ export function VoicePage() {
           <div className="settings-grid">
             <Card title="Speech-to-text" description="Choose how voice messages are transcribed.">
               <div className="card__body form-grid">
-                <Field full label="Provider">
+                <div className="guidance field--full">
+                  Connect any hosted or local service exposing the OpenAI-compatible{' '}
+                  <code>/audio/transcriptions</code> API, or run Whisper fully offline.
+                </div>
+                <Field full label="Connection type">
                   <select
                     name="stt_provider"
                     value={sttProvider}
                     onChange={(e) => setStt(e.target.value)}
                   >
                     <option value="local_whisper">Faster Whisper (local)</option>
-                    <option value="groq">Groq Whisper (cloud)</option>
+                    <option value="openai_compatible">
+                      OpenAI-compatible API (hosted or local)
+                    </option>
                   </select>
                 </Field>
-                <Field full label={sttProvider === 'groq' ? 'Model ID' : 'Model name or path'}>
-                  <input name="stt_model" defaultValue={query.data?.stt.model} required />
+                <Field
+                  full
+                  label={remoteStt ? 'Model ID' : 'Model name or path'}
+                  hint={
+                    remoteStt
+                      ? 'The exact transcription model ID accepted by your endpoint.'
+                      : 'A Faster Whisper size such as small, or a local model path.'
+                  }
+                >
+                  <input
+                    name="stt_model"
+                    defaultValue={query.data?.stt.model}
+                    placeholder={remoteStt ? 'whisper-1 or provider model ID' : 'small'}
+                    required
+                  />
                 </Field>
-                <Field full label="Language">
+                <Field
+                  full
+                  label="Language"
+                  hint="Use auto for detection, or a language code such as en, fr, or ar."
+                >
                   <input name="stt_language" defaultValue={query.data?.stt.language || 'auto'} />
                 </Field>
-                {sttProvider === 'groq' && (
+                {remoteStt && (
                   <>
-                    <Field full label="Base URL">
-                      <input name="stt_base_url" defaultValue={query.data?.stt.base_url} />
+                    <Field
+                      full
+                      label="API URL"
+                      hint="An API root or the complete /audio/transcriptions endpoint."
+                    >
+                      <input
+                        type="url"
+                        name="stt_base_url"
+                        defaultValue={query.data?.stt.base_url}
+                        placeholder="https://provider.example/v1"
+                        required
+                      />
                     </Field>
                     <Field
                       full
@@ -88,7 +125,7 @@ export function VoicePage() {
                       hint={
                         query.data?.stt.api_key_configured
                           ? 'A key is saved. Leave blank to keep it.'
-                          : 'No key saved.'
+                          : 'Optional for local or unauthenticated endpoints.'
                       }
                     >
                       <input type="password" name="stt_api_key" />
@@ -99,29 +136,80 @@ export function VoicePage() {
             </Card>
             <Card title="Text-to-speech" description="Choose how replies are converted to audio.">
               <div className="card__body form-grid">
-                <Field full label="Provider">
+                <div className="guidance field--full">
+                  Connect any hosted or local service exposing the OpenAI-compatible{' '}
+                  <code>/audio/speech</code> API. Piper remains available for fully offline speech.
+                </div>
+                <Field full label="Connection type">
                   <select
                     name="tts_provider"
                     value={ttsProvider}
                     onChange={(e) => setTts(e.target.value)}
                   >
                     <option value="piper">Piper (local)</option>
+                    <option value="openai_compatible">
+                      OpenAI-compatible API (hosted or local)
+                    </option>
                     <option value="google">Google Cloud Text-to-Speech</option>
                   </select>
                 </Field>
-                <Field full label={ttsProvider === 'google' ? 'Voice name' : 'Voice model path'}>
-                  <input name="tts_model" defaultValue={query.data?.tts.model} required />
+                <Field
+                  full
+                  label={googleTts ? 'Voice name' : compatibleTts ? 'Model ID' : 'Voice model path'}
+                  hint={
+                    compatibleTts
+                      ? 'The exact speech model ID accepted by your endpoint.'
+                      : undefined
+                  }
+                >
+                  <input
+                    name="tts_model"
+                    defaultValue={query.data?.tts.model}
+                    placeholder={compatibleTts ? 'tts-1 or provider model ID' : undefined}
+                    required
+                  />
                 </Field>
-                {ttsProvider === 'google' && (
+                {compatibleTts && (
+                  <Field
+                    full
+                    label="Voice"
+                    hint="The voice identifier accepted by the selected model."
+                  >
+                    <input
+                      name="tts_voice"
+                      defaultValue={query.data?.tts.voice}
+                      placeholder="alloy or provider voice ID"
+                      required
+                    />
+                  </Field>
+                )}
+                {googleTts && (
+                  <Field full label="Language code">
+                    <input name="tts_language" defaultValue={query.data?.tts.language || 'en-US'} />
+                  </Field>
+                )}
+                {(compatibleTts || googleTts) && (
                   <>
-                    <Field full label="Language code">
+                    <Field
+                      full
+                      label="API URL"
+                      hint={
+                        compatibleTts
+                          ? 'An API root or the complete /audio/speech endpoint.'
+                          : 'The Google Cloud Text-to-Speech API root.'
+                      }
+                    >
                       <input
-                        name="tts_language"
-                        defaultValue={query.data?.tts.language || 'en-US'}
+                        type="url"
+                        name="tts_base_url"
+                        defaultValue={query.data?.tts.base_url}
+                        placeholder={
+                          compatibleTts
+                            ? 'https://provider.example/v1'
+                            : 'https://texttospeech.googleapis.com/v1'
+                        }
+                        required
                       />
-                    </Field>
-                    <Field full label="Base URL">
-                      <input name="tts_base_url" defaultValue={query.data?.tts.base_url} />
                     </Field>
                     <Field
                       full
@@ -129,7 +217,9 @@ export function VoicePage() {
                       hint={
                         query.data?.tts.api_key_configured
                           ? 'A key is saved. Leave blank to keep it.'
-                          : 'No key saved.'
+                          : compatibleTts
+                            ? 'Optional for local or unauthenticated endpoints.'
+                            : 'Required by the Google transport.'
                       }
                     >
                       <input type="password" name="tts_api_key" />

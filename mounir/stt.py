@@ -1,8 +1,8 @@
 """Speech-to-text.
 
-Two backends, chosen by config.STT_BACKEND:
-- "groq":  Groq Whisper over its OpenAI-compatible REST endpoint (fast, cloud).
-- "local": faster-whisper / CTranslate2, resident in-process (offline).
+Two transports are selected through the database-backed voice settings:
+- ``openai_compatible`` uploads audio to an OpenAI-compatible transcription API.
+- ``local_whisper`` runs faster-whisper / CTranslate2 in-process and offline.
 Heavy deps (faster_whisper, requests, numpy) are imported lazily so this module
 is safe to import without them installed.
 """
@@ -43,8 +43,8 @@ def transcribe(audio, language: str | None = None) -> tuple[str, str]:
     if audio is None or len(audio) == 0:
         return "", selected_language or ""
 
-    if runtime["provider"] == "groq":
-        return _transcribe_groq(audio, selected_language, runtime)
+    if runtime["provider"] in {"openai_compatible", "groq"}:
+        return _transcribe_openai_compatible(audio, selected_language, runtime)
     return _transcribe_local(audio, selected_language, runtime)
 
 
@@ -56,18 +56,15 @@ def _transcribe_local(audio, language, runtime) -> tuple[str, str]:
     return text, info.language
 
 
-def _transcribe_groq(audio, language, runtime) -> tuple[str, str]:
-    """Transcribe by uploading the clip to Groq's Whisper endpoint."""
-    if not runtime.get("api_key"):
-        raise RuntimeError(
-            "The selected Groq speech-to-text configuration has no API key."
-        )
-
+def _transcribe_openai_compatible(audio, language, runtime) -> tuple[str, str]:
+    """Upload a clip using the common OpenAI audio-transcriptions contract."""
     import io
     import wave
 
     import numpy as np
     import requests
+
+    from .audio_api import bearer_headers, endpoint_url
 
     # float32 [-1, 1] mono -> 16-bit PCM WAV in memory (what the API expects).
     pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767.0).astype(np.int16)
@@ -79,12 +76,14 @@ def _transcribe_groq(audio, language, runtime) -> tuple[str, str]:
         wf.writeframes(pcm.tobytes())
     buf.seek(0)
 
-    data = {"model": runtime["model"], "response_format": "verbose_json"}
+    # Plain JSON is the broadest common response format across compatible
+    # providers. Some additionally return a detected ``language`` field.
+    data = {"model": runtime["model"], "response_format": "json"}
     if language:
         data["language"] = language  # otherwise Groq auto-detects
     resp = requests.post(
-        f"{runtime['base_url'].rstrip('/')}/audio/transcriptions",
-        headers={"Authorization": f"Bearer {runtime['api_key']}"},
+        endpoint_url(runtime.get("base_url", ""), "audio/transcriptions"),
+        headers=bearer_headers(runtime.get("api_key"), accept="application/json"),
         files={"file": ("audio.wav", buf, "audio/wav")},
         data=data,
         timeout=60,

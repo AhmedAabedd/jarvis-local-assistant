@@ -3,6 +3,23 @@ import type { ModelRecord } from '../../api/types'
 import { Field } from '../../components/ui/Field'
 import { Feedback } from '../../components/ui/Feedback'
 
+type ModelLocation = 'cloud' | 'local'
+
+const LOCAL_PROVIDER_NAMES = ['local', 'ollama', 'lm studio', 'vllm', 'llama.cpp']
+
+function inferLocation(item?: ModelRecord): ModelLocation {
+  if (!item) return 'cloud'
+  const provider = String(item.provider || '').toLowerCase()
+  if (LOCAL_PROVIDER_NAMES.some((name) => provider.includes(name))) return 'local'
+  try {
+    const hostname = new URL(item.base_url).hostname
+    if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(hostname)) return 'local'
+  } catch {
+    // Keep an invalid legacy URL editable as a cloud connection.
+  }
+  return 'cloud'
+}
+
 export function ModelForm({
   item,
   formId,
@@ -12,7 +29,25 @@ export function ModelForm({
   formId: string
   onSubmit: (body: object) => Promise<void>
 }) {
+  const initialLocation = inferLocation(item)
   const [error, setError] = useState('')
+  const [location, setLocation] = useState<ModelLocation>(initialLocation)
+  const [connections, setConnections] = useState(() => ({
+    cloud: {
+      provider: initialLocation === 'cloud' ? item?.provider || '' : '',
+      baseUrl: initialLocation === 'cloud' ? item?.base_url || '' : '',
+    },
+    local: {
+      provider: initialLocation === 'local' ? item?.provider || '' : 'Ollama',
+      baseUrl: initialLocation === 'local' ? item?.base_url || '' : 'http://localhost:11434/v1',
+    },
+  }))
+  const connection = connections[location]
+  const updateConnection = (field: 'provider' | 'baseUrl', value: string) =>
+    setConnections((current) => ({
+      ...current,
+      [location]: { ...current[location], [field]: value },
+    }))
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setError('')
@@ -26,9 +61,41 @@ export function ModelForm({
   }
   return (
     <form id={formId} className="form-grid" onSubmit={submit}>
+      <div className="model-location-picker" role="group" aria-label="Model location">
+        <span
+          className={`model-location-picker__indicator ${location === 'local' ? 'is-local' : ''}`}
+          aria-hidden="true"
+        />
+        <button
+          type="button"
+          className={location === 'cloud' ? 'is-active' : ''}
+          aria-pressed={location === 'cloud'}
+          onClick={() => setLocation('cloud')}
+        >
+          Cloud LLM
+        </button>
+        <button
+          type="button"
+          className={location === 'local' ? 'is-active' : ''}
+          aria-pressed={location === 'local'}
+          onClick={() => setLocation('local')}
+        >
+          Local LLM
+        </button>
+      </div>
       <div className="guidance">
-        <strong>OpenAI-compatible models:</strong> Connect any local or hosted provider exposing a
-        compatible chat-completions endpoint. Models used by agents should support tool calling.
+        {location === 'cloud' ? (
+          <>
+            <strong>Cloud LLM:</strong> Enter the model ID and OpenAI-compatible API root supplied
+            by your hosted provider. Models used by agents should support tool calling.
+          </>
+        ) : (
+          <>
+            <strong>Local LLM:</strong> Connect Ollama, LM Studio, LocalAI, vLLM, or another local
+            OpenAI-compatible runtime. The Ollama defaults below work with its standard local
+            server; an API key is normally unnecessary.
+          </>
+        )}
       </div>
       <Field full label="Name" hint="A recognizable name shown throughout Agent Studio.">
         <input name="name" defaultValue={item?.name} required placeholder="Display name" />
@@ -38,24 +105,37 @@ export function ModelForm({
       </Field>
       <Field
         full
-        label="Provider"
-        hint="A display label for the service providing this OpenAI-compatible model."
+        label={location === 'local' ? 'Local runtime' : 'Provider'}
+        hint={
+          location === 'local'
+            ? 'A display label such as Ollama, LM Studio, LocalAI, or vLLM.'
+            : 'A display label for the hosted service providing this model.'
+        }
       >
         <input
           name="provider"
-          defaultValue={item?.provider}
-          placeholder="OpenAI, Gemini, NVIDIA, Ollama…"
+          value={connection.provider}
+          onChange={(event) => updateConnection('provider', event.target.value)}
+          placeholder={location === 'local' ? 'Ollama' : 'OpenAI, Gemini, NVIDIA…'}
         />
       </Field>
       <Field
         full
         label="Base URL"
-        hint="The OpenAI-compatible API root. Do not include /chat/completions."
+        hint={
+          location === 'local'
+            ? 'The local OpenAI-compatible API root. Ollama uses http://localhost:11434/v1.'
+            : 'The hosted OpenAI-compatible API root. Do not include /chat/completions.'
+        }
       >
         <input
+          type="url"
           name="base_url"
-          defaultValue={item?.base_url}
-          placeholder="https://provider.example/v1"
+          value={connection.baseUrl}
+          onChange={(event) => updateConnection('baseUrl', event.target.value)}
+          placeholder={
+            location === 'local' ? 'http://localhost:11434/v1' : 'https://provider.example/v1'
+          }
           required
         />
       </Field>
@@ -65,7 +145,9 @@ export function ModelForm({
         hint={
           item?.api_key_configured || item?.api_key
             ? 'A key is saved. Leave blank to keep it.'
-            : 'Usually optional for local models.'
+            : location === 'local'
+              ? 'Leave blank unless your local runtime requires authentication.'
+              : 'Enter the bearer key required by the hosted provider, if any.'
         }
       >
         <input name="api_key" type="password" placeholder="Enter a new API key" />

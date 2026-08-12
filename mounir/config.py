@@ -288,10 +288,18 @@ OLLAMA_API_KEY: str = os.environ.get("OLLAMA_API_KEY", "")
 OLLAMA_CLOUD_BASE_URL: str = os.environ.get(
     "OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"
 )
-# --- Cloud text-to-speech (Google Cloud TTS) --------------------------------
-# Which backend tts.speak() uses: "google" (cloud) or "piper" (local).
-# Defaults to piper so nothing changes until you opt in with MOUNIR_TTS_BACKEND.
+# --- Text-to-speech ---------------------------------------------------------
+# Initial transport imported into Agent Studio on first run. Supported values
+# are "piper", "openai_compatible", and the legacy native "google" transport.
 TTS_BACKEND: str = os.environ.get("MOUNIR_TTS_BACKEND", "piper").lower()
+OPENAI_TTS_BASE_URL: str = os.environ.get(
+    "MOUNIR_TTS_BASE_URL", "https://api.openai.com/v1"
+)
+OPENAI_TTS_MODEL: str = os.environ.get("MOUNIR_TTS_MODEL", "tts-1")
+OPENAI_TTS_VOICE: str = os.environ.get("MOUNIR_TTS_VOICE", "alloy")
+OPENAI_TTS_API_KEY: str = os.environ.get(
+    "MOUNIR_TTS_API_KEY", os.environ.get("OPENAI_API_KEY", "")
+)
 # Google Cloud TTS over REST + a plain API key (no service-account JSON). Make a
 # key in the Google Cloud console with the "Cloud Text-to-Speech API" enabled.
 # Free tier: ~1M chars/month on Neural2/WaveNet voices, refilled monthly.
@@ -300,11 +308,24 @@ GOOGLE_TTS_LANGUAGE: str = os.environ.get("GOOGLE_TTS_LANGUAGE", "en-US")
 GOOGLE_TTS_VOICE: str = os.environ.get("GOOGLE_TTS_VOICE", "en-US-Neural2-D")
 
 
-# --- Cloud speech-to-text (Groq Whisper) ------------------------------------
-# Which backend stt.transcribe() uses: "groq" (cloud) or "local" (faster-whisper).
-# Defaults to local so nothing changes until you opt in with MOUNIR_STT_BACKEND.
+# --- Speech-to-text ---------------------------------------------------------
+# "local"/"local_whisper" runs offline. "openai_compatible" connects any
+# hosted or local service exposing the common audio-transcriptions contract.
+# "groq" remains an accepted first-run alias for older installations.
 STT_BACKEND: str = os.environ.get("MOUNIR_STT_BACKEND", "local").lower()
 # Groq's OpenAI-compatible audio endpoint; reuses GROQ_API_KEY above.
 # whisper-large-v3-turbo is multilingual and ~216x real-time.
 GROQ_BASE_URL: str = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_STT_MODEL: str = os.environ.get("GROQ_STT_MODEL", "whisper-large-v3-turbo")
+OPENAI_STT_BASE_URL: str = os.environ.get(
+    "MOUNIR_STT_BASE_URL",
+    GROQ_BASE_URL if STT_BACKEND == "groq" else "https://api.openai.com/v1",
+)
+OPENAI_STT_MODEL: str = os.environ.get(
+    "MOUNIR_STT_MODEL",
+    GROQ_STT_MODEL if STT_BACKEND == "groq" else "whisper-1",
+)
+OPENAI_STT_API_KEY: str = os.environ.get(
+    "MOUNIR_STT_API_KEY",
+    GROQ_API_KEY if STT_BACKEND == "groq" else os.environ.get("OPENAI_API_KEY", ""),
+)

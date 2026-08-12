@@ -91,18 +91,19 @@ class DatabaseTests(TemporaryDatabaseTest):
         db.init()
         saved = db.update_voice_settings(
             stt={
-                "provider": "groq",
+                "provider": "openai_compatible",
                 "model": "whisper-large-v3-turbo",
                 "base_url": "https://api.groq.com/openai/v1",
                 "api_key": "groq-voice-key",
                 "language": "auto",
             },
             tts={
-                "provider": "google",
-                "model": "en-US-Neural2-D",
-                "base_url": "https://texttospeech.googleapis.com/v1",
-                "api_key": "google-voice-key",
-                "language": "en-US",
+                "provider": "openai_compatible",
+                "model": "speech-model",
+                "voice": "voice-id",
+                "base_url": "https://speech.example.test/v1",
+                "api_key": "speech-voice-key",
+                "language": "auto",
             },
         )
 
@@ -111,11 +112,12 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertTrue(saved["stt"]["api_key_configured"])
         self.assertTrue(saved["tts"]["api_key_configured"])
         self.assertEqual(db.get_voice_runtime("stt")["api_key"], "groq-voice-key")
-        self.assertEqual(db.get_voice_runtime("tts")["api_key"], "google-voice-key")
+        self.assertEqual(db.get_voice_runtime("tts")["api_key"], "speech-voice-key")
+        self.assertEqual(db.get_voice_runtime("tts")["voice"], "voice-id")
 
         db.update_voice_settings(
             stt={
-                "provider": "groq",
+                "provider": "openai_compatible",
                 "model": "whisper-large-v3-turbo",
                 "base_url": "https://api.groq.com/openai/v1",
                 "api_key": "",
@@ -129,35 +131,172 @@ class DatabaseTests(TemporaryDatabaseTest):
         db.init()
         db.update_voice_settings(
             stt={
-                "provider": "groq",
+                "provider": "openai_compatible",
                 "model": "whisper-test",
                 "base_url": "https://speech.example.test/v1",
                 "api_key": "speech-key",
                 "language": "en",
             },
             tts={
-                "provider": "google",
-                "model": "voice-test",
+                "provider": "openai_compatible",
+                "model": "speech-test",
+                "voice": "voice-test",
                 "base_url": "https://voice.example.test/v1",
                 "api_key": "voice-key",
-                "language": "en-US",
+                "language": "auto",
             },
         )
         from mounir import stt as stt_mod, tts as tts_mod
 
         with patch.object(
-            stt_mod, "_transcribe_groq", return_value=("hello", "en")
+            stt_mod, "_transcribe_openai_compatible", return_value=("hello", "en")
         ) as transcribe:
             self.assertEqual(stt_mod.transcribe([0.1]), ("hello", "en"))
         self.assertEqual(transcribe.call_args.args[2]["model"], "whisper-test")
         self.assertEqual(transcribe.call_args.args[2]["api_key"], "speech-key")
 
         with patch.object(
-            tts_mod, "_synthesize_google_wav", return_value=b"wav"
+            tts_mod, "_synthesize_openai_compatible_wav", return_value=b"wav"
         ) as synthesize:
             self.assertEqual(tts_mod.synthesize_wav("hello"), b"wav")
-        self.assertEqual(synthesize.call_args.args[1]["model"], "voice-test")
+        self.assertEqual(synthesize.call_args.args[1]["model"], "speech-test")
+        self.assertEqual(synthesize.call_args.args[1]["voice"], "voice-test")
         self.assertEqual(synthesize.call_args.args[1]["api_key"], "voice-key")
+
+    def test_compatible_voice_endpoints_allow_local_servers_without_api_keys(self):
+        db.init()
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE voice_settings SET stt_api_key = '', tts_api_key = '' WHERE id = 1"
+            )
+            conn.commit()
+        saved = db.update_voice_settings(
+            stt={
+                "provider": "openai_compatible",
+                "model": "local-whisper",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "language": "auto",
+            },
+            tts={
+                "provider": "openai_compatible",
+                "model": "local-speech",
+                "voice": "local-voice",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "language": "auto",
+            },
+        )
+
+        self.assertFalse(saved["stt"]["api_key_configured"])
+        self.assertFalse(saved["tts"]["api_key_configured"])
+        self.assertEqual(saved["stt"]["provider"], "openai_compatible")
+        self.assertEqual(saved["tts"]["provider"], "openai_compatible")
+
+    def test_legacy_groq_voice_setting_migrates_to_compatible_transport(self):
+        db.init()
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE voice_settings SET stt_provider = 'groq' WHERE id = 1"
+            )
+            conn.execute("ALTER TABLE voice_settings RENAME TO voice_settings_current")
+            conn.execute(
+                """
+                CREATE TABLE voice_settings (
+                    id INTEGER PRIMARY KEY, stt_provider TEXT NOT NULL,
+                    stt_model TEXT NOT NULL, stt_base_url TEXT NOT NULL DEFAULT '',
+                    stt_api_key TEXT NOT NULL DEFAULT '', stt_language TEXT NOT NULL DEFAULT 'auto',
+                    tts_provider TEXT NOT NULL, tts_model TEXT NOT NULL,
+                    tts_base_url TEXT NOT NULL DEFAULT '', tts_api_key TEXT NOT NULL DEFAULT '',
+                    tts_language TEXT NOT NULL DEFAULT 'en-US', updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO voice_settings
+                SELECT id, stt_provider, stt_model, stt_base_url, stt_api_key,
+                       stt_language, tts_provider, tts_model, tts_base_url,
+                       tts_api_key, tts_language, updated_at
+                FROM voice_settings_current
+                """
+            )
+            conn.execute("DROP TABLE voice_settings_current")
+            conn.commit()
+
+        db.init()
+
+        saved = db.get_voice_settings()
+        self.assertEqual(saved["stt"]["provider"], "openai_compatible")
+        self.assertIn("voice", saved["tts"])
+
+    def test_openai_compatible_stt_posts_standard_multipart_contract(self):
+        from mounir import stt as stt_mod
+
+        response = Mock()
+        response.json.return_value = {"text": "hello world", "language": "en"}
+        runtime = {
+            "model": "whisper-test",
+            "base_url": "https://speech.example.test/v1?api-version=1",
+            "api_key": "speech-key",
+        }
+        with patch("requests.post", return_value=response) as post:
+            result = stt_mod._transcribe_openai_compatible([0.1, -0.1], None, runtime)
+
+        self.assertEqual(result, ("hello world", "en"))
+        request = post.call_args
+        self.assertEqual(
+            request.args[0],
+            "https://speech.example.test/v1/audio/transcriptions?api-version=1",
+        )
+        self.assertEqual(request.kwargs["data"]["model"], "whisper-test")
+        self.assertEqual(request.kwargs["data"]["response_format"], "json")
+        self.assertEqual(
+            request.kwargs["headers"]["Authorization"], "Bearer speech-key"
+        )
+
+    def test_openai_compatible_tts_posts_standard_speech_contract(self):
+        from mounir import tts as tts_mod
+
+        response = Mock(content=b"wave-data")
+        runtime = {
+            "model": "speech-test",
+            "voice": "voice-test",
+            "base_url": "http://localhost:8080/v1/audio/speech",
+            "api_key": "",
+        }
+        with patch("requests.post", return_value=response) as post:
+            result = tts_mod._synthesize_openai_compatible_wav("hello", runtime)
+
+        self.assertEqual(result, b"wave-data")
+        request = post.call_args
+        self.assertEqual(request.args[0], "http://localhost:8080/v1/audio/speech")
+        self.assertEqual(
+            request.kwargs["json"],
+            {
+                "model": "speech-test",
+                "input": "hello",
+                "voice": "voice-test",
+                "response_format": "wav",
+            },
+        )
+        self.assertNotIn("Authorization", request.kwargs["headers"])
+
+    def test_native_google_tts_remains_available(self):
+        db.init()
+        db.update_voice_settings(
+            tts={
+                "provider": "google",
+                "model": "en-US-Neural2-D",
+                "base_url": "https://texttospeech.googleapis.com/v1",
+                "api_key": "google-key",
+                "language": "en-US",
+            }
+        )
+        from mounir import tts as tts_mod
+
+        with patch.object(tts_mod, "_synthesize_google_wav", return_value=b"wav") as call:
+            self.assertEqual(tts_mod.synthesize_wav("hello"), b"wav")
+        self.assertEqual(call.call_args.args[1]["model"], "en-US-Neural2-D")
+        self.assertEqual(call.call_args.args[1]["api_key"], "google-key")
 
     def test_telegram_token_replacement_and_pairing_are_persisted(self):
         db.init()

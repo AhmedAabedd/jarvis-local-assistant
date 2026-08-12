@@ -147,6 +147,7 @@ export interface AgentOverview {
 export interface VoiceProvider {
   provider: string
   model: string
+  voice?: string
   language: string
   base_url: string
   api_key_configured?: boolean

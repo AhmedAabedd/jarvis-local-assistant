@@ -237,6 +237,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             stt_language TEXT NOT NULL DEFAULT 'auto',
             tts_provider TEXT NOT NULL,
             tts_model TEXT NOT NULL,
+            tts_voice TEXT NOT NULL DEFAULT '',
             tts_base_url TEXT NOT NULL DEFAULT '',
             tts_api_key TEXT NOT NULL DEFAULT '',
             tts_language TEXT NOT NULL DEFAULT 'en-US',
@@ -380,15 +381,53 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            "groq" if cfg.STT_BACKEND == "groq" else "local_whisper",
-            cfg.GROQ_STT_MODEL if cfg.STT_BACKEND == "groq" else cfg.WHISPER_MODEL,
-            cfg.GROQ_BASE_URL if cfg.STT_BACKEND == "groq" else "",
-            "$GROQ_API_KEY" if cfg.STT_BACKEND == "groq" else "",
+            "local_whisper"
+            if cfg.STT_BACKEND in {"local", "local_whisper"}
+            else "openai_compatible",
+            cfg.WHISPER_MODEL
+            if cfg.STT_BACKEND in {"local", "local_whisper"}
+            else cfg.OPENAI_STT_MODEL,
+            ""
+            if cfg.STT_BACKEND in {"local", "local_whisper"}
+            else cfg.OPENAI_STT_BASE_URL,
+            (
+                "$MOUNIR_STT_API_KEY"
+                if os.environ.get("MOUNIR_STT_API_KEY")
+                else "$GROQ_API_KEY"
+                if cfg.STT_BACKEND == "groq" and os.environ.get("GROQ_API_KEY")
+                else "$OPENAI_API_KEY"
+                if os.environ.get("OPENAI_API_KEY")
+                else ""
+            ),
             cfg.WHISPER_LANGUAGE or "auto",
-            "google" if cfg.TTS_BACKEND == "google" else "piper",
-            cfg.GOOGLE_TTS_VOICE if cfg.TTS_BACKEND == "google" else cfg.PIPER_MODEL,
-            "https://texttospeech.googleapis.com/v1" if cfg.TTS_BACKEND == "google" else "",
-            "$GOOGLE_TTS_API_KEY" if cfg.TTS_BACKEND == "google" else "",
+            cfg.TTS_BACKEND
+            if cfg.TTS_BACKEND in {"google", "openai_compatible"}
+            else "piper",
+            (
+                cfg.GOOGLE_TTS_VOICE
+                if cfg.TTS_BACKEND == "google"
+                else cfg.OPENAI_TTS_MODEL
+                if cfg.TTS_BACKEND == "openai_compatible"
+                else cfg.PIPER_MODEL
+            ),
+            (
+                "https://texttospeech.googleapis.com/v1"
+                if cfg.TTS_BACKEND == "google"
+                else cfg.OPENAI_TTS_BASE_URL
+                if cfg.TTS_BACKEND == "openai_compatible"
+                else ""
+            ),
+            (
+                "$GOOGLE_TTS_API_KEY"
+                if cfg.TTS_BACKEND == "google" and os.environ.get("GOOGLE_TTS_API_KEY")
+                else "$MOUNIR_TTS_API_KEY"
+                if cfg.TTS_BACKEND == "openai_compatible"
+                and os.environ.get("MOUNIR_TTS_API_KEY")
+                else "$OPENAI_API_KEY"
+                if cfg.TTS_BACKEND == "openai_compatible"
+                and os.environ.get("OPENAI_API_KEY")
+                else ""
+            ),
             cfg.GOOGLE_TTS_LANGUAGE,
             _now(),
         ),
@@ -485,6 +524,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         },
         "heartbeat_runs": {
             "notification_read_at": "TEXT",
+        },
+        "voice_settings": {
+            "tts_voice": "TEXT NOT NULL DEFAULT ''",
         },
     }
     added_columns: set[tuple[str, str]] = set()
@@ -655,6 +697,21 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "UPDATE models SET model = name WHERE model IS NULL OR trim(model) = ''"
+    )
+    # Groq uses the same audio-transcriptions contract as the generic transport.
+    # Preserve old installations while removing the provider-specific runtime.
+    conn.execute(
+        """
+        UPDATE voice_settings SET stt_provider = 'openai_compatible'
+        WHERE stt_provider = 'groq'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE voice_settings SET tts_voice = ?
+        WHERE tts_provider = 'openai_compatible' AND trim(tts_voice) = ''
+        """,
+        (cfg.OPENAI_TTS_VOICE,),
     )
     confirmation_filter = (
         "" if ("subagents", "confirm_tools") in added_columns
@@ -1221,8 +1278,17 @@ def update_profile(**kwargs) -> dict:
 # -----------------------------------------------------------------------------
 
 VOICE_PROVIDERS = {
-    "stt": {"local_whisper", "groq"},
-    "tts": {"piper", "google"},
+    "stt": {"local_whisper", "openai_compatible"},
+    "tts": {"piper", "openai_compatible", "google"},
+}
+
+VOICE_PROVIDER_ALIASES = {
+    "stt": {
+        "local": "local_whisper",
+        "groq": "openai_compatible",
+        "openai": "openai_compatible",
+    },
+    "tts": {"local": "piper", "openai": "openai_compatible"},
 }
 
 
@@ -1241,6 +1307,8 @@ def get_voice_settings(*, include_secrets: bool = False) -> dict:
             "language": row[f"{kind}_language"] or "auto",
             "api_key_configured": bool(secret),
         }
+        if kind == "tts":
+            item["voice"] = row["tts_voice"] or ""
         if include_secrets:
             item["api_key"] = secret
         result[kind] = item
@@ -1266,6 +1334,7 @@ def update_voice_settings(*, stt=None, tts=None) -> dict:
         if not isinstance(supplied, dict):
             raise ValueError(f"{kind.upper()} configuration must be an object")
         provider = str(supplied.get("provider") or "").strip().lower()
+        provider = VOICE_PROVIDER_ALIASES[kind].get(provider, provider)
         if provider not in VOICE_PROVIDERS[kind]:
             raise ValueError(f"{kind.upper()} provider is not supported")
         model = _required(supplied.get("model"), f"{kind.upper()} model")
@@ -1273,13 +1342,15 @@ def update_voice_settings(*, stt=None, tts=None) -> dict:
         if len(language) > 32:
             raise ValueError(f"{kind.upper()} language is too long")
         base_url = str(supplied.get("base_url") or "").strip()
-        cloud = provider in {"groq", "google"}
-        if cloud:
-            if provider == "groq":
-                base_url = base_url.rstrip("/").removesuffix("/audio/transcriptions")
-            else:
-                base_url = base_url.rstrip("/").removesuffix("/text:synthesize")
-            base_url = _normalize_model_base_url(base_url)
+        remote = provider in {"openai_compatible", "google"}
+        if remote:
+            if not base_url:
+                raise ValueError(f"{kind.upper()} API URL is required for this provider")
+            if not base_url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"{kind.upper()} API URL must start with http:// or https://"
+                )
+            base_url = base_url.rstrip("/")
         else:
             base_url = ""
         updates.update(
@@ -1290,10 +1361,19 @@ def update_voice_settings(*, stt=None, tts=None) -> dict:
                 f"{kind}_language": language or "auto",
             }
         )
+        if kind == "tts":
+            voice = str(
+                supplied.get("voice", current[kind].get("voice") or "") or ""
+            ).strip()
+            if len(voice) > 160:
+                raise ValueError("TTS voice is too long")
+            if provider == "openai_compatible" and not voice:
+                raise ValueError("TTS voice is required for this provider")
+            updates["tts_voice"] = voice if provider == "openai_compatible" else ""
         api_key = supplied.get("api_key")
         if api_key is not None and str(api_key).strip():
             updates[f"{kind}_api_key"] = str(api_key).strip()
-        elif cloud and not current[kind].get("api_key"):
+        elif provider == "google" and not current[kind].get("api_key"):
             raise ValueError(f"{kind.upper()} API key is required for this provider")
     if not updates:
         return get_voice_settings()

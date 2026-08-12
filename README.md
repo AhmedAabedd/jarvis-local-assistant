@@ -231,8 +231,8 @@ jobs.
 | Dynamic MCP specialists | OpenAI-compatible chat-completions endpoints with tool calling |
 | Media and System | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
 | Knowledge | Configurable Gemini/OpenAI-compatible profile |
-| Speech to text | Local Faster Whisper or Groq Whisper |
-| Text to speech | Local Piper or Google Cloud TTS |
+| Speech to text | Local Faster Whisper or provider-neutral OpenAI-compatible transcription APIs |
+| Text to speech | Local Piper, provider-neutral OpenAI-compatible speech APIs, or Google Cloud TTS |
 
 An OpenAI-compatible endpoint can be local or remote. Ollama-compatible endpoints,
 LocalAI, vLLM, cloud gateways, and vendor endpoints can work for dynamic agents when
@@ -272,12 +272,19 @@ entry point supports push-to-talk and hands-free wake word operation.
 
 Supported voice backends:
 
-- STT: local **Faster Whisper** or cloud **Groq Whisper**
-- TTS: local **Piper** or cloud **Google Cloud TTS**
+- STT: local **Faster Whisper**, or any hosted/self-hosted service implementing
+  the OpenAI-compatible `POST /audio/transcriptions` contract (including Groq)
+- TTS: local **Piper**, any hosted/self-hosted service implementing the
+  OpenAI-compatible `POST /audio/speech` contract, or native **Google Cloud TTS**
 
 Voice configuration—including model, voice, language, endpoint, and credential—is
 managed from **Agent Studio → Voice**. Voice-originated turns also receive an explicit
 instruction to answer naturally for speech, without Markdown-heavy formatting.
+Compatible connections accept either an API root such as `https://provider.example/v1`
+or the complete operation endpoint. Bearer API keys are optional, which allows local
+speech servers with no authentication. The model and voice fields are sent unchanged,
+so the available choices come from the connected service rather than a hard-coded
+provider allowlist.
 
 ### Telegram
 
@@ -536,9 +543,16 @@ edited in Agent Studio and take precedence after their initial import.
 | `USE_MISTRAL` | `false` | Import the Mistral supervisor configuration |
 | `MISTRAL_API_KEY` | unset | Initial Mistral credential |
 | `USE_GROQ` | `false` | Use/import the Groq supervisor configuration |
-| `GROQ_API_KEY` | unset | Initial Groq and optional Groq STT credential |
-| `MOUNIR_STT_BACKEND` | `local` | Initial STT provider: `local` or `groq` |
-| `MOUNIR_TTS_BACKEND` | `piper` | Initial TTS provider: `piper` or `google` |
+| `GROQ_API_KEY` | unset | Initial Groq credential; still supported by the legacy `groq` STT bootstrap alias |
+| `MOUNIR_STT_BACKEND` | `local` | Initial STT transport: `local` or `openai_compatible` (`groq` remains an alias) |
+| `MOUNIR_STT_BASE_URL` | OpenAI API root | Initial compatible transcription API root or full endpoint |
+| `MOUNIR_STT_MODEL` | `whisper-1` | Initial compatible transcription model ID |
+| `MOUNIR_STT_API_KEY` | `OPENAI_API_KEY` | Optional initial compatible transcription bearer key |
+| `MOUNIR_TTS_BACKEND` | `piper` | Initial TTS transport: `piper`, `openai_compatible`, or `google` |
+| `MOUNIR_TTS_BASE_URL` | OpenAI API root | Initial compatible speech API root or full endpoint |
+| `MOUNIR_TTS_MODEL` | `tts-1` | Initial compatible speech model ID |
+| `MOUNIR_TTS_VOICE` | `alloy` | Initial compatible speech voice ID |
+| `MOUNIR_TTS_API_KEY` | `OPENAI_API_KEY` | Optional initial compatible speech bearer key |
 | `MOUNIR_WAKE_WORD` | `hey_jarvis` | openWakeWord trigger for hands-free voice |
 | `MOUNIR_WAKE_THRESHOLD` | `0.5` | Wake-word detection threshold |
 

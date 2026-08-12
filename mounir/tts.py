@@ -3,9 +3,9 @@
 Synthesizes a chunk of text to audio and plays it. Called once per sentence by
 the voice loop so Mounir starts talking before the full reply is generated.
 
-Two backends, chosen by config.TTS_BACKEND:
-- "google": Google Cloud TTS over REST (fast, ~1M free chars/month).
-- "piper":  local Piper (offline, no quota).
+Supported transports are OpenAI-compatible speech synthesis, Google Cloud TTS,
+and local Piper. The OpenAI-compatible path is provider-neutral and also works
+with local servers that implement the common ``/audio/speech`` contract.
 Heavy deps (piper, requests, numpy, sounddevice) are imported lazily.
 """
 
@@ -62,6 +62,8 @@ def synthesize_wav(text: str) -> bytes:
     runtime = db.get_voice_runtime("tts")
     if runtime["provider"] == "google":
         return _synthesize_google_wav(text, runtime)
+    if runtime["provider"] == "openai_compatible":
+        return _synthesize_openai_compatible_wav(text, runtime)
     return _synthesize_piper_wav(text, runtime)
 
 
@@ -96,18 +98,20 @@ def _synthesize_google_wav(text: str, runtime: dict) -> bytes:
     import base64
     import requests
 
+    from .audio_api import endpoint_url
+
     payload = {
         "input": {"text": text},
         "voice": {
             "languageCode": runtime.get("language") or "en-US",
-            "name": runtime["model"],
+            "name": runtime.get("voice") or runtime["model"],
         },
         # LINEAR16 comes back as a WAV container, so we can read rate + PCM
         # straight out of it with the stdlib wave module.
         "audioConfig": {"audioEncoding": "LINEAR16"},
     }
     resp = requests.post(
-        f"{runtime['base_url'].rstrip('/')}/text:synthesize",
+        endpoint_url(runtime.get("base_url", ""), "text:synthesize"),
         params={"key": runtime["api_key"]},
         json=payload,
         timeout=30,
@@ -115,6 +119,28 @@ def _synthesize_google_wav(text: str, runtime: dict) -> bytes:
     resp.raise_for_status()
     audio_b64 = resp.json().get("audioContent")
     return base64.b64decode(audio_b64) if audio_b64 else b""
+
+
+def _synthesize_openai_compatible_wav(text: str, runtime: dict) -> bytes:
+    """Synthesize WAV bytes using the common OpenAI audio-speech contract."""
+    import requests
+
+    from .audio_api import bearer_headers, endpoint_url
+
+    payload = {
+        "model": runtime["model"],
+        "input": text,
+        "voice": runtime["voice"],
+        "response_format": "wav",
+    }
+    response = requests.post(
+        endpoint_url(runtime.get("base_url", ""), "audio/speech"),
+        headers=bearer_headers(runtime.get("api_key"), accept="audio/wav"),
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.content
 
 
 def _play_wav(wav_bytes: bytes) -> None:
