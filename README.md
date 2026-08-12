@@ -349,25 +349,27 @@ an approved template whose body contains one variable for the alert text.
 
 ## Heartbeat: proactive, safe automation
 
-Heartbeat lets Mounir watch for important changes without waiting for a question.
-The user controls:
+Heartbeat Tasks let Mounir watch for several independent changes without waiting
+for a question. Every record controls:
 
-- whether Heartbeat is enabled
-- how often it runs
-- what Mounir should watch for
-- which specialist and approval-free tools it may use
+- its name, normal-language task prompt, and enabled state
+- its independent interval, next run, status, and history
+- which specialists Mounir may delegate to
+- which approval-free tools each selected specialist may use
 - which exact duplicate actions should be suppressed
 - whether alerts should also be delivered through Telegram and WhatsApp
 
-Built-in and dynamic specialists appear in one capability selector. Each specialist
-has **Select all**, but tools that require user confirmation are excluded from
-unattended execution.
+Mounir reads each due task as a normal request and decides which of its selected
+specialists should handle it. Built-in and dynamic specialists appear in one
+capability selector. Selecting an agent initially selects its safe tools, and the
+user can narrow that allowlist. Tools requiring confirmation remain visible but
+muted and cannot be saved for unattended execution.
 
-Heartbeat uses a code-enforced allowlist and a read-only system instruction. Quiet
-runs stay quiet; meaningful changes create a persisted notification. Web delivery
-is always enabled. Telegram and WhatsApp delivery can be selected independently,
+Heartbeat applies the restriction in the UI, database validation, scoped Mounir
+graph, and specialist runtime. Quiet runs stay quiet; meaningful changes create a
+persisted notification labeled with its originating task. Web delivery is always
+enabled. Telegram and WhatsApp delivery can be selected independently per task,
 and each destination is used only when it is enabled, configured, and paired.
-Recent runs and alerts remain available after a page refresh.
 
 ---
 
@@ -402,7 +404,7 @@ channels, visually distinct from supervisor-to-specialist delegation.
 | Voice | STT and TTS providers, models, voices, endpoints, languages, and keys |
 | Telegram | Token lifecycle, connection testing, pairing, activation, and status |
 | WhatsApp | Cloud API credentials, signed webhook, connection testing, pairing, templates, and status |
-| Heartbeat | Schedule, monitoring instruction, safe tools, recent runs, and notifications |
+| Heartbeat | Multiple scheduled tasks, prompts, scoped agents/tools, per-task runs, and notifications |
 | Profile | User name, assistant name, location, and preferred response language |
 
 Read-only record pages are designed for consultation rather than displaying disabled
@@ -566,7 +568,7 @@ Agent Studio owns the bot configuration.
 Mounir stores configuration in `~/.mounir/mounir.db` by default. This includes the
 profile, model registry, MCP servers, cached tool metadata, dynamic specialists,
 icons, activation state, voice configuration, Telegram and WhatsApp settings,
-Heartbeat settings, runs, and notifications.
+Heartbeat tasks, per-task agent/tool permissions, runs, and notifications.
 
 Conversation memory preserves complete valid turns, including paired tool calls and
 results. A rolling window prevents unbounded prompt growth. Web, Telegram, and
@@ -662,7 +664,7 @@ The fastest correct mental model is:
    subagent purpose.
 6. A specialist executes tools privately and returns a compact report to its parent.
 7. Confirmation is request-scoped and must return through the originating interface.
-8. Heartbeat may only use explicitly selected, non-interactive tools.
+8. Each Heartbeat task gives Mounir only its explicitly selected agents and non-interactive tools.
 9. Web, Telegram, and WhatsApp conversations are isolated; shared tool execution is
    locked.
 10. Deactivation must be enforced in the backend even if a stale frontend or graph

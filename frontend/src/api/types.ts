@@ -206,7 +206,31 @@ export interface HeartbeatRun {
   started_at?: string
   finished_at?: string
   summary?: string
+  message?: string
   error?: string
+}
+export interface HeartbeatToolSelection {
+  agent_key: string
+  tool_name: string
+}
+export interface HeartbeatTask {
+  id: number
+  name: string
+  enabled: boolean
+  interval_minutes: number
+  instructions: string
+  notify_telegram: boolean
+  notify_whatsapp: boolean
+  selected_agents: string[]
+  selected_tools: HeartbeatToolSelection[]
+  next_run_at?: string | null
+  last_run_at?: string | null
+  last_status: string
+  last_message?: string
+  last_error?: string
+  created_at?: string
+  updated_at?: string
+  recent_runs: HeartbeatRun[]
 }
 export interface HeartbeatSettings {
   enabled: boolean
@@ -216,6 +240,7 @@ export interface HeartbeatSettings {
   notify_whatsapp: boolean
   capabilities: HeartbeatCapability[]
   recent_runs: HeartbeatRun[]
+  tasks: HeartbeatTask[]
 }
 
 export interface ServerToolsState {
@@ -245,6 +270,8 @@ export interface ChatMessage {
 }
 export interface Notification {
   id?: number
+  heartbeat_task_id?: number
+  heartbeat_task_name?: string
   message?: string
   content?: string
   created_at?: string

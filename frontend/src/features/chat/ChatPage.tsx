@@ -20,6 +20,13 @@ export function ChatPage() {
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [showNotificationHistory, setShowNotificationHistory] = useState(false)
+  const [notificationToast, setNotificationToast] = useState<{
+    id: number
+    title: string
+    text: string
+  } | null>(null)
+  const notificationToastTimer = useRef<number | null>(null)
+  const notificationToastId = useRef(0)
   const loadNotifications = useCallback(async () => {
     try {
       const data = await api.heartbeat.notifications()
@@ -28,7 +35,26 @@ export function ChatPage() {
       // A notification refresh should never interrupt chat.
     }
   }, [])
-  const addHeartbeat = useCallback((_text: string) => void loadNotifications(), [loadNotifications])
+  const addHeartbeat = useCallback(
+    (text: string, taskName?: string) => {
+      void loadNotifications()
+      const message = text.replace(/^Heartbeat update[^\n]*\s*/i, '').trim()
+      if (!message) return
+
+      notificationToastId.current += 1
+      setNotificationToast({
+        id: notificationToastId.current,
+        title: taskName || 'New notification',
+        text: message,
+      })
+      if (notificationToastTimer.current) window.clearTimeout(notificationToastTimer.current)
+      notificationToastTimer.current = window.setTimeout(() => {
+        setNotificationToast(null)
+        notificationToastTimer.current = null
+      }, 5000)
+    },
+    [loadNotifications],
+  )
   const chat = useChatSocket(addHeartbeat)
   const [text, setText] = useState('')
   const [voiceState, setVoiceState] = useState<VoiceState>('ready')
@@ -46,6 +72,12 @@ export function ChatPage() {
   useEffect(() => {
     void loadNotifications()
   }, [loadNotifications])
+  useEffect(
+    () => () => {
+      if (notificationToastTimer.current) window.clearTimeout(notificationToastTimer.current)
+    },
+    [],
+  )
   useEffect(() => {
     if (!notificationsOpen) return
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -174,8 +206,12 @@ export function ChatPage() {
               aria-expanded={notificationsOpen}
               onClick={() => setNotificationsOpen(true)}
             >
-              <Bell size={16} />
-              <span className="notification-trigger__badge">{unreadNotifications.length}</span>
+              <Bell size={18} />
+              {unreadNotifications.length > 0 && (
+                <span className="notification-trigger__badge" aria-hidden="true">
+                  {unreadNotifications.length > 99 ? '99+' : unreadNotifications.length}
+                </span>
+              )}
             </button>
           </div>
         </header>
@@ -227,6 +263,37 @@ export function ChatPage() {
           </div>
         </div>
       </main>
+      {notificationToast && (
+        <div
+          className="notification-toast"
+          key={notificationToast.id}
+          role="status"
+          aria-live="polite"
+        >
+          <span className="notification-toast__icon" aria-hidden="true">
+            <Bell size={16} />
+          </span>
+          <button
+            className="notification-toast__content"
+            type="button"
+            onClick={() => {
+              setNotificationToast(null)
+              setNotificationsOpen(true)
+            }}
+          >
+            <strong>{notificationToast.title}</strong>
+            <span>{notificationToast.text}</span>
+          </button>
+          <button
+            className="notification-toast__close"
+            type="button"
+            aria-label="Dismiss notification"
+            onClick={() => setNotificationToast(null)}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
       {notificationsOpen && (
         <button
           className="notification-backdrop"
@@ -292,6 +359,9 @@ export function ChatPage() {
                   <X size={12} />
                 </button>
               </div>
+              {item.heartbeat_task_name && (
+                <strong className="notification__task">{item.heartbeat_task_name}</strong>
+              )}
               <p>{notificationText(item)}</p>
               <time>{formatTime(item.created_at)}</time>
             </article>

@@ -439,6 +439,80 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
         self.assertEqual(target["allowed_tools"], ["search_emails"])
 
+    def test_heartbeat_tasks_are_independent_and_reject_protected_tools(self):
+        db.init()
+        email = self._create_email_fixture()
+        db.save_server_tools(
+            email["mcp_server_id"],
+            [
+                {"name": "search_emails", "description": "Read email", "input_schema": {}},
+                {"name": "send_email", "description": "Send email", "input_schema": {}},
+            ],
+        )
+        agent_key = f"mcp:{email['id']}"
+
+        with self.assertRaisesRegex(ValueError, "require confirmation"):
+            db.create_heartbeat_task(
+                name="Unsafe email task",
+                instructions="Send a message.",
+                enabled=True,
+                selected_agents=[agent_key],
+                selected_tools=[
+                    {"agent_key": agent_key, "tool_name": "send_email"}
+                ],
+            )
+
+        first = db.create_heartbeat_task(
+            name="Priority mail",
+            instructions="Find important unread messages.",
+            enabled=True,
+            interval_minutes=15,
+            selected_agents=[agent_key],
+            selected_tools=[
+                {"agent_key": agent_key, "tool_name": "search_emails"}
+            ],
+        )
+        second = db.create_heartbeat_task(
+            name="Daily media",
+            instructions="Find newly added media.",
+            interval_minutes=1440,
+            selected_agents=["builtin:media"],
+            selected_tools=[
+                {"agent_key": "builtin:media", "tool_name": "find_media"}
+            ],
+        )
+
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(
+            db.get_heartbeat_targets(first["id"])[0]["allowed_tools"],
+            ["search_emails"],
+        )
+        self.assertEqual(
+            db.get_heartbeat_targets(second["id"])[0]["allowed_tools"],
+            ["find_media"],
+        )
+        run_id = db.begin_heartbeat_task_run(first["id"], "manual")
+        db.finish_heartbeat_task_run(
+            first["id"], run_id, status="alert", message="Important mail."
+        )
+        self.assertEqual(db.list_heartbeat_task_runs(first["id"])[0]["id"], run_id)
+        self.assertEqual(db.list_heartbeat_task_runs(second["id"]), [])
+        self.assertEqual(
+            db.list_heartbeat_notifications()[0]["heartbeat_task_name"],
+            "Priority mail",
+        )
+
+    def test_multi_record_migration_runs_once_and_preserves_deletion(self):
+        db.init()
+        tasks = db.list_heartbeat_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["name"], "General heartbeat")
+        self.assertTrue(db.delete_heartbeat_task(tasks[0]["id"]))
+
+        db.init()
+
+        self.assertEqual(db.list_heartbeat_tasks(), [])
+
     def test_heartbeat_includes_builtins_and_defaults_to_their_safe_tools(self):
         db.init()
         capabilities = {
@@ -740,6 +814,44 @@ class DatabaseTests(TemporaryDatabaseTest):
         run_builtin.assert_called_once()
         self.assertEqual(run_builtin.call_args.args[0], "media")
         self.assertEqual(run_builtin.call_args.args[2], ["find_media"])
+
+    def test_heartbeat_task_is_read_by_scoped_mounir_supervisor(self):
+        db.init()
+        task = db.create_heartbeat_task(
+            name="System watch",
+            instructions="Check whether the computer needs attention.",
+            selected_agents=["builtin:system"],
+            selected_tools=[
+                {"agent_key": "builtin:system", "tool_name": "system_status"}
+            ],
+        )
+        observed = {}
+
+        class FakeAgent:
+            def __init__(self, conversation, scoped_targets):
+                observed["targets"] = scoped_targets
+                self.conversation = conversation
+
+            def respond(self, prompt):
+                observed["prompt"] = prompt
+                self.conversation.add_assistant("Battery health needs attention.")
+                yield "Battery health needs attention."
+
+        with patch.object(heartbeat_mod, "Agent", FakeAgent):
+            self.assertEqual(
+                heartbeat_mod.run_task(task["id"]),
+                ("alert", "Battery health needs attention."),
+            )
+
+        self.assertIn("Check whether the computer", observed["prompt"])
+        self.assertEqual(observed["targets"][0]["builtin_key"], "system")
+        self.assertEqual(observed["targets"][0]["allowed_tools"], ["system_status"])
+        scoped_graph = langgraph_agent._compile_graph(
+            config.MODEL, True, observed["targets"]
+        )
+        self.assertIsNotNone(scoped_graph)
+        with patch.object(heartbeat_mod, "Agent", FakeAgent):
+            self.assertEqual(heartbeat_mod.run_task(task["id"]), ("quiet", ""))
 
     def test_heartbeat_notifications_only_include_alerts(self):
         db.init()
@@ -1959,6 +2071,90 @@ class TransportTests(unittest.TestCase):
 
 
 class AdminApiTests(TemporaryDatabaseTest):
+    def test_heartbeat_task_crud_api_keeps_tool_confirmation_safety(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+        model = db.add_model(
+            "Heartbeat API model",
+            "heartbeat/api",
+            "Ollama",
+            "http://localhost:11434/v1",
+            "",
+        )
+        mcp_server = db.add_server("Heartbeat API server", "heartbeat-api-server")
+        agent = db.add_subagent(
+            "Heartbeat API agent",
+            "Reads service state.",
+            "",
+            model["id"],
+            mcp_server["id"],
+            confirm_tools=["write_state"],
+        )
+        db.save_server_tools(
+            mcp_server["id"],
+            [
+                {"name": "read_state", "input_schema": {}},
+                {"name": "write_state", "input_schema": {}},
+            ],
+        )
+        agent_key = f"mcp:{agent['id']}"
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                unsafe = await client.post(
+                    "/api/heartbeat/tasks",
+                    json={
+                        "name": "Unsafe task",
+                        "instructions": "Change state.",
+                        "selected_agents": [agent_key],
+                        "selected_tools": [
+                            {"agent_key": agent_key, "tool_name": "write_state"}
+                        ],
+                    },
+                )
+                self.assertEqual(unsafe.status_code, 400)
+
+                created = await client.post(
+                    "/api/heartbeat/tasks",
+                    json={
+                        "name": "Service state",
+                        "instructions": "Read service state and report changes.",
+                        "enabled": True,
+                        "interval_minutes": 15,
+                        "selected_agents": [agent_key],
+                        "selected_tools": [
+                            {"agent_key": agent_key, "tool_name": "read_state"}
+                        ],
+                    },
+                )
+                self.assertEqual(created.status_code, 200)
+                task = created.json()
+                self.assertTrue(task["enabled"])
+                self.assertEqual(task["selected_agents"], [agent_key])
+
+                listing = await client.get("/api/heartbeat")
+                self.assertTrue(
+                    any(item["id"] == task["id"] for item in listing.json()["tasks"])
+                )
+                updated = await client.put(
+                    f"/api/heartbeat/tasks/{task['id']}",
+                    json={**task, "name": "Updated service state", "enabled": False},
+                )
+                self.assertEqual(updated.status_code, 200)
+                self.assertEqual(updated.json()["name"], "Updated service state")
+
+                deleted = await client.delete(f"/api/heartbeat/tasks/{task['id']}")
+                self.assertEqual(deleted.status_code, 200)
+                missing = await client.delete(f"/api/heartbeat/tasks/{task['id']}")
+                self.assertEqual(missing.status_code, 404)
+
+        asyncio.run(exercise_api())
+
     def test_subagent_api_persists_and_protects_parent_relationships(self):
         import httpx
         import server as web_server

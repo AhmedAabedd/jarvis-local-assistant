@@ -7,7 +7,7 @@ interface Confirmation {
   prompt: string
 }
 
-export function useChatSocket(onHeartbeat: (text: string) => void) {
+export function useChatSocket(onHeartbeat: (text: string, title?: string) => void) {
   const socket = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<number | null>(null)
   const [connection, setConnection] = useState<Connection>('connecting')
@@ -68,7 +68,8 @@ export function useChatSocket(onHeartbeat: (text: string) => void) {
           setStreaming(false)
         } else if (packet.type === 'confirm') {
           setConfirmation({ id: packet.id, prompt: packet.prompt })
-        } else if (packet.type === 'heartbeat') onHeartbeatRef.current(packet.text)
+        } else if (packet.type === 'heartbeat')
+          onHeartbeatRef.current(packet.text, packet.title || undefined)
       }
     }
     connect()

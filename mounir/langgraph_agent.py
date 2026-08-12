@@ -24,7 +24,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 
-from . import config as cfg, db, graph_runtime, llm, mcp_agents, tools, trace
+from . import builtin_agents, config as cfg, db, graph_runtime, llm, mcp_agents, tools, trace
 from .memory import Conversation
 from .specialists.knowledge import run as run_knowledge
 from .specialists.media import run as run_media
@@ -278,23 +278,56 @@ def _make_mcp_node(
     return node
 
 
-def _compile_graph(model: str, use_tools: bool):
-    dynamic = mcp_agents.load()
-    enabled_builtins = db.enabled_builtin_agent_keys()
+def _make_heartbeat_builtin_node(spec: dict):
+    key = spec["builtin_key"]
+    tool_name = f"delegate_to_{key}"
+
+    def node(state: TurnState) -> Command:
+        return _specialist_result(
+            state,
+            tool_name,
+            spec["name"],
+            lambda task: builtin_agents.run(key, task, spec["allowed_tools"]),
+        )
+
+    return node
+
+
+def _compile_graph(
+    model: str, use_tools: bool, scoped_targets: list[dict] | None = None
+):
+    scoped = scoped_targets is not None
+    dynamic = (
+        [dict(spec) for spec in scoped_targets or [] if spec.get("kind") == "mcp"]
+        if scoped
+        else mcp_agents.load()
+    )
+    scoped_builtins = {
+        spec["builtin_key"]: dict(spec)
+        for spec in scoped_targets or []
+        if spec.get("kind") == "builtin"
+    }
+    enabled_builtins = (
+        set(scoped_builtins) if scoped else db.enabled_builtin_agent_keys()
+    )
     delegates = {
         name: node
         for name, node in _DELEGATES.items()
         if node in enabled_builtins
     }
-    root_specs = [
-        spec
-        for spec in dynamic
-        if spec.get("connected_to_supervisor")
-        or (
-            "connected_to_supervisor" not in spec
-            and spec.get("parent_agent_id") is None
-        )
-    ]
+    root_specs = (
+        dynamic
+        if scoped
+        else [
+            spec
+            for spec in dynamic
+            if spec.get("connected_to_supervisor")
+            or (
+                "connected_to_supervisor" not in spec
+                and spec.get("parent_agent_id") is None
+            )
+        ]
+    )
     dynamic_tools = []
     for spec in root_specs:
         name = mcp_agents.delegate_tool_name(spec["name"])
@@ -306,7 +339,8 @@ def _compile_graph(model: str, use_tools: bool):
         for item in tools.DELEGATE_TOOLS
         if item.name in delegates
     ]
-    advertised_tools = [*tools.GENERAL_TOOLS, *builtin_tools, *dynamic_tools]
+    general_tools = [] if scoped else list(tools.GENERAL_TOOLS)
+    advertised_tools = [*general_tools, *builtin_tools, *dynamic_tools]
 
     declined_batch = threading.Event()
     general_tool_lock = threading.Lock()
@@ -337,19 +371,26 @@ def _compile_graph(model: str, use_tools: bool):
     graph.add_node(
         "tools",
         ToolNode(
-            tools.GENERAL_TOOLS,
+            general_tools,
             handle_tool_errors=True,
             wrap_tool_call=execute_general_tool,
         ),
     )
     graph.add_node("declined", _declined)
     graph.add_node("force_final", lambda state: _force_final(state, model))
-    if "media" in enabled_builtins:
-        graph.add_node("media", _media)
-    if "knowledge" in enabled_builtins:
-        graph.add_node("knowledge", _knowledge)
-    if "system" in enabled_builtins:
-        graph.add_node("system", _system)
+    for key, normal_node in {
+        "media": _media,
+        "knowledge": _knowledge,
+        "system": _system,
+    }.items():
+        if key not in enabled_builtins:
+            continue
+        graph.add_node(
+            key,
+            _make_heartbeat_builtin_node(scoped_builtins[key])
+            if scoped
+            else normal_node,
+        )
 
     protected_attempts: set[str] = set()
     for spec in root_specs:
@@ -386,6 +427,7 @@ class Agent:
         conversation: Conversation | None = None,
         model: str = cfg.MODEL,
         use_tools: bool = True,
+        scoped_targets: list[dict] | None = None,
     ) -> None:
         db.init()
         if conversation is None:
@@ -396,6 +438,7 @@ class Agent:
         self.conversation = conversation
         self.model = model
         self.use_tools = use_tools
+        self.scoped_targets = scoped_targets
 
     def respond(self, user_input: str, *, voice: bool = False) -> Iterator[str]:
         """Run and stream one complete LangGraph turn."""
@@ -420,7 +463,7 @@ class Agent:
             "delegations": 0,
         }
         input_len = len(initial_messages)
-        graph = _compile_graph(self.model, self.use_tools)
+        graph = _compile_graph(self.model, self.use_tools, self.scoped_targets)
         result_state: TurnState | None = None
         streamed: list[str] = []
 

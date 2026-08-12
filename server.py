@@ -139,9 +139,11 @@ def _web_confirm(action: str) -> bool:
 tools.confirm_fn = _web_confirm
 
 
-async def _deliver_heartbeat_alert(message: str) -> None:
+async def _deliver_heartbeat_alert(message: str, task: dict | None = None) -> None:
     """Deliver one proactive alert to enabled user interfaces."""
-    alert = f"Heartbeat update\n\n{message}"
+    task_name = str((task or {}).get("name") or "").strip()
+    heading = f"Heartbeat update — {task_name}" if task_name else "Heartbeat update"
+    alert = f"{heading}\n\n{message}"
 
     def persist() -> None:
         with _agent_lock:
@@ -150,9 +152,9 @@ async def _deliver_heartbeat_alert(message: str) -> None:
     await asyncio.to_thread(persist)
     out = _ui.get("out")
     if out is not None:
-        out.put_nowait({"type": "heartbeat", "text": alert})
+        out.put_nowait({"type": "heartbeat", "text": alert, "title": task_name})
 
-    destinations = db.get_heartbeat_settings()
+    destinations = task or db.get_heartbeat_settings()
     if destinations["notify_telegram"]:
         telegram = db.get_telegram_settings()
         if (
@@ -735,10 +737,79 @@ async def receive_whatsapp_webhook(
 
 @app.get("/api/heartbeat")
 async def get_heartbeat():
+    tasks = [
+        {
+            **task,
+            "recent_runs": db.list_heartbeat_task_runs(task["id"]),
+        }
+        for task in db.list_heartbeat_tasks()
+    ]
     return {
         **db.get_heartbeat_settings(),
         "capabilities": db.get_heartbeat_capabilities(),
         "recent_runs": db.list_heartbeat_runs(),
+        "tasks": tasks,
+    }
+
+
+def _heartbeat_task_fields(req: dict) -> dict:
+    allowed = {
+        "name",
+        "enabled",
+        "interval_minutes",
+        "instructions",
+        "selected_agents",
+        "selected_tools",
+        "notify_telegram",
+        "notify_whatsapp",
+    }
+    return {key: value for key, value in req.items() if key in allowed}
+
+
+@app.post("/api/heartbeat/tasks")
+async def create_heartbeat_task(req: dict):
+    try:
+        task = db.create_heartbeat_task(**_heartbeat_task_fields(req))
+        heartbeat_service.wake()
+        return {**task, "recent_runs": []}
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/heartbeat/tasks/{task_id}")
+async def update_heartbeat_task(task_id: int, req: dict):
+    try:
+        task = db.update_heartbeat_task(task_id, **_heartbeat_task_fields(req))
+        if task is None:
+            return JSONResponse({"error": "Heartbeat task not found."}, status_code=404)
+        heartbeat_service.wake()
+        return {
+            **task,
+            "recent_runs": db.list_heartbeat_task_runs(task_id),
+        }
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.delete("/api/heartbeat/tasks/{task_id}")
+async def delete_heartbeat_task(task_id: int):
+    if not db.delete_heartbeat_task(task_id):
+        return JSONResponse({"error": "Heartbeat task not found."}, status_code=404)
+    heartbeat_service.wake()
+    return {"ok": True}
+
+
+@app.post("/api/heartbeat/tasks/{task_id}/run")
+async def run_heartbeat_task_now(task_id: int):
+    if db.get_heartbeat_task(task_id) is None:
+        return JSONResponse({"error": "Heartbeat task not found."}, status_code=404)
+    try:
+        task = await heartbeat_service.run_now("manual", task_id)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    return {
+        **task,
+        "recent_runs": db.list_heartbeat_task_runs(task_id),
     }
 
 

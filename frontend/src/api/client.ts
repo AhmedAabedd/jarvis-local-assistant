@@ -1,6 +1,7 @@
 import type {
   AgentOverview,
   HeartbeatSettings,
+  HeartbeatTask,
   McpServer,
   ModelRecord,
   Notification,
@@ -128,6 +129,12 @@ export const api = {
     get: () => request<HeartbeatSettings>('/api/heartbeat'),
     update: (body: object) => request<HeartbeatSettings>('/api/heartbeat', json('PUT', body)),
     run: () => request<HeartbeatSettings>('/api/heartbeat/run', json('POST')),
+    createTask: (body: object) =>
+      request<HeartbeatTask>('/api/heartbeat/tasks', json('POST', body)),
+    updateTask: (id: number, body: object) =>
+      request<HeartbeatTask>(`/api/heartbeat/tasks/${id}`, json('PUT', body)),
+    removeTask: (id: number) => request(`/api/heartbeat/tasks/${id}`, json('DELETE')),
+    runTask: (id: number) => request<HeartbeatTask>(`/api/heartbeat/tasks/${id}/run`, json('POST')),
     notifications: (unreadOnly = false) =>
       request<{ notifications: Notification[] }>(
         `/api/heartbeat/notifications?unread_only=${unreadOnly}`,

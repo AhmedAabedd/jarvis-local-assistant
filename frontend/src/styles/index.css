@@ -342,6 +342,368 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
+.heartbeat-workspace {
+  display: block;
+}
+.heartbeat-workspace.is-listing {
+  max-width: 1180px;
+  margin-inline: auto;
+}
+.heartbeat-workspace.is-editing {
+  max-width: 1080px;
+  margin-inline: auto;
+}
+.heartbeat-workspace > .feedback {
+  margin-top: 16px;
+}
+.heartbeat-task-list {
+  width: 100%;
+}
+.heartbeat-task-list__body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 0;
+}
+.heartbeat-task-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 104px;
+  padding: 20px;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  color: var(--text);
+  background: #0e1512;
+  text-align: left;
+  cursor: pointer;
+}
+.heartbeat-task-item:hover {
+  border-color: #315441;
+  background: var(--surface-2);
+}
+.heartbeat-task-item--active {
+  border-color: #315441;
+  background: #14231c;
+}
+.heartbeat-task-item strong,
+.heartbeat-task-item small {
+  display: block;
+}
+.heartbeat-empty-list {
+  grid-column: 1 / -1;
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+.heartbeat-empty-list strong {
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 13px;
+}
+.heartbeat-empty-list small {
+  margin-bottom: 8px;
+  font-size: 10px;
+}
+.heartbeat-task-item strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.heartbeat-task-item small {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.heartbeat-task-item .heartbeat-task-item__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.heartbeat-task-item__meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.heartbeat-task-item__badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 13px;
+}
+.heartbeat-channel-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 5px 9px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+}
+.heartbeat-channel-badge--telegram {
+  color: #78c5ff;
+  border-color: rgb(66 170 255 / 38%);
+  background: rgb(42 145 230 / 16%);
+}
+.heartbeat-channel-badge--whatsapp {
+  color: #67ef98;
+  border-color: rgb(63 224 119 / 40%);
+  background: rgb(42 190 94 / 17%);
+}
+.heartbeat-editor {
+  min-width: 0;
+}
+.heartbeat-editor-card {
+  overflow: hidden;
+}
+.heartbeat-editor__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.heartbeat-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 22px;
+  background: rgb(23 32 28 / 55%);
+}
+.heartbeat-status-row strong,
+.heartbeat-status-row small {
+  display: block;
+}
+.heartbeat-status-row strong {
+  font-size: 11px;
+}
+.heartbeat-status-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+.heartbeat-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 14px;
+  overflow-x: auto;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  background: #0e1512;
+}
+.heartbeat-tabs button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.heartbeat-tabs button:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.heartbeat-tabs button.is-active {
+  color: var(--accent);
+  background: #183025;
+}
+.heartbeat-tabs button > span {
+  min-width: 17px;
+  height: 17px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 4px;
+  border-radius: 999px;
+  color: #adc0b6;
+  background: rgb(255 255 255 / 7%);
+  font-size: 8px;
+}
+.heartbeat-tab-content {
+  min-height: 390px;
+  padding: 24px;
+}
+.heartbeat-setup {
+  display: grid;
+  gap: 26px;
+}
+.heartbeat-setup > .form-grid {
+  max-width: 720px;
+}
+.heartbeat-delivery {
+  max-width: 720px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line-soft);
+}
+.heartbeat-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 14px;
+}
+.heartbeat-section-heading strong,
+.heartbeat-section-heading small {
+  display: block;
+}
+.heartbeat-section-heading strong {
+  font-size: 12px;
+}
+.heartbeat-section-heading small {
+  max-width: 620px;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.heartbeat-channel-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.heartbeat-channel-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: #0e1512;
+}
+.heartbeat-channel-list strong,
+.heartbeat-channel-list small {
+  display: block;
+}
+.heartbeat-channel-list strong {
+  font-size: 10px;
+}
+.heartbeat-channel-list small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+}
+.heartbeat-selection-summary {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 9px;
+}
+.heartbeat-agent-list {
+  display: grid;
+  gap: 8px;
+}
+.heartbeat-agent-row {
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: #0e1512;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.heartbeat-agent-row.is-selected {
+  border-color: #315441;
+  background: rgb(20 35 28 / 78%);
+}
+.heartbeat-agent-row.is-unavailable {
+  opacity: 0.55;
+}
+.heartbeat-agent-row__header {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  cursor: pointer;
+}
+.heartbeat-agent-row__header input,
+.heartbeat-safe-tools input {
+  width: 15px;
+  min-height: auto;
+  margin: 0;
+}
+.heartbeat-agent-row__header strong,
+.heartbeat-agent-row__header small {
+  display: block;
+}
+.heartbeat-agent-row__header strong {
+  font-size: 11px;
+}
+.heartbeat-agent-row__header small {
+  max-width: 560px;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.heartbeat-agent-row__header em {
+  color: var(--muted);
+  font-size: 8px;
+  font-style: normal;
+}
+.heartbeat-safe-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 11px 14px 14px 42px;
+  border-top: 1px solid var(--line-soft);
+}
+.heartbeat-safe-tools > label {
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 9px;
+  border-radius: 8px;
+  background: rgb(11 16 14 / 62%);
+  cursor: pointer;
+}
+.heartbeat-safe-tools strong,
+.heartbeat-safe-tools small {
+  display: block;
+}
+.heartbeat-safe-tools strong {
+  font-size: 9px;
+}
+.heartbeat-safe-tools small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.4;
+}
+.heartbeat-safe-tools > p {
+  grid-column: 1 / -1;
+  margin: 3px 0 0;
+  color: var(--muted-2);
+  font-size: 8px;
+}
+.heartbeat-run-list {
+  padding: 0;
+}
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1961,13 +2323,17 @@ select:disabled {
   gap: 12px;
 }
 .notification-trigger {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
   min-height: 36px;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 7px 9px 7px 11px;
+  justify-content: center;
+  padding: 0;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 50%;
   color: var(--muted);
   background: var(--surface-2);
   cursor: pointer;
@@ -1985,17 +2351,103 @@ select:disabled {
   background: #17261f;
 }
 .notification-trigger__badge {
-  min-width: 19px;
-  height: 19px;
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  min-width: 17px;
+  height: 17px;
   display: inline-grid;
   place-items: center;
-  padding: 0 5px;
+  padding: 0 4px;
+  border: 2px solid var(--surface-2);
   border-radius: 999px;
   color: white;
   background: #d84f4b;
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 800;
   line-height: 1;
+  pointer-events: none;
+}
+.notification-toast {
+  position: fixed;
+  z-index: 78;
+  top: 88px;
+  right: 24px;
+  width: min(360px, calc(100% - 48px));
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #315441;
+  border-radius: 13px;
+  background: #111a16;
+  box-shadow: 0 18px 48px rgb(0 0 0 / 38%);
+  animation: notification-toast-life 5s ease forwards;
+}
+.notification-toast__icon {
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--accent);
+  background: #183326;
+}
+.notification-toast__content {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.notification-toast__content strong {
+  font-size: 11px;
+}
+.notification-toast__content span {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #b8c8c0;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.notification-toast__close {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.notification-toast__close:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+@keyframes notification-toast-life {
+  0% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+  4%,
+  90% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-5px) scale(0.99);
+  }
 }
 .clock {
   color: var(--muted);
@@ -2166,9 +2618,8 @@ select:disabled {
   z-index: 79;
   padding: 0;
   border: 0;
-  background: rgb(3 7 5 / 55%);
+  background: transparent;
   cursor: default;
-  backdrop-filter: blur(2px);
 }
 .notification-panel {
   position: fixed;
@@ -2235,6 +2686,12 @@ select:disabled {
   color: #c1cec7;
   font-size: 10px;
   line-height: 1.5;
+}
+.notification__task {
+  display: block;
+  margin: 0 42px 5px 0;
+  color: var(--accent);
+  font-size: 9px;
 }
 .notification time {
   display: block;
@@ -2314,9 +2771,46 @@ select:disabled {
   }
   .card-grid,
   .settings-grid,
+  .heartbeat-channel-list,
+  .heartbeat-safe-tools,
   .form-grid,
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+  .heartbeat-workspace {
+    max-width: none;
+  }
+  .heartbeat-task-list__body {
+    grid-template-columns: 1fr;
+  }
+  .heartbeat-task-item {
+    min-width: 0;
+  }
+  .heartbeat-editor-card > .card__header {
+    flex-direction: column;
+  }
+  .heartbeat-editor__actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .heartbeat-status-row {
+    padding-inline: 16px;
+  }
+  .heartbeat-tabs {
+    padding-inline: 8px;
+  }
+  .heartbeat-tab-content {
+    min-height: 0;
+    padding: 18px 16px;
+  }
+  .heartbeat-section-heading {
+    flex-direction: column;
+  }
+  .heartbeat-agent-row__header em {
+    display: none;
+  }
+  .heartbeat-safe-tools {
+    padding-left: 14px;
   }
   .field--full,
   .detail--full {
@@ -2358,8 +2852,13 @@ select:disabled {
     padding-inline: 18px;
   }
   .notification-trigger {
-    gap: 5px;
-    padding-inline: 9px 7px;
+    width: 36px;
+    padding: 0;
+  }
+  .notification-toast {
+    top: 84px;
+    right: 14px;
+    width: calc(100% - 28px);
   }
   .notification-panel {
     inset: 0;
