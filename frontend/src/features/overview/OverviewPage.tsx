@@ -15,8 +15,9 @@ import type { BuiltinAgent, Subagent } from '../../api/types'
 import { Loading } from '../../components/ui/Loading'
 import { useAgents, useOverview, keys } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
-import { AgentConfigModal } from './AgentConfigModal'
+import { AgentConfigDrawer } from './AgentConfigDrawer'
 import { agentNodeTypes, type FlowData } from './AgentFlowNode'
+import { AgentNodeDrawer } from './AgentNodeDrawer'
 import { ConnectAgentModal } from './ConnectAgentModal'
 
 type ConnectionParent = { nodeId: number | null; agentId: number | null; name: string }
@@ -45,6 +46,7 @@ export function OverviewPage() {
   const [supervisorOpen, setSupervisorOpen] = useState(false)
   const [supervisorModelId, setSupervisorModelId] = useState(0)
   const [connectionParent, setConnectionParent] = useState<ConnectionParent | null>(null)
+  const [openNodeId, setOpenNodeId] = useState<number | null>(null)
 
   const save = useMutation({
     mutationFn: async () => {
@@ -75,6 +77,7 @@ export function OverviewPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: keys.agents }),
         queryClient.invalidateQueries({ queryKey: keys.overview }),
+        queryClient.invalidateQueries({ queryKey: ['agent-node'] }),
       ])
       setConnectionParent(null)
     },
@@ -132,6 +135,8 @@ export function OverviewPage() {
           kind: 'supervisor',
           model: info.supervisor.model,
           onOpen: () => {
+            setOpenNodeId(null)
+            setSelected(null)
             setSupervisorModelId(info.supervisor.model_id || 0)
             setSupervisorOpen(true)
           },
@@ -193,6 +198,8 @@ export function OverviewPage() {
           enabled: item.enabled,
           model: item.model,
           onOpen: () => {
+            setOpenNodeId(null)
+            setSupervisorOpen(false)
             setSelected(item)
             setModelId(item.model_id || 0)
           },
@@ -217,7 +224,11 @@ export function OverviewPage() {
           enabled: Boolean(item.enabled),
           model: item.model || item.model_name,
           icon: item.has_icon ? `/api/subagents/${item.id}/icon` : undefined,
-          onOpen: () => navigate(`/admin/agents?open=${item.id}`),
+          onOpen: () => {
+            setSelected(null)
+            setSupervisorOpen(false)
+            setOpenNodeId(nodeId)
+          },
           onConnect: () => setConnectionParent({ nodeId, agentId: item.id, name: pathLabel }),
         },
       })
@@ -262,6 +273,15 @@ export function OverviewPage() {
             <Background variant={BackgroundVariant.Dots} color="#587064" gap={18} size={1.35} />
             <Controls />
           </ReactFlow>
+          <AgentNodeDrawer
+            nodeId={openNodeId}
+            selectorOpen={Boolean(connectionParent)}
+            onConnectSubagent={(nodeId, agentId, name) =>
+              setConnectionParent({ nodeId, agentId, name })
+            }
+            onOpenSubagent={(subagentId) => navigate(`/admin/agents?open=${subagentId}`)}
+            onClose={() => setOpenNodeId(null)}
+          />
         </section>
       </div>
       <ConnectAgentModal
@@ -277,7 +297,7 @@ export function OverviewPage() {
         }
         onClose={() => setConnectionParent(null)}
       />
-      <AgentConfigModal
+      <AgentConfigDrawer
         open={Boolean(selected)}
         name={selected?.name || 'Agent'}
         description={selected?.description}
@@ -302,14 +322,14 @@ export function OverviewPage() {
         onSave={() => save.mutate()}
         onClose={() => setSelected(null)}
       />
-      <AgentConfigModal
+      <AgentConfigDrawer
         open={supervisorOpen}
         name={overview.data?.supervisor.name || 'Mounir'}
         description={overview.data?.supervisor.description}
         modelId={supervisorModelId}
         modelOptions={overview.data?.supervisor.model_options}
         tools={overview.data?.supervisor.tools}
-        capabilitiesLabel="Direct capabilities"
+        capabilitiesLabel="Tools"
         modelHint="The primary model used to understand and route requests."
         busy={saveSupervisor.isPending}
         error={saveSupervisor.error instanceof Error ? saveSupervisor.error.message : ''}

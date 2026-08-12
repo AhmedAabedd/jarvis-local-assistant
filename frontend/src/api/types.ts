@@ -77,8 +77,43 @@ export interface AgentPlacement {
   depth: number
   path_names: string[]
   path_label: string
+  enabled_tools: string[] | null
   child_node_ids: Id[]
   child_agent_ids: Id[]
+}
+
+export interface SubagentNodeRelation {
+  id: Id
+  subagent_id: Id
+  name: string
+  enabled?: boolean
+  has_icon?: boolean
+  path_label?: string
+}
+
+export interface SubagentNode {
+  id: Id
+  subagent_id: Id
+  parent_node_id: Id | null
+  created_at: string
+  depth: number
+  path_names: string[]
+  path_label: string
+  enabled_tools: string[] | null
+  parent: SubagentNodeRelation | null
+  subagent: {
+    id: Id
+    name: string
+    description: string
+    model_id: Id
+    model_name: string
+    model: string
+    mcp_server_id: Id
+    mcp_server_name: string
+    enabled: boolean
+    has_icon: boolean
+  }
+  children: SubagentNodeRelation[]
 }
 
 export interface BuiltinAgent {

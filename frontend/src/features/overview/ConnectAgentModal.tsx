@@ -64,7 +64,7 @@ export function ConnectAgentModal({
     <Modal
       open={open}
       title="Connect subagent"
-      description={`Connect one agent to ${parentName} without changing its existing connections. Repeat to add more.`}
+      description={`Select a subagent for ${parentName}.`}
       onClose={onClose}
       footer={<Button onClick={onClose}>Cancel</Button>}
     >

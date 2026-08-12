@@ -175,11 +175,7 @@ export function AgentForm({
           ))}
         </select>
       </Field>
-      <Field
-        full
-        label="Parent connections"
-        hint="Each listed path is an independent node placement with its own children."
-      >
+      <Field full label="Parent connections" hint="Choose where this subagent appears.">
         <div className="agent-choice-list agent-parent-choice-list">
           <label className="agent-choice">
             <input
@@ -229,9 +225,7 @@ export function AgentForm({
             <div className="key-value-editor__title">
               <span>
                 <strong>Children of {placement.path_label}</strong>
-                <small>
-                  These children belong only to this node placement. Other copies stay unchanged.
-                </small>
+                <small>Select the subagents connected here.</small>
               </span>
             </div>
             <AgentChoices

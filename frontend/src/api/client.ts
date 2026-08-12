@@ -7,6 +7,7 @@ import type {
   ServerToolsState,
   SetupDescriptor,
   Subagent,
+  SubagentNode,
   TelegramSettings,
   VoiceSettings,
   WhatsAppSettings,
@@ -86,6 +87,13 @@ export const api = {
     connect: (id: number, parent_node_id: number | null) =>
       request<Subagent>(`/api/subagents/${id}/connections`, json('POST', { parent_node_id })),
     remove: (id: number) => request(`/api/subagents/${id}`, json('DELETE')),
+  },
+  agentNodes: {
+    get: (id: number) => request<SubagentNode>(`/api/subagent-nodes/${id}`),
+    update: (id: number, body: { enabled_tools: string[] | null }) =>
+      request<SubagentNode>(`/api/subagent-nodes/${id}`, json('PUT', body)),
+    remove: (id: number) =>
+      request<{ ok: boolean; removed_nodes: number }>(`/api/subagent-nodes/${id}`, json('DELETE')),
   },
   voice: {
     get: () => request<VoiceSettings>('/api/voice-settings'),

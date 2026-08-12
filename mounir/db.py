@@ -198,6 +198,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 REFERENCES subagents(id) ON DELETE CASCADE,
             parent_node_id INTEGER
                 REFERENCES subagent_nodes(id) ON DELETE RESTRICT,
+            -- NULL inherits every tool; a JSON list is an exact node allowlist.
+            enabled_tools TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -465,6 +467,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "dedupe_tools": "TEXT NOT NULL DEFAULT '[]'",
             "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
             "parent_agent_id": "INTEGER REFERENCES subagents(id) ON DELETE RESTRICT",
+        },
+        "subagent_nodes": {
+            "enabled_tools": "TEXT",
         },
         "heartbeat_settings": {
             "interval_minutes": "INTEGER NOT NULL DEFAULT 30",
@@ -2382,6 +2387,10 @@ def get_heartbeat_targets() -> list[dict]:
         chosen = selected.get(int(spec["id"]), [])
         protected = set(spec.get("confirm_tools") or [])
         safe = [name for name in chosen if "*" not in protected and name not in protected]
+        node_allowlist = spec.get("allowed_tools")
+        if node_allowlist is not None:
+            allowed = set(node_allowlist)
+            safe = [name for name in safe if name in allowed]
         if safe:
             target = dict(spec)
             target["kind"] = "mcp"
@@ -3314,6 +3323,22 @@ _SUBAGENT_SELECT = """
 """
 
 
+def _subagent_node_path(
+    node: dict, by_node_id: dict[int, dict], names: dict[int, str]
+) -> list[str]:
+    path = [names.get(int(node["agent_id"]), "Unknown")]
+    parent_node_id = node["parent_node_id"]
+    visited = {int(node["id"])}
+    while parent_node_id is not None:
+        parent = by_node_id.get(int(parent_node_id))
+        if parent is None or int(parent["id"]) in visited:
+            break
+        visited.add(int(parent["id"]))
+        path.append(names.get(int(parent["agent_id"]), "Unknown"))
+        parent_node_id = parent["parent_node_id"]
+    return ["Mounir", *reversed(path)]
+
+
 def _enrich_subagent_connections(
     conn: sqlite3.Connection, rows: list[dict]
 ) -> list[dict]:
@@ -3326,7 +3351,10 @@ def _enrich_subagent_connections(
     nodes = [
         dict(node)
         for node in conn.execute(
-            "SELECT id, agent_id, parent_node_id, created_at FROM subagent_nodes"
+            """
+            SELECT id, agent_id, parent_node_id, enabled_tools, created_at
+            FROM subagent_nodes
+            """
         )
     ]
     by_node_id = {int(node["id"]): node for node in nodes}
@@ -3334,19 +3362,6 @@ def _enrich_subagent_connections(
     for node in nodes:
         if node["parent_node_id"] is not None:
             children.setdefault(int(node["parent_node_id"]), []).append(node)
-
-    def node_path(node: dict) -> list[str]:
-        path = [names.get(int(node["agent_id"]), "Unknown")]
-        parent_node_id = node["parent_node_id"]
-        visited = {int(node["id"])}
-        while parent_node_id is not None:
-            parent = by_node_id.get(int(parent_node_id))
-            if parent is None or int(parent["id"]) in visited:
-                break
-            visited.add(int(parent["id"]))
-            path.append(names.get(int(parent["agent_id"]), "Unknown"))
-            parent_node_id = parent["parent_node_id"]
-        return ["Mounir", *reversed(path)]
 
     for row in rows:
         agent_id = int(row["id"])
@@ -3365,7 +3380,7 @@ def _enrich_subagent_connections(
                 children.get(int(node["id"]), []),
                 key=lambda child: names.get(int(child["agent_id"]), ""),
             )
-            path_names = node_path(node)
+            path_names = _subagent_node_path(node, by_node_id, names)
             placements.append(
                 {
                     "id": int(node["id"]),
@@ -3386,6 +3401,15 @@ def _enrich_subagent_connections(
                     "depth": len(path_names) - 1,
                     "path_names": path_names,
                     "path_label": " / ".join(path_names),
+                    "enabled_tools": (
+                        json.loads(
+                            _json_string_list(
+                                node["enabled_tools"], "enabled node tools"
+                            )
+                        )
+                        if node["enabled_tools"] is not None
+                        else None
+                    ),
                     "child_node_ids": [int(child["id"]) for child in direct_children],
                     "child_agent_ids": [
                         int(child["agent_id"]) for child in direct_children
@@ -3453,6 +3477,187 @@ def get_subagent_by_name(name: str) -> dict | None:
         row = cur.fetchone()
         result = _enrich_subagent_connections(conn, [dict(row)] if row else [])
         return result[0] if result else None
+
+
+def get_subagent_node(node_id: int) -> dict | None:
+    """Return one placement and its direct relations, separate from its subagent."""
+    with _connect() as conn:
+        node = conn.execute(
+            """
+            SELECT n.id, n.agent_id, n.parent_node_id, n.enabled_tools, n.created_at,
+                   s.name, s.description, s.model_id, s.mcp_server_id, s.enabled,
+                   CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
+                   m.name AS model_name, m.model,
+                   srv.name AS mcp_server_name
+            FROM subagent_nodes n
+            JOIN subagents s ON s.id = n.agent_id
+            JOIN models m ON m.id = s.model_id
+            JOIN mcp_servers srv ON srv.id = s.mcp_server_id
+            WHERE n.id = ?
+            """,
+            (node_id,),
+        ).fetchone()
+        if node is None:
+            return None
+
+        nodes = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT n.id, n.agent_id, n.parent_node_id, n.created_at,
+                       s.name, s.enabled,
+                       CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon
+                FROM subagent_nodes n
+                JOIN subagents s ON s.id = n.agent_id
+                """
+            )
+        ]
+        by_id = {int(item["id"]): item for item in nodes}
+        names = {int(item["agent_id"]): item["name"] for item in nodes}
+
+        node_data = dict(node)
+        placement = by_id[int(node_id)]
+        path_names = _subagent_node_path(placement, by_id, names)
+        parent = (
+            by_id.get(int(node_data["parent_node_id"]))
+            if node_data["parent_node_id"] is not None
+            else None
+        )
+        children = sorted(
+            (
+                item
+                for item in nodes
+                if item["parent_node_id"] is not None
+                and int(item["parent_node_id"]) == int(node_id)
+            ),
+            key=lambda item: (item["name"].casefold(), int(item["id"])),
+        )
+        return {
+            "id": int(node_data["id"]),
+            "subagent_id": int(node_data["agent_id"]),
+            "parent_node_id": (
+                int(node_data["parent_node_id"])
+                if node_data["parent_node_id"] is not None
+                else None
+            ),
+            "created_at": node_data["created_at"],
+            "enabled_tools": (
+                json.loads(
+                    _json_string_list(
+                        node_data["enabled_tools"], "enabled node tools"
+                    )
+                )
+                if node_data["enabled_tools"] is not None
+                else None
+            ),
+            "depth": len(path_names) - 1,
+            "path_names": path_names,
+            "path_label": " / ".join(path_names),
+            "parent": (
+                {
+                    "id": int(parent["id"]),
+                    "subagent_id": int(parent["agent_id"]),
+                    "name": parent["name"],
+                    "path_label": " / ".join(
+                        _subagent_node_path(parent, by_id, names)
+                    ),
+                }
+                if parent
+                else None
+            ),
+            "subagent": {
+                "id": int(node_data["agent_id"]),
+                "name": node_data["name"],
+                "description": node_data["description"],
+                "model_id": int(node_data["model_id"]),
+                "model_name": node_data["model_name"],
+                "model": node_data["model"],
+                "mcp_server_id": int(node_data["mcp_server_id"]),
+                "mcp_server_name": node_data["mcp_server_name"],
+                "enabled": bool(node_data["enabled"]),
+                "has_icon": bool(node_data["has_icon"]),
+            },
+            "children": [
+                {
+                    "id": int(child["id"]),
+                    "subagent_id": int(child["agent_id"]),
+                    "name": child["name"],
+                    "enabled": bool(child["enabled"]),
+                    "has_icon": bool(child["has_icon"]),
+                }
+                for child in children
+            ],
+        }
+
+
+def update_subagent_node(node_id: int, *, enabled_tools) -> dict | None:
+    """Save an exact MCP tool allowlist for one placement; NULL inherits all."""
+    if enabled_tools is None:
+        normalized = None
+    else:
+        normalized = _json_string_list(enabled_tools, "enabled tools")
+        parsed = json.loads(normalized)
+        if "*" in parsed:
+            raise ValueError("enabled tools must use explicit tool names")
+        if len(parsed) > 1000 or any(len(name) > 512 for name in parsed):
+            raise ValueError("enabled tools contain too many or overly long names")
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            "SELECT 1 FROM subagent_nodes WHERE id = ?", (node_id,)
+        ).fetchone() is None:
+            conn.rollback()
+            return None
+        conn.execute(
+            "UPDATE subagent_nodes SET enabled_tools = ? WHERE id = ?",
+            (normalized, node_id),
+        )
+        conn.commit()
+    return get_subagent_node(node_id)
+
+
+def remove_subagent_node(node_id: int) -> dict | None:
+    """Disconnect one non-root placement and its descendants, preserving definitions."""
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        node = conn.execute(
+            "SELECT id, agent_id, parent_node_id FROM subagent_nodes WHERE id = ?",
+            (node_id,),
+        ).fetchone()
+        if node is None:
+            conn.rollback()
+            return None
+        if node["parent_node_id"] is None:
+            conn.rollback()
+            raise ValueError("Only a child node can be disconnected from this view.")
+
+        descendants: list[int] = []
+        pending = [int(node_id)]
+        visited: set[int] = set()
+        while pending:
+            current_id = pending.pop()
+            if current_id in visited:
+                raise ValueError("The saved node hierarchy contains a cycle.")
+            visited.add(current_id)
+            descendants.append(current_id)
+            pending.extend(
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM subagent_nodes WHERE parent_node_id = ?",
+                    (current_id,),
+                )
+            )
+
+        for descendant_id in reversed(descendants):
+            conn.execute("DELETE FROM subagent_nodes WHERE id = ?", (descendant_id,))
+        _sync_legacy_connections(conn)
+        conn.commit()
+        return {
+            "ok": True,
+            "subagent_id": int(node["agent_id"]),
+            "parent_node_id": int(node["parent_node_id"]),
+            "removed_nodes": len(descendants),
+        }
 
 
 def list_subagents() -> list[dict]:
@@ -3834,6 +4039,7 @@ def build_specs() -> list[dict]:
                 "parent_names": [placement.get("parent_name") or "Mounir"],
                 "connected_to_supervisor": placement["parent_node_id"] is None,
                 "child_agent_ids": list(placement.get("child_agent_ids") or []),
+                "allowed_tools": placement.get("enabled_tools"),
 
                 "model": (s.get("model") or "").strip() or s["model_name"],
                 "base_url": s["base_url"],

@@ -5,11 +5,13 @@ export function ToolChoices({
   tools,
   selected,
   onChange,
+  readOnly = false,
   empty = 'Test the selected MCP server to discover its tools.',
 }: {
   tools: ToolInfo[]
-  selected: Set<string>
-  onChange: (next: Set<string>) => void
+  selected?: Set<string>
+  onChange?: (next: Set<string>) => void
+  readOnly?: boolean
   empty?: string
 }) {
   if (!tools.length)
@@ -20,23 +22,36 @@ export function ToolChoices({
     )
   return (
     <div className="tool-list">
-      {tools.map((tool) => (
-        <label className="tool-option" key={tool.name}>
-          <input
-            type="checkbox"
-            checked={selected.has(tool.name)}
-            onChange={(e) => {
-              const next = new Set(selected)
-              e.target.checked ? next.add(tool.name) : next.delete(tool.name)
-              onChange(next)
-            }}
-          />
-          <span>
-            <strong>{readable(tool.name)}</strong>
-            <small>{tool.description || 'No description available.'}</small>
-          </span>
-        </label>
-      ))}
+      {tools.map((tool) => {
+        const content = (
+          <>
+            {!readOnly && (
+              <input
+                type="checkbox"
+                checked={selected?.has(tool.name) || false}
+                onChange={(e) => {
+                  const next = new Set(selected || [])
+                  e.target.checked ? next.add(tool.name) : next.delete(tool.name)
+                  onChange?.(next)
+                }}
+              />
+            )}
+            <span>
+              <strong>{readable(tool.name)}</strong>
+              <small>{tool.description || 'No description available.'}</small>
+            </span>
+          </>
+        )
+        return readOnly ? (
+          <div className="tool-option tool-option--readonly" key={tool.name}>
+            {content}
+          </div>
+        ) : (
+          <label className="tool-option" key={tool.name}>
+            {content}
+          </label>
+        )
+      })}
     </div>
   )
 }

@@ -1184,6 +1184,41 @@ async def list_subagents():
     return [db.subagent_for_api(agent) for agent in db.list_subagents()]
 
 
+@app.get("/api/subagent-nodes/{node_id}")
+async def get_subagent_node(node_id: int):
+    node = db.get_subagent_node(node_id)
+    if node is None:
+        return JSONResponse({"error": "Subagent node not found."}, status_code=404)
+    return node
+
+
+@app.put("/api/subagent-nodes/{node_id}")
+async def update_subagent_node(node_id: int, req: dict):
+    if "enabled_tools" not in req:
+        return JSONResponse(
+            {"error": "Provide enabled_tools for this subagent node."},
+            status_code=400,
+        )
+    try:
+        node = db.update_subagent_node(node_id, enabled_tools=req["enabled_tools"])
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if node is None:
+        return JSONResponse({"error": "Subagent node not found."}, status_code=404)
+    return node
+
+
+@app.delete("/api/subagent-nodes/{node_id}")
+async def remove_subagent_node(node_id: int):
+    try:
+        result = db.remove_subagent_node(node_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    if result is None:
+        return JSONResponse({"error": "Subagent node not found."}, status_code=404)
+    return result
+
+
 def _decode_subagent_icon(value) -> dict:
     """Validate a small browser data URL and return DB-ready image fields."""
     if value in (None, ""):

@@ -750,6 +750,9 @@ class DatabaseTests(TemporaryDatabaseTest):
             node_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'subagent_nodes'"
             ).fetchone()
+            node_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(subagent_nodes)")
+            }
             migrated_node = conn.execute(
                 "SELECT agent_id, parent_node_id FROM subagent_nodes"
             ).fetchone()
@@ -796,6 +799,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertIsNotNone(tool_table)
         self.assertIsNotNone(connection_table)
         self.assertIsNotNone(node_table)
+        self.assertIn("enabled_tools", node_columns)
         self.assertEqual(migrated_node["agent_id"], 1)
         self.assertIsNone(migrated_node["parent_node_id"])
         self.assertIsNone(migrated_connection["parent_agent_id"])
@@ -1075,6 +1079,90 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertFalse(
             any(spec["parent_node_id"] == root_github["id"] for spec in researcher_nodes)
         )
+
+    def test_subagent_node_details_describe_only_one_placement(self):
+        db.init()
+        model = db.add_model(
+            "Node detail model", "node/detail", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Node detail server", "node-detail-server")
+        github = db.add_subagent(
+            "GitHub details", "Handles repositories.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        gmail = db.add_subagent(
+            "Gmail details", "Handles email.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        researcher = db.add_subagent(
+            "Research details", "Handles research.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        gmail_node_id = gmail["placements"][0]["id"]
+        db.connect_subagent(github["id"], parent_node_id=gmail_node_id)
+        github_nodes = db.get_subagent(github["id"])["placements"]
+        root_node = next(node for node in github_nodes if node["parent_node_id"] is None)
+        nested_node = next(
+            node for node in github_nodes if node["parent_node_id"] == gmail_node_id
+        )
+        db.connect_subagent(researcher["id"], parent_node_id=nested_node["id"])
+
+        root_details = db.get_subagent_node(root_node["id"])
+        nested_details = db.get_subagent_node(nested_node["id"])
+
+        self.assertIsNone(root_details["parent"])
+        self.assertEqual(root_details["children"], [])
+        self.assertEqual(nested_details["parent"]["id"], gmail_node_id)
+        self.assertEqual(nested_details["parent"]["name"], "Gmail details")
+        self.assertEqual(nested_details["subagent"]["id"], github["id"])
+        self.assertEqual(
+            nested_details["path_label"],
+            "Mounir / Gmail details / GitHub details",
+        )
+        self.assertEqual(
+            [child["subagent_id"] for child in nested_details["children"]],
+            [researcher["id"]],
+        )
+        self.assertNotIn("placements", nested_details["subagent"])
+        self.assertIsNone(root_details["enabled_tools"])
+        self.assertIsNone(nested_details["enabled_tools"])
+        self.assertIsNone(db.get_subagent_node(999999))
+
+        db.update_subagent_node(root_node["id"], enabled_tools=["read_repository"])
+        db.update_subagent_node(
+            nested_node["id"], enabled_tools=["create_issue", "update_issue"]
+        )
+        root_details = db.get_subagent_node(root_node["id"])
+        nested_details = db.get_subagent_node(nested_node["id"])
+        self.assertEqual(root_details["enabled_tools"], ["read_repository"])
+        self.assertEqual(
+            nested_details["enabled_tools"], ["create_issue", "update_issue"]
+        )
+        specs = {spec["node_id"]: spec for spec in db.build_specs()}
+        self.assertEqual(specs[root_node["id"]]["allowed_tools"], ["read_repository"])
+        self.assertEqual(
+            specs[nested_node["id"]]["allowed_tools"],
+            ["create_issue", "update_issue"],
+        )
+        db.update_subagent_node(root_node["id"], enabled_tools=None)
+        self.assertIsNone(db.get_subagent_node(root_node["id"])["enabled_tools"])
+        with self.assertRaisesRegex(ValueError, "explicit tool names"):
+            db.update_subagent_node(root_node["id"], enabled_tools=["*"])
+        self.assertIsNone(db.update_subagent_node(999999, enabled_tools=[]))
+
+        removed = db.remove_subagent_node(nested_node["id"])
+        self.assertEqual(removed["removed_nodes"], 2)
+        self.assertIsNone(db.get_subagent_node(nested_node["id"]))
+        self.assertIsNotNone(db.get_subagent_node(root_node["id"]))
+        self.assertEqual(
+            [node["id"] for node in db.get_subagent(github["id"])["placements"]],
+            [root_node["id"]],
+        )
+        self.assertEqual(len(db.get_subagent(researcher["id"])["placements"]), 1)
+        with self.assertRaisesRegex(ValueError, "Only a child node"):
+            db.remove_subagent_node(root_node["id"])
+        self.assertIsNone(db.remove_subagent_node(999999))
 
     def test_dynamic_subagent_activation_controls_runtime_and_mcp_connection(self):
         db.init()
@@ -1778,6 +1866,61 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(
                     connected.json()["parent_agent_ids"], [parent["id"]]
                 )
+                nested_node = next(
+                    node
+                    for node in connected.json()["placements"]
+                    if node["parent_node_id"] == parent["placements"][0]["id"]
+                )
+                node_response = await client.get(
+                    f"/api/subagent-nodes/{nested_node['id']}"
+                )
+                self.assertEqual(node_response.status_code, 200)
+                node_details = node_response.json()
+                self.assertEqual(node_details["id"], nested_node["id"])
+                self.assertEqual(
+                    node_details["parent"]["id"], parent["placements"][0]["id"]
+                )
+                self.assertEqual(node_details["subagent"]["id"], second_child["id"])
+                self.assertNotIn("placements", node_details["subagent"])
+                self.assertIsNone(node_details["enabled_tools"])
+                restricted_node = await client.put(
+                    f"/api/subagent-nodes/{nested_node['id']}",
+                    json={"enabled_tools": ["read_message"]},
+                )
+                self.assertEqual(restricted_node.status_code, 200)
+                self.assertEqual(
+                    restricted_node.json()["enabled_tools"], ["read_message"]
+                )
+                missing_field = await client.put(
+                    f"/api/subagent-nodes/{nested_node['id']}", json={}
+                )
+                self.assertEqual(missing_field.status_code, 400)
+                missing_node = await client.get("/api/subagent-nodes/999999")
+                self.assertEqual(missing_node.status_code, 404)
+                missing_node_update = await client.put(
+                    "/api/subagent-nodes/999999", json={"enabled_tools": []}
+                )
+                self.assertEqual(missing_node_update.status_code, 404)
+                protected_root = await client.delete(
+                    f"/api/subagent-nodes/{parent['placements'][0]['id']}"
+                )
+                self.assertEqual(protected_root.status_code, 409)
+                disconnected = await client.delete(
+                    f"/api/subagent-nodes/{nested_node['id']}"
+                )
+                self.assertEqual(disconnected.status_code, 200)
+                self.assertEqual(disconnected.json()["removed_nodes"], 1)
+                self.assertEqual(
+                    (await client.get(f"/api/subagent-nodes/{nested_node['id']}")).status_code,
+                    404,
+                )
+                missing_node_delete = await client.delete("/api/subagent-nodes/999999")
+                self.assertEqual(missing_node_delete.status_code, 404)
+                reconnected = await client.post(
+                    f"/api/subagents/{second_child['id']}/connections",
+                    json={"parent_node_id": parent["placements"][0]["id"]},
+                )
+                self.assertEqual(reconnected.status_code, 200)
 
                 assigned = await client.put(
                     f"/api/subagents/{parent['id']}",
