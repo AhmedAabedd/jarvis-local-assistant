@@ -882,13 +882,13 @@ select:disabled {
   width: 158px;
   min-width: 158px;
   box-sizing: border-box;
-  padding: 11px;
+  padding: 0;
   border: 1px solid #29362f;
   border-radius: 11px;
   background: rgb(17 24 21 / 96%);
   box-shadow: 0 8px 25px rgb(0 0 0 / 22%);
   color: var(--text);
-  cursor: pointer;
+  cursor: default;
   text-align: left;
   transition:
     border-color 160ms ease,
@@ -899,9 +899,21 @@ select:disabled {
   border-color: rgb(89 201 142 / 62%);
   box-shadow: 0 10px 28px rgb(0 0 0 / 28%);
 }
-.flow-node:focus-visible {
+.flow-node__content:focus-visible {
   outline: 2px solid var(--accent-strong);
   outline-offset: 3px;
+}
+.flow-node__content {
+  width: 100%;
+  height: 100%;
+  display: block;
+  padding: 11px;
+  color: inherit;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 .flow-node--supervisor {
   width: 210px;
@@ -929,10 +941,13 @@ select:disabled {
   min-width: 52px;
   height: 52px;
   padding: 0;
-  display: grid;
-  place-items: center;
   border-radius: 50%;
   text-align: center;
+}
+.flow-node--channel .flow-node__content {
+  display: grid;
+  place-items: center;
+  padding: 0;
 }
 .flow-node--telegram {
   border: 2px solid #60aee9;
@@ -977,6 +992,9 @@ select:disabled {
 .flow-node--inactive .react-flow__handle {
   opacity: 0.34;
   filter: grayscale(1);
+}
+.flow-node--inactive .flow-node__connect {
+  opacity: 1;
 }
 .flow-node__head {
   min-width: 0;
@@ -1061,6 +1079,46 @@ select:disabled {
 .flow-node--dynamic:hover .flow-node__open {
   opacity: 1;
 }
+.flow-node__connect {
+  position: absolute;
+  left: calc(50% + 8px);
+  bottom: -8px;
+  z-index: 4;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #d9f8e7;
+  border: 1px solid #65d89a;
+  border-radius: 50%;
+  background: #183326;
+  box-shadow: 0 3px 10px rgb(0 0 0 / 35%);
+  cursor: pointer;
+  opacity: 1;
+  transition:
+    opacity 150ms ease,
+    border-color 150ms ease,
+    background 150ms ease;
+}
+.flow-node__connect:hover,
+.flow-node__connect:focus-visible {
+  color: #fff;
+  border-color: #9aefbd;
+  background: #24543a;
+  opacity: 1;
+  outline: none;
+}
+.flow-node--dynamic .flow-node__connect {
+  color: #dceaff;
+  border-color: #79b8ff;
+  background: #182a40;
+}
+.flow-node--dynamic .flow-node__connect:hover,
+.flow-node--dynamic .flow-node__connect:focus-visible {
+  border-color: #afd3ff;
+  background: #23466e;
+}
 .flow-node .react-flow__handle {
   width: 7px;
   height: 7px;
@@ -1108,6 +1166,95 @@ select:disabled {
   width: 10px;
   height: 10px;
   fill: currentColor;
+}
+
+.connect-agent-picker {
+  display: grid;
+  gap: 14px;
+}
+.connect-agent-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #0d1411;
+}
+.connect-agent-search:focus-within {
+  color: var(--accent);
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 3px rgb(89 201 142 / 8%);
+}
+.connect-agent-search input {
+  min-height: 40px;
+  padding-inline: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.connect-agent-list {
+  display: grid;
+  gap: 8px;
+  max-height: 390px;
+  overflow: auto;
+  padding-right: 3px;
+}
+.connect-agent-option {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 11px;
+  padding: 11px;
+  color: var(--text);
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: #0e1512;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
+}
+.connect-agent-option:hover:not(:disabled) {
+  border-color: rgb(89 201 142 / 55%);
+  background: rgb(89 201 142 / 7%);
+}
+.connect-agent-option:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+.connect-agent-option .avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+}
+.connect-agent-option > span:last-child {
+  min-width: 0;
+}
+.connect-agent-option strong,
+.connect-agent-option small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connect-agent-option strong {
+  font-size: 11px;
+}
+.connect-agent-option small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.connect-agent-option .connect-agent-option__parent {
+  color: var(--muted-2);
+  font-size: 9px;
+}
+.connect-agent-empty {
+  min-height: 130px;
 }
 
 .connection-hero {

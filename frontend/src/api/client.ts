@@ -83,6 +83,8 @@ export const api = {
     create: (body: object) => request<Subagent>('/api/subagents', json('POST', body)),
     update: (id: number, body: object) =>
       request<Subagent>(`/api/subagents/${id}`, json('PUT', body)),
+    connect: (id: number, parent_node_id: number | null) =>
+      request<Subagent>(`/api/subagents/${id}/connections`, json('POST', { parent_node_id })),
     remove: (id: number) => request(`/api/subagents/${id}`, json('DELETE')),
   },
   voice: {

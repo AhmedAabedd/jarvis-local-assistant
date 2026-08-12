@@ -286,7 +286,15 @@ def _compile_graph(model: str, use_tools: bool):
         for name, node in _DELEGATES.items()
         if node in enabled_builtins
     }
-    root_specs = [spec for spec in dynamic if spec.get("parent_agent_id") is None]
+    root_specs = [
+        spec
+        for spec in dynamic
+        if spec.get("connected_to_supervisor")
+        or (
+            "connected_to_supervisor" not in spec
+            and spec.get("parent_agent_id") is None
+        )
+    ]
     dynamic_tools = []
     for spec in root_specs:
         name = mcp_agents.delegate_tool_name(spec["name"])

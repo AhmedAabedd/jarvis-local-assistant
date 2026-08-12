@@ -140,28 +140,17 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const listed = useMemo(() => {
     const entries = data.map((item, index) => ({ item, index, depth: 0 }))
     if (kind !== 'agents') return entries
-    const ids = new Set(data.map((item) => item.id))
-    const children = new Map<number | null, typeof entries>()
-    entries.forEach((entry) => {
-      const parent = Number((entry.item as Subagent).parent_agent_id) || null
-      const key = parent && ids.has(parent) ? parent : null
-      children.set(key, [...(children.get(key) || []), entry])
-    })
-    const result: typeof entries = []
-    const visited = new Set<number>()
-    const append = (parent: number | null, depth: number) => {
-      ;(children.get(parent) || []).forEach((entry) => {
-        if (visited.has(entry.item.id)) return
-        visited.add(entry.item.id)
-        result.push({ ...entry, depth })
-        append(entry.item.id, depth + 1)
-      })
-    }
-    append(null, 0)
-    entries.forEach((entry) => {
-      if (!visited.has(entry.item.id)) result.push(entry)
-    })
-    return result
+    return entries
+      .map((entry) => ({
+        ...entry,
+        depth: Math.max(
+          0,
+          Math.min(
+            ...((entry.item as Subagent).placements?.map((placement) => placement.depth) || [1]),
+          ) - 1,
+        ),
+      }))
+      .sort((left, right) => left.depth - right.depth || left.index - right.index)
   }, [data, kind])
 
   const openList = () => {
@@ -259,6 +248,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
               )}
               {kind === 'agents' && (
                 <AgentForm
+                  key={(editing as Subagent | undefined)?.id || 'new-agent'}
                   item={editing as Subagent | undefined}
                   models={models.data || []}
                   servers={servers.data || []}

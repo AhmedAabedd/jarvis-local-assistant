@@ -315,11 +315,21 @@ async def _run_async(
 
             framework_tools.extend(make_tool(item) for item in advertised_tools)
             current_id = int(spec["id"]) if spec.get("id") is not None else None
+            current_node_id = (
+                int(spec["node_id"]) if spec.get("node_id") is not None else None
+            )
             children = (
                 [
                     child
                     for child in (all_specs or [])
-                    if child.get("parent_agent_id") == current_id
+                    if (
+                        current_node_id is not None
+                        and child.get("parent_node_id") == current_node_id
+                    )
+                    or (
+                        current_node_id is None
+                        and child.get("parent_agent_id") == current_id
+                    )
                 ]
                 if current_id is not None
                 else []
@@ -330,7 +340,8 @@ async def _run_async(
 
                 async def delegate(task: str) -> str:
                     child_id = int(child["id"])
-                    if child_id in lineage:
+                    child_node_id = int(child.get("node_id") or child_id)
+                    if child_node_id in lineage:
                         return "Delegation blocked because it would create an agent cycle."
                     try:
                         from .. import db
@@ -354,7 +365,7 @@ async def _run_async(
                                 child.get("api_key") or "",
                                 protected_attempts,
                                 all_specs,
-                                (*lineage, child_id),
+                                (*lineage, child_node_id),
                             ),
                             timeout=MCP_AGENT_TIMEOUT_SECONDS,
                         )
@@ -470,7 +481,9 @@ def run(
                         api_key,
                         protected_attempts,
                         all_specs,
-                        (int(spec["id"]),) if spec.get("id") is not None else (),
+                        (
+                            int(spec.get("node_id") or spec["id"]),
+                        ) if spec.get("id") is not None else (),
                     ),
                     timeout=MCP_AGENT_TIMEOUT_SECONDS,
                 )

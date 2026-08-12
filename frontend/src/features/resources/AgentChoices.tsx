@@ -37,7 +37,7 @@ export function AgentChoices({
             <strong>{agent.name}</strong>
             <small>{agent.description}</small>
             <small className="agent-choice__parent">
-              Currently assigned to {agent.parent_name || 'Mounir'}
+              Existing nodes: {(agent.placements || []).map((node) => node.path_label).join(', ')}
             </small>
           </span>
         </label>

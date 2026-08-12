@@ -1244,6 +1244,8 @@ async def create_subagent(req: dict):
             confirm_tools=req.get("confirm_tools"),
             dedupe_tools=req.get("dedupe_tools"),
             enabled=req.get("enabled", True),
+            parent_agent_ids=req.get("parent_agent_ids"),
+            parent_node_ids=req.get("parent_node_ids"),
             **icon,
         )
         return db.subagent_for_api(subagent)
@@ -1266,6 +1268,21 @@ async def update_subagent(subagent_id: int, req: dict):
     if not s:
         return JSONResponse({"error": "Subagent not found."}, status_code=404)
     return db.subagent_for_api(s)
+
+
+@app.post("/api/subagents/{subagent_id}/connections")
+async def connect_subagent(subagent_id: int, req: dict):
+    try:
+        subagent = db.connect_subagent(
+            subagent_id,
+            parent_node_id=req.get("parent_node_id"),
+            parent_agent_id=req.get("parent_agent_id"),
+        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if subagent is None:
+        return JSONResponse({"error": "Subagent not found."}, status_code=404)
+    return db.subagent_for_api(subagent)
 
 
 @app.delete("/api/subagents/{subagent_id}")

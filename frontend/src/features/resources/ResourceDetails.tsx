@@ -128,7 +128,10 @@ export function ResourceDetails({
             value={model ? `${model.name} — ${model.model}` : agent.model_name}
           />
           <Detail label="MCP server" value={server?.name || agent.mcp_server_name} />
-          <Detail label="Parent agent" value={agent.parent_name || 'Mounir'} />
+          <Detail
+            label="Node placements"
+            value={(agent.placements || []).map((placement) => placement.path_label).join(', ')}
+          />
           <Detail label="Description" value={agent.description} full />
           <Detail
             label="System prompt"

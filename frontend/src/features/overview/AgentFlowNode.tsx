@@ -1,5 +1,5 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
-import { BookOpen, Bot, ChevronRight, Image as ImageIcon, Settings } from 'lucide-react'
+import { BookOpen, Bot, ChevronRight, Image as ImageIcon, Plus, Settings } from 'lucide-react'
 
 export type FlowData = {
   label: string
@@ -10,6 +10,7 @@ export type FlowData = {
   agentKey?: string
   channel?: 'telegram' | 'whatsapp'
   onOpen?: () => void
+  onConnect?: () => void
 }
 
 function TelegramIcon() {
@@ -50,11 +51,8 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
             : Bot
 
   return (
-    <button
+    <div
       className={`flow-node flow-node--${data.kind} ${channelClass} ${data.enabled === false ? 'flow-node--inactive' : ''}`}
-      onClick={data.onOpen}
-      aria-label={data.label}
-      title={data.kind === 'channel' ? data.label : undefined}
     >
       {data.kind !== 'channel' && (
         <Handle
@@ -62,29 +60,49 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
           position={data.kind === 'supervisor' ? Position.Left : Position.Top}
         />
       )}
-      {data.channel === 'telegram' ? (
-        <TelegramIcon />
-      ) : data.channel === 'whatsapp' ? (
-        <img className="flow-node__channel-icon" src="/images/whatsapp.svg" alt="" />
-      ) : (
-        <>
-          {data.kind === 'dynamic' && <ChevronRight className="flow-node__open" size={12} />}
-          <div className="flow-node__head">
-            <span className={`avatar ${data.icon ? 'has-image' : ''}`}>
-              {data.icon ? <img src={data.icon} alt="" /> : <Icon size={16} />}
-            </span>
-            <span className="flow-node__identity">
-              {data.kind === 'supervisor' && <span className="flow-node__kind">Supervisor</span>}
-              <span className="flow-node__name">{data.label}</span>
-            </span>
-          </div>
-          {data.model && (
-            <div className="flow-node__model" title={data.model}>
-              <ModelIcon />
-              <span>{data.model}</span>
+      <button
+        className="flow-node__content"
+        onClick={data.onOpen}
+        aria-label={data.label}
+        title={data.kind === 'channel' ? data.label : undefined}
+      >
+        {data.channel === 'telegram' ? (
+          <TelegramIcon />
+        ) : data.channel === 'whatsapp' ? (
+          <img className="flow-node__channel-icon" src="/images/whatsapp.svg" alt="" />
+        ) : (
+          <>
+            {data.kind === 'dynamic' && <ChevronRight className="flow-node__open" size={12} />}
+            <div className="flow-node__head">
+              <span className={`avatar ${data.icon ? 'has-image' : ''}`}>
+                {data.icon ? <img src={data.icon} alt="" /> : <Icon size={16} />}
+              </span>
+              <span className="flow-node__identity">
+                {data.kind === 'supervisor' && <span className="flow-node__kind">Supervisor</span>}
+                <span className="flow-node__name">{data.label}</span>
+              </span>
             </div>
-          )}
-        </>
+            {data.model && (
+              <div className="flow-node__model" title={data.model}>
+                <ModelIcon />
+                <span>{data.model}</span>
+              </div>
+            )}
+          </>
+        )}
+      </button>
+      {data.onConnect && (
+        <button
+          className="flow-node__connect nodrag nopan"
+          onClick={(event) => {
+            event.stopPropagation()
+            data.onConnect?.()
+          }}
+          aria-label={`Connect a subagent to ${data.label}`}
+          title="Connect subagent"
+        >
+          <Plus size={10} strokeWidth={2.5} />
+        </button>
       )}
       {(data.kind === 'supervisor' || data.kind === 'channel' || data.kind === 'dynamic') && (
         <Handle
@@ -92,7 +110,7 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
           position={data.kind === 'channel' ? Position.Right : Position.Bottom}
         />
       )}
-    </button>
+    </div>
   )
 }
 

@@ -744,6 +744,18 @@ class DatabaseTests(TemporaryDatabaseTest):
             tool_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_server_tools'"
             ).fetchone()
+            connection_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'subagent_connections'"
+            ).fetchone()
+            node_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'subagent_nodes'"
+            ).fetchone()
+            migrated_node = conn.execute(
+                "SELECT agent_id, parent_node_id FROM subagent_nodes"
+            ).fetchone()
+            migrated_connection = conn.execute(
+                "SELECT parent_agent_id, child_agent_id FROM subagent_connections"
+            ).fetchone()
             builtin_settings_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'builtin_agent_settings'"
             ).fetchone()
@@ -782,6 +794,12 @@ class DatabaseTests(TemporaryDatabaseTest):
             <= agent_columns
         )
         self.assertIsNotNone(tool_table)
+        self.assertIsNotNone(connection_table)
+        self.assertIsNotNone(node_table)
+        self.assertEqual(migrated_node["agent_id"], 1)
+        self.assertIsNone(migrated_node["parent_node_id"])
+        self.assertIsNone(migrated_connection["parent_agent_id"])
+        self.assertEqual(migrated_connection["child_agent_id"], 1)
         self.assertIsNotNone(builtin_settings_table)
         self.assertIsNotNone(supervisor_settings_table)
         self.assertIsNotNone(voice_settings_table)
@@ -874,7 +892,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(child["parent_name"], "Team lead")
         specs = {item["id"]: item for item in db.build_specs()}
         self.assertEqual(specs[grandchild["id"]]["parent_agent_id"], child["id"])
-        with self.assertRaisesRegex(ValueError, "below one of its children"):
+        with self.assertRaisesRegex(ValueError, "placement's children"):
             db.update_subagent(parent["id"], parent_agent_id=grandchild["id"])
         with self.assertRaisesRegex(ValueError, "children first"):
             db.delete_subagent(parent["id"])
@@ -943,24 +961,120 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(updated["child_count"], 2)
         self.assertEqual(db.get_subagent(first["id"])["parent_agent_id"], parent["id"])
         self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
-        self.assertEqual(db.get_subagent(other_parent["id"])["child_count"], 0)
+        self.assertEqual(
+            set(db.get_subagent(second["id"])["parent_agent_ids"]),
+            {parent["id"], other_parent["id"]},
+        )
+        self.assertTrue(db.get_subagent(first["id"])["connected_to_supervisor"])
+        self.assertEqual(db.get_subagent(other_parent["id"])["child_count"], 1)
 
         db.update_subagent(parent["id"], child_agent_ids=[second["id"]])
         self.assertIsNone(db.get_subagent(first["id"])["parent_agent_id"])
         self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
 
-        db.update_subagent(parent["id"], parent_agent_id=first["id"])
-        with self.assertRaisesRegex(ValueError, "below one of its children"):
-            db.update_subagent(
-                parent["id"], child_agent_ids=[first["id"], second["id"]]
-            )
-        self.assertEqual(db.get_subagent(parent["id"])["parent_agent_id"], first["id"])
+        with self.assertRaisesRegex(ValueError, "placement's children"):
+            db.update_subagent(parent["id"], parent_agent_id=first["id"])
+        self.assertIsNone(db.get_subagent(parent["id"])["parent_agent_id"])
         self.assertIsNone(db.get_subagent(first["id"])["parent_agent_id"])
         self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
 
         with self.assertRaisesRegex(ValueError, "existing subagent"):
             db.update_subagent(parent["id"], child_agent_ids=[999999])
         self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
+
+    def test_subagent_can_keep_several_parent_connections(self):
+        db.init()
+        model = db.add_model(
+            "Flexible hierarchy model", "flexible/hierarchy", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Flexible hierarchy server", "flexible-server")
+        github = db.add_subagent(
+            "GitHub", "Handles repositories.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        projects = db.add_subagent(
+            "Projects", "Coordinates projects.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        gmail = db.add_subagent(
+            "Gmail", "Handles email.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+
+        db.connect_subagent(gmail["id"], github["id"])
+        connected = db.connect_subagent(gmail["id"], projects["id"])
+        self.assertTrue(connected["connected_to_supervisor"])
+        self.assertEqual(
+            set(connected["parent_agent_ids"]), {github["id"], projects["id"]}
+        )
+        self.assertEqual(
+            connected["parent_names"], ["Mounir", "GitHub", "Projects"]
+        )
+
+        db.update_subagent(github["id"], child_agent_ids=[])
+        remaining = db.get_subagent(gmail["id"])
+        self.assertTrue(remaining["connected_to_supervisor"])
+        self.assertEqual(remaining["parent_agent_ids"], [projects["id"]])
+        repeated = db.connect_subagent(projects["id"], gmail["id"])
+        self.assertEqual(len(repeated["placements"]), 2)
+
+        gmail_specs = [item for item in db.build_specs() if item["id"] == gmail["id"]]
+        self.assertTrue(any(item["connected_to_supervisor"] for item in gmail_specs))
+        self.assertTrue(
+            any(item["parent_agent_ids"] == [projects["id"]] for item in gmail_specs)
+        )
+        nodes = set(langgraph_agent.build_graph().get_graph().nodes)
+        self.assertIn("mcp_gmail", nodes)
+
+    def test_duplicate_agent_nodes_keep_independent_children(self):
+        db.init()
+        model = db.add_model(
+            "Placement model", "placement/model", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Placement server", "placement-server")
+        github = db.add_subagent(
+            "GitHub", "Handles repositories.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        gmail = db.add_subagent(
+            "Gmail", "Handles email.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        researcher = db.add_subagent(
+            "Researcher", "Handles research.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        gmail_node_id = gmail["placements"][0]["id"]
+        db.connect_subagent(
+            github["id"], parent_node_id=gmail_node_id
+        )
+        github_nodes = db.get_subagent(github["id"])["placements"]
+        root_github = next(node for node in github_nodes if node["parent_node_id"] is None)
+        nested_github = next(
+            node for node in github_nodes if node["parent_node_id"] == gmail_node_id
+        )
+
+        db.connect_subagent(
+            researcher["id"], parent_node_id=nested_github["id"]
+        )
+        github_nodes = db.get_subagent(github["id"])["placements"]
+        root_github = next(node for node in github_nodes if node["id"] == root_github["id"])
+        nested_github = next(node for node in github_nodes if node["id"] == nested_github["id"])
+        self.assertEqual(root_github["child_agent_ids"], [])
+        self.assertEqual(nested_github["child_agent_ids"], [researcher["id"]])
+
+        specs = db.build_specs()
+        github_specs = [spec for spec in specs if spec["id"] == github["id"]]
+        self.assertEqual(len(github_specs), 2)
+        researcher_nodes = [spec for spec in specs if spec["id"] == researcher["id"]]
+        self.assertTrue(
+            any(spec["parent_node_id"] == nested_github["id"] for spec in researcher_nodes)
+        )
+        self.assertFalse(
+            any(spec["parent_node_id"] == root_github["id"] for spec in researcher_nodes)
+        )
 
     def test_dynamic_subagent_activation_controls_runtime_and_mcp_connection(self):
         db.init()
@@ -1655,6 +1769,16 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(second_child_response.status_code, 200)
                 second_child = second_child_response.json()
 
+                connected = await client.post(
+                    f"/api/subagents/{second_child['id']}/connections",
+                    json={"parent_node_id": parent["placements"][0]["id"]},
+                )
+                self.assertEqual(connected.status_code, 200)
+                self.assertTrue(connected.json()["connected_to_supervisor"])
+                self.assertEqual(
+                    connected.json()["parent_agent_ids"], [parent["id"]]
+                )
+
                 assigned = await client.put(
                     f"/api/subagents/{parent['id']}",
                     json={"child_agent_ids": [child["id"], second_child["id"]]},
@@ -1665,6 +1789,12 @@ class AdminApiTests(TemporaryDatabaseTest):
                 listed_by_id = {agent["id"]: agent for agent in listed}
                 self.assertEqual(
                     listed_by_id[second_child["id"]]["parent_agent_id"], parent["id"]
+                )
+                self.assertTrue(
+                    listed_by_id[second_child["id"]]["connected_to_supervisor"]
+                )
+                self.assertEqual(
+                    listed_by_id[second_child["id"]]["parent_agent_ids"], [parent["id"]]
                 )
 
                 cycle = await client.put(

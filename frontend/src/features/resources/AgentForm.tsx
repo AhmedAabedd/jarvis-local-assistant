@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
-import type { McpServer, ModelRecord, Subagent } from '../../api/types'
+import type { AgentPlacement, McpServer, ModelRecord, Subagent } from '../../api/types'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Field } from '../../components/ui/Field'
 import { Feedback } from '../../components/ui/Feedback'
@@ -33,38 +33,28 @@ export function AgentForm({
   const [deduped, setDeduped] = useState(new Set(stringList(item?.dedupe_tools)))
   const [icon, setIcon] = useState<string | undefined>()
   const [error, setError] = useState('')
-  const [parentId, setParentId] = useState(Number(item?.parent_agent_id) || 0)
-  const [children, setChildren] = useState(
-    new Set(
-      item
-        ? agents
-            .filter((agent) => Number(agent.parent_agent_id) === item.id)
-            .map((agent) => agent.id)
-        : [],
+  const [parents, setParents] = useState<Set<number | null>>(() => {
+    const initial = new Set<number | null>(
+      (item?.placements || []).map((placement) => placement.parent_node_id),
+    )
+    if (!item || !initial.size) initial.add(null)
+    return initial
+  })
+  const [placementChildren, setPlacementChildren] = useState(
+    new Map<number, Set<number>>(
+      (item?.placements || []).map((placement) => [
+        placement.id,
+        new Set(placement.child_agent_ids),
+      ]),
     ),
   )
-  const blockedParents = new Set<number>()
-  if (item) {
-    const pending = [item.id]
-    while (pending.length) {
-      const current = pending.pop()!
-      if (blockedParents.has(current)) continue
-      blockedParents.add(current)
-      agents
-        .filter((agent) => Number(agent.parent_agent_id) === current)
-        .forEach((agent) => pending.push(agent.id))
-    }
-  }
-  const blockedChildren = new Set<number>()
-  if (item) {
-    blockedChildren.add(item.id)
-    let ancestorId = parentId
-    while (ancestorId && !blockedChildren.has(ancestorId)) {
-      blockedChildren.add(ancestorId)
-      ancestorId = Number(agents.find((agent) => agent.id === ancestorId)?.parent_agent_id) || 0
-    }
-  }
-  const availableChildren = agents.filter((agent) => !blockedChildren.has(agent.id))
+  const parentPlacements = agents.flatMap((agent) =>
+    (agent.placements || []).map((placement) => ({ agent, placement })),
+  )
+  const availableParents = parentPlacements.filter(
+    ({ agent, placement }) => agent.id !== item?.id && placement.depth < 4,
+  )
+  const availableChildren = agents.filter((agent) => agent.id !== item?.id)
   const tools = useQuery({
     queryKey: ['server-tools', serverId],
     queryFn: () => api.servers.tools(serverId),
@@ -80,14 +70,24 @@ export function AgentForm({
     try {
       body.model_id = Number(body.model_id)
       body.mcp_server_id = Number(body.mcp_server_id)
-      body.parent_agent_id = parentId || null
+      if (!parents.size) throw new Error('Select at least one parent connection.')
+      body.parent_node_ids = [...parents]
       delete body.confirmation_mode
       body.confirm_tools = mode === 'all' ? ['*'] : mode === 'selected' ? [...confirmed] : []
       if (mode === 'selected' && !confirmed.size)
         throw new Error('Select at least one action requiring confirmation.')
       body.confirm_tool_calls = mode !== 'none'
       body.dedupe_tools = [...deduped]
-      if (item) body.child_agent_ids = [...children]
+      if (item)
+        body.placement_children = [...placementChildren]
+          .filter(([nodeId]) => {
+            const placement = item.placements?.find((candidate) => candidate.id === nodeId)
+            return placement ? parents.has(placement.parent_node_id) : false
+          })
+          .map(([node_id, childIds]) => ({
+            node_id,
+            child_agent_ids: [...childIds],
+          }))
       if (icon !== undefined) body.icon_data = icon
       await onSubmit(body)
     } catch (e) {
@@ -177,48 +177,76 @@ export function AgentForm({
       </Field>
       <Field
         full
-        label="Parent agent"
-        hint="Mounir handles top-level agents. A subagent can coordinate its own direct children."
+        label="Parent connections"
+        hint="Each listed path is an independent node placement with its own children."
       >
-        <select
-          name="parent_agent_id"
-          value={parentId || ''}
-          onChange={(event) => {
-            const nextParentId = Number(event.target.value) || 0
-            setParentId(nextParentId)
-            if (nextParentId) {
-              setChildren((current) => {
-                const next = new Set(current)
-                next.delete(nextParentId)
-                return next
-              })
-            }
-          }}
-        >
-          <option value="">Mounir — top level</option>
-          {agents
-            .filter((agent) => !blockedParents.has(agent.id))
-            .map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name}
-              </option>
-            ))}
-        </select>
-      </Field>
-      {item && (
-        <section className="key-value-editor agent-children">
-          <div className="key-value-editor__title">
-            <span>
-              <strong>Child subagents</strong>
-              <small>
-                Select every specialist this agent can delegate to. Selecting an agent moves it from
-                its current parent.
-              </small>
+        <div className="agent-choice-list agent-parent-choice-list">
+          <label className="agent-choice">
+            <input
+              type="checkbox"
+              checked={parents.has(null)}
+              onChange={(event) => {
+                const next = new Set(parents)
+                event.target.checked ? next.add(null) : next.delete(null)
+                setParents(next)
+              }}
+            />
+            <span className="avatar">M</span>
+            <span className="agent-choice__copy">
+              <strong>Mounir</strong>
+              <small>Make this agent directly available to the orchestrator.</small>
             </span>
-          </div>
-          <AgentChoices agents={availableChildren} selected={children} onChange={setChildren} />
-        </section>
-      )}
+          </label>
+          {availableParents.map(({ agent, placement }) => (
+            <label className="agent-choice" key={placement.id}>
+              <input
+                type="checkbox"
+                checked={parents.has(placement.id)}
+                onChange={(event) => {
+                  const next = new Set(parents)
+                  event.target.checked ? next.add(placement.id) : next.delete(placement.id)
+                  setParents(next)
+                }}
+              />
+              <span className="avatar">
+                {agent.has_icon ? (
+                  <img src={`/api/subagents/${agent.id}/icon`} alt="" />
+                ) : (
+                  agent.name[0]
+                )}
+              </span>
+              <span className="agent-choice__copy">
+                <strong>{agent.name}</strong>
+                <small>{placement.path_label}</small>
+              </span>
+            </label>
+          ))}
+        </div>
+      </Field>
+      {item &&
+        (item.placements || []).map((placement: AgentPlacement) => (
+          <section className="key-value-editor agent-children" key={placement.id}>
+            <div className="key-value-editor__title">
+              <span>
+                <strong>Children of {placement.path_label}</strong>
+                <small>
+                  These children belong only to this node placement. Other copies stay unchanged.
+                </small>
+              </span>
+            </div>
+            <AgentChoices
+              agents={placement.depth >= 4 ? [] : availableChildren}
+              selected={placementChildren.get(placement.id) || new Set()}
+              onChange={(selected) => {
+                setPlacementChildren((current) => {
+                  const next = new Map(current)
+                  next.set(placement.id, selected)
+                  return next
+                })
+              }}
+            />
+          </section>
+        ))}
       <Field full label="Action confirmation">
         <select name="confirmation_mode" value={mode} onChange={(e) => setMode(e.target.value)}>
           <option value="all">Ask before every action</option>

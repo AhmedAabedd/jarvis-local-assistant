@@ -7,16 +7,19 @@ import {
   type Edge,
   type Node,
 } from '@xyflow/react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api/client'
-import type { BuiltinAgent } from '../../api/types'
+import type { BuiltinAgent, Subagent } from '../../api/types'
 import { Loading } from '../../components/ui/Loading'
 import { useAgents, useOverview, keys } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 import { AgentConfigModal } from './AgentConfigModal'
 import { agentNodeTypes, type FlowData } from './AgentFlowNode'
+import { ConnectAgentModal } from './ConnectAgentModal'
+
+type ConnectionParent = { nodeId: number | null; agentId: number | null; name: string }
 
 function inputEdge(source: 'telegram' | 'whatsapp', color: string): Edge {
   return {
@@ -41,6 +44,7 @@ export function OverviewPage() {
   const [modelId, setModelId] = useState<number>(0)
   const [supervisorOpen, setSupervisorOpen] = useState(false)
   const [supervisorModelId, setSupervisorModelId] = useState(0)
+  const [connectionParent, setConnectionParent] = useState<ConnectionParent | null>(null)
 
   const save = useMutation({
     mutationFn: async () => {
@@ -64,6 +68,20 @@ export function OverviewPage() {
       setSupervisorOpen(false)
     },
   })
+  const connectAgent = useMutation({
+    mutationFn: ({ agent, parentNodeId }: { agent: Subagent; parentNodeId: number | null }) =>
+      api.agents.connect(agent.id, parentNodeId),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.agents }),
+        queryClient.invalidateQueries({ queryKey: keys.overview }),
+      ])
+      setConnectionParent(null)
+    },
+  })
+  useEffect(() => {
+    if (connectionParent) connectAgent.reset()
+  }, [connectionParent])
 
   const graph = useMemo(() => {
     const info = overview.data
@@ -71,22 +89,33 @@ export function OverviewPage() {
     if (!info) return { nodes: [], edges: [] }
     const nodeWidth = 158
     const nodeGap = 14
-    const byId = new Map(custom.map((item) => [item.id, item]))
-    const depthOf = (item: (typeof custom)[number]) => {
-      let depth = 0
-      let parentId = Number(item.parent_agent_id) || 0
-      const visited = new Set<number>([item.id])
-      while (parentId && byId.has(parentId) && !visited.has(parentId)) {
-        depth += 1
-        visited.add(parentId)
-        parentId = Number(byId.get(parentId)?.parent_agent_id) || 0
-      }
-      return depth
+    type Occurrence = {
+      item: Subagent
+      nodeId: number
+      id: string
+      parentNodeId: string
+      depth: number
+      pathLabel: string
     }
-    const dynamicDepth = new Map(custom.map((item) => [item.id, depthOf(item)]))
+    const occurrences: Occurrence[] = custom
+      .flatMap((item) =>
+        (item.placements || []).map((placement) => ({
+          item,
+          nodeId: placement.id,
+          id: `dynamic-node-${placement.id}`,
+          parentNodeId:
+            placement.parent_node_id === null
+              ? 'supervisor'
+              : `dynamic-node-${placement.parent_node_id}`,
+          depth: Math.max(0, placement.depth - 1),
+          pathLabel: placement.path_label,
+        })),
+      )
+      .sort(
+        (left, right) => left.depth - right.depth || left.item.name.localeCompare(right.item.name),
+      )
     const layerCount = new Map<number, number>([[0, info.builtins.length]])
-    custom.forEach((item) => {
-      const depth = dynamicDepth.get(item.id) || 0
+    occurrences.forEach(({ depth }) => {
       layerCount.set(depth, (layerCount.get(depth) || 0) + 1)
     })
     const widestLayer = Math.max(1, ...layerCount.values())
@@ -106,6 +135,8 @@ export function OverviewPage() {
             setSupervisorModelId(info.supervisor.model_id || 0)
             setSupervisorOpen(true)
           },
+          onConnect: () =>
+            setConnectionParent({ nodeId: null, agentId: null, name: info.supervisor.name }),
         },
       },
     ]
@@ -175,36 +206,29 @@ export function OverviewPage() {
         style: { stroke: item.enabled ? '#59c98e' : '#ff7d79' },
       })
     })
-    custom
-      .slice()
-      .sort((left, right) => {
-        const depthDifference = (dynamicDepth.get(left.id) || 0) - (dynamicDepth.get(right.id) || 0)
-        return depthDifference || left.name.localeCompare(right.name)
+    occurrences.forEach(({ item, nodeId, id, parentNodeId, depth, pathLabel }) => {
+      nodes.push({
+        id,
+        type: 'agent',
+        position: nextPosition(depth),
+        data: {
+          label: item.name,
+          kind: 'dynamic',
+          enabled: Boolean(item.enabled),
+          model: item.model || item.model_name,
+          icon: item.has_icon ? `/api/subagents/${item.id}/icon` : undefined,
+          onOpen: () => navigate(`/admin/agents?open=${item.id}`),
+          onConnect: () => setConnectionParent({ nodeId, agentId: item.id, name: pathLabel }),
+        },
       })
-      .forEach((item) => {
-        const depth = dynamicDepth.get(item.id) || 0
-        const id = `dynamic-${item.id}`
-        nodes.push({
-          id,
-          type: 'agent',
-          position: nextPosition(depth),
-          data: {
-            label: item.name,
-            kind: 'dynamic',
-            enabled: Boolean(item.enabled),
-            model: item.model || item.model_name,
-            icon: item.has_icon ? `/api/subagents/${item.id}/icon` : undefined,
-            onOpen: () => navigate(`/admin/agents?open=${item.id}`),
-          },
-        })
-        edges.push({
-          id: `${item.parent_agent_id ? `dynamic-${item.parent_agent_id}` : 'supervisor'}-${id}`,
-          source: item.parent_agent_id ? `dynamic-${item.parent_agent_id}` : 'supervisor',
-          target: id,
-          animated: Boolean(item.enabled),
-          style: { stroke: item.enabled ? '#79b8ff' : '#ff7d79' },
-        })
+      edges.push({
+        id: `${parentNodeId}-${id}`,
+        source: parentNodeId,
+        target: id,
+        animated: Boolean(item.enabled),
+        style: { stroke: item.enabled ? '#79b8ff' : '#ff7d79' },
       })
+    })
     return { nodes, edges }
   }, [overview.data, agents.data, telegram.data?.enabled, whatsapp.data?.enabled, navigate])
 
@@ -240,6 +264,19 @@ export function OverviewPage() {
           </ReactFlow>
         </section>
       </div>
+      <ConnectAgentModal
+        open={Boolean(connectionParent)}
+        parentNodeId={connectionParent?.nodeId ?? null}
+        parentAgentId={connectionParent?.agentId ?? null}
+        parentName={connectionParent?.name || 'Mounir'}
+        agents={agents.data || []}
+        busy={connectAgent.isPending}
+        error={connectAgent.error instanceof Error ? connectAgent.error.message : ''}
+        onSelect={(agent) =>
+          connectAgent.mutate({ agent, parentNodeId: connectionParent?.nodeId ?? null })
+        }
+        onClose={() => setConnectionParent(null)}
+      />
       <AgentConfigModal
         open={Boolean(selected)}
         name={selected?.name || 'Agent'}

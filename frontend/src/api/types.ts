@@ -59,7 +59,26 @@ export interface Subagent {
   has_icon?: boolean
   parent_agent_id?: Id | null
   parent_name?: string
+  parent_agent_ids?: Id[]
+  parent_node_ids?: Id[]
+  parent_names?: string[]
+  connected_to_supervisor?: boolean
+  child_agent_ids?: Id[]
   child_count?: number
+  placements?: AgentPlacement[]
+}
+
+export interface AgentPlacement {
+  id: Id
+  agent_id: Id
+  parent_node_id: Id | null
+  parent_agent_id: Id | null
+  parent_name: string
+  depth: number
+  path_names: string[]
+  path_label: string
+  child_node_ids: Id[]
+  child_agent_ids: Id[]
 }
 
 export interface BuiltinAgent {
