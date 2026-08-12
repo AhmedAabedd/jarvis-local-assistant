@@ -3,6 +3,7 @@ import type {
   HeartbeatSettings,
   McpServer,
   ModelRecord,
+  Notification,
   Profile,
   ServerToolsState,
   SetupDescriptor,
@@ -127,5 +128,13 @@ export const api = {
     get: () => request<HeartbeatSettings>('/api/heartbeat'),
     update: (body: object) => request<HeartbeatSettings>('/api/heartbeat', json('PUT', body)),
     run: () => request<HeartbeatSettings>('/api/heartbeat/run', json('POST')),
+    notifications: (unreadOnly = false) =>
+      request<{ notifications: Notification[] }>(
+        `/api/heartbeat/notifications?unread_only=${unreadOnly}`,
+      ),
+    markNotificationRead: (id: number) =>
+      request<{ ok: boolean }>(`/api/heartbeat/notifications/${id}/read`, json('PATCH')),
+    deleteNotification: (id: number) =>
+      request<{ ok: boolean }>(`/api/heartbeat/notifications/${id}`, json('DELETE')),
   },
 }

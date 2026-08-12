@@ -27,8 +27,8 @@ export function ModelForm({
   return (
     <form id={formId} className="form-grid" onSubmit={submit}>
       <div className="guidance">
-        <strong>Compatibility:</strong> Ollama models can power the supervisor and MCP subagents.
-        Other OpenAI-compatible endpoints can power MCP subagents when tool calling is supported.
+        <strong>OpenAI-compatible models:</strong> Connect any local or hosted provider exposing a
+        compatible chat-completions endpoint. Models used by agents should support tool calling.
       </div>
       <Field full label="Name" hint="A recognizable name shown throughout Agent Studio.">
         <input name="name" defaultValue={item?.name} required placeholder="Display name" />
@@ -36,19 +36,27 @@ export function ModelForm({
       <Field full label="Model ID" hint="The exact model identifier expected by the provider.">
         <input name="model" defaultValue={item?.model} required placeholder="Model name or ID" />
       </Field>
-      <Field full label="Provider" hint="Used to match models to compatible built-in agents.">
-        <input name="provider" defaultValue={item?.provider} placeholder="Ollama, Groq, Mistral…" />
+      <Field
+        full
+        label="Provider"
+        hint="A display label for the service providing this OpenAI-compatible model."
+      >
+        <input
+          name="provider"
+          defaultValue={item?.provider}
+          placeholder="OpenAI, Gemini, NVIDIA, Ollama…"
+        />
       </Field>
       <Field
         full
         label="Base URL"
-        hint="OpenAI-compatible API address. Ollama normally uses http://localhost:11434/v1."
+        hint="The OpenAI-compatible API root. Do not include /chat/completions."
       >
         <input
           name="base_url"
           defaultValue={item?.base_url}
-          required
           placeholder="https://provider.example/v1"
+          required
         />
       </Field>
       <Field

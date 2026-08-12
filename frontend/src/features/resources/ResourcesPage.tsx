@@ -73,7 +73,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const refresh = async () =>
     Promise.all([
       client.invalidateQueries({ queryKey: keys[kind] }),
-      kind !== 'models' && client.invalidateQueries({ queryKey: keys.overview }),
+      client.invalidateQueries({ queryKey: keys.overview }),
     ])
 
   const save = useMutation({

@@ -743,8 +743,26 @@ async def get_heartbeat():
 
 
 @app.get("/api/heartbeat/notifications")
-async def get_heartbeat_notifications():
-    return {"notifications": db.list_heartbeat_notifications()}
+async def get_heartbeat_notifications(unread_only: bool = False):
+    return {
+        "notifications": db.list_heartbeat_notifications(
+            unread_only=unread_only
+        )
+    }
+
+
+@app.patch("/api/heartbeat/notifications/{notification_id}/read")
+async def mark_heartbeat_notification_read(notification_id: int):
+    if not db.mark_heartbeat_notification_read(notification_id):
+        return JSONResponse({"error": "Notification not found."}, status_code=404)
+    return {"ok": True}
+
+
+@app.delete("/api/heartbeat/notifications/{notification_id}")
+async def delete_heartbeat_notification(notification_id: int):
+    if not db.delete_heartbeat_notification(notification_id):
+        return JSONResponse({"error": "Notification not found."}, status_code=404)
+    return {"ok": True}
 
 
 @app.put("/api/heartbeat")

@@ -224,8 +224,8 @@ CONTEXT_MESSAGE: str = build_context_message()
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 USE_GEMINI: bool = os.environ.get("USE_GEMINI", "false").lower() in ("1", "true", "yes")
-# Google's OpenAI-compatible endpoint — lets llm.gemini_chat reuse the same
-# message/tool format as the other specialists, no google-genai SDK needed.
+# Google's OpenAI-compatible endpoint uses the same shared chat transport as
+# every other saved model, with no provider SDK required.
 GEMINI_BASE_URL: str = os.environ.get(
     "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
 )
@@ -282,8 +282,8 @@ MEDIA_MODEL: str = os.environ.get("MEDIA_MODEL", "nvidia/nemotron-3-nano-omni-30
 
 # --- Ollama Cloud (ollama.com) — powers dynamic cloud specialists ------------
 # Key from https://ollama.com/settings/keys. The cloud endpoint is
-# OpenAI-compatible, so llm.ollama_cloud_chat reuses the same message/tool
-# format as the other providers — no local ollama daemon involved.
+# OpenAI-compatible, so it uses the shared message/tool transport without a
+# local Ollama daemon.
 OLLAMA_API_KEY: str = os.environ.get("OLLAMA_API_KEY", "")
 OLLAMA_CLOUD_BASE_URL: str = os.environ.get(
     "OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"

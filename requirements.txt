@@ -7,10 +7,6 @@ langchain-core>=1.0,<2
 # Stage 3 — tools
 requests>=2.28
 
-mistralai>=1.0
-# Groq: supervisor streaming (USE_GROQ) + the llm.groq_chat helper
-groq>=0.13
-
 # CLI — live markdown rendering of the streamed reply
 rich>=13.0
 

@@ -1,210 +1,31 @@
 from __future__ import annotations
+
 import json
 import re
 import time
 from typing import Iterator
+
 import ollama
+import requests
+
 from . import config
 
+
 class OllamaError(RuntimeError):
-    pass
+    """Backward-compatible name for an error raised by the LLM transport."""
+
 
 def active_model(default: str) -> str:
-    """The model actually used, given the active provider (for display)."""
+    """Return the legacy environment-selected model name."""
     if config.USE_MISTRAL:
         return config.MISTRAL_MODEL
     if config.USE_GROQ:
         return config.GROQ_MODEL
     return default
 
-def nvidia_chat(messages, tools=None, model=None, *, disable_thinking=False,
-                temperature=0.2, max_tokens=8192, base_url=None,
-                api_key=None) -> dict:
-    """One non-streaming NVIDIA chat-completion (OpenAI-compatible).
-
-    Returns the assistant message dict ({content, tool_calls}). Used by fixed
-    NVIDIA-backed specialists with their own models.
-    """
-    import requests
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "top_p": 0.95,
-        "stream": False,
-    }
-    if tools:
-        payload["tools"] = tools
-    if disable_thinking:  # only for reasoning models (e.g. minimax)
-        payload["chat_template_kwargs"] = {"thinking_mode": "disabled"}
-    headers = {
-        "Authorization": f"Bearer {config.NVIDIA_API_KEY if api_key is None else api_key}",
-        "Accept": "application/json",
-    }
-    resp = requests.post(
-        f"{(base_url or config.NVIDIA_BASE_URL).rstrip('/')}/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=180,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]
-
-def gemini_chat(messages, tools=None, model=None, *, temperature=0.2,
-                max_tokens=8192, base_url=None, api_key=None) -> dict:
-    """One non-streaming Gemini chat-completion via Google's OpenAI-compatible
-    endpoint — same message/tool format as nvidia_chat, no extra SDK needed.
-
-    Returns the assistant message dict ({content, tool_calls}). Used by the
-    knowledge agent specialist.
-    """
-    import requests
-
-    payload = {
-        "model": model or config.GEMINI_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": False,
-    }
-    if tools:
-        payload["tools"] = tools
-    headers = {
-        "Authorization": f"Bearer {config.GEMINI_API_KEY if api_key is None else api_key}",
-        "Accept": "application/json",
-    }
-    # Gemini flash returns transient 429/5xx (overload) fairly often — retry a
-    # couple of times with a short backoff before giving up.
-    for attempt in range(3):
-        resp = requests.post(
-            f"{(base_url or config.GEMINI_BASE_URL).rstrip('/')}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=120,
-        )
-        if resp.status_code == 429 or resp.status_code >= 500:
-            if attempt < 2:
-                # Gemini's 429 body says exactly how long the per-minute quota
-                # needs ("Please retry in 7.08s") — honor it when present,
-                # otherwise fall back to a generous wait.
-                hinted = re.search(r"retry in ([\d.]+)\s*s", resp.text or "")
-                if resp.status_code == 429:
-                    wait = min(float(hinted.group(1)) + 1, 45) if hinted else 15 * (attempt + 1)
-                else:
-                    wait = 2 * (attempt + 1)
-                time.sleep(wait)
-                continue
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]
-
-def openai_chat(messages, tools=None, model=None, *, base_url, api_key,
-                temperature=0.2, max_tokens=8192) -> dict:
-    """One non-streaming chat-completion against ANY OpenAI-compatible endpoint
-    — the caller picks the model, base URL, and key. Same message/tool shape as
-    nvidia_chat. Used by dynamic MCP subagents, whose provider is per-agent
-    config rather than one of the fixed providers above.
-    """
-    import requests
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": False,
-    }
-    if tools:
-        payload["tools"] = tools
-    headers = {"Accept": "application/json"}
-    # Local OpenAI-compatible endpoints often require no authentication.
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    resp = requests.post(
-        f"{base_url.rstrip('/')}/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=180,
-    )
-    resp.raise_for_status()
-    msg = resp.json()["choices"][0]["message"]
-    # Reasoning models may think inline — keep only the answer.
-    msg["content"] = re.sub(r"(?s)<think>.*?</think>", "", msg.get("content") or "").strip()
-    return msg
-
-
-def ollama_cloud_chat(messages, tools=None, model=None, *, temperature=0.2,
-                      max_tokens=8192) -> dict:
-    """One non-streaming Ollama Cloud chat-completion (ollama.com, hosted —
-    not the local daemon). OpenAI-compatible, same message/tool format as
-    nvidia_chat.
-
-    Returns the assistant message dict ({content, tool_calls}). Kept as a
-    provider-specific helper; dynamic MCP agents use ``openai_chat``.
-    """
-    import requests
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": False,
-    }
-    if tools:
-        payload["tools"] = tools
-    headers = {
-        "Authorization": f"Bearer {config.OLLAMA_API_KEY}",
-        "Accept": "application/json",
-    }
-    resp = requests.post(
-        f"{config.OLLAMA_CLOUD_BASE_URL}/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=180,
-    )
-    resp.raise_for_status()
-    msg = resp.json()["choices"][0]["message"]
-    # Reasoning models may think inline — keep only the answer.
-    msg["content"] = re.sub(r"(?s)<think>.*?</think>", "", msg.get("content") or "").strip()
-    return msg
-
-
-def groq_chat(messages, tools=None, model=None, *, temperature=0.2,
-              max_tokens=4096, reasoning_effort=None) -> dict:
-    """One non-streaming Groq chat-completion, OpenAI message/tool format.
-
-    Returns the assistant message dict ({content, tool_calls}) shaped exactly
-    like gemini_chat's, so specialists can swap providers with one line. Qwen3
-    models think out loud in <think> tags — stripped here so callers only see
-    the answer.
-    """
-    from groq import Groq
-
-    client = Groq(api_key=config.GROQ_API_KEY)
-    kwargs = dict(
-        model=model or config.GROQ_MODEL,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    if tools:
-        kwargs["tools"] = tools
-    if reasoning_effort:  # e.g. "none" — qwen3 answers ~10x faster without thinking
-        kwargs["reasoning_effort"] = reasoning_effort
-    msg = client.chat.completions.create(**kwargs).choices[0].message
-    content = re.sub(r"(?s)<think>.*?</think>", "", msg.content or "").strip()
-    tool_calls = [
-        # "type" is required when this message is sent back in the history.
-        {"id": tc.id, "type": "function",
-         "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-        for tc in (msg.tool_calls or [])
-    ]
-    return {"content": content, "tool_calls": tool_calls}
-
 
 def is_up() -> bool:
+    """Check the legacy local-provider configuration."""
     if config.USE_MISTRAL:
         return bool(config.MISTRAL_API_KEY)
     if config.USE_GROQ:
@@ -214,6 +35,190 @@ def is_up() -> bool:
         return True
     except Exception:
         return False
+
+
+def _chat_completions_url(base_url: str | None) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    if not value:
+        raise OllamaError(
+            "This model needs an OpenAI-compatible base URL, for example "
+            "https://provider.example/v1."
+        )
+    if not value.startswith(("http://", "https://")):
+        raise OllamaError("The model base URL must start with http:// or https://.")
+    if value.endswith("/chat/completions"):
+        return value
+    return f"{value}/chat/completions"
+
+
+def _json_arguments(value) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value or {})
+
+
+def _compatible_messages(messages: list[dict]) -> list[dict]:
+    """Keep history within the common OpenAI chat-completions contract."""
+    normalized: list[dict] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        entry: dict = {
+            "role": role,
+            "content": message.get("content") or "",
+        }
+        if message.get("name"):
+            entry["name"] = message["name"]
+        if role == "tool" and message.get("tool_call_id"):
+            entry["tool_call_id"] = message["tool_call_id"]
+        if message.get("tool_calls"):
+            entry["tool_calls"] = [
+                {
+                    "id": call.get("id") or f"call_{index}",
+                    "type": "function",
+                    "function": {
+                        "name": call.get("function", {}).get("name") or "",
+                        "arguments": _json_arguments(
+                            call.get("function", {}).get("arguments")
+                        ),
+                    },
+                }
+                for index, call in enumerate(message["tool_calls"])
+            ]
+        normalized.append(entry)
+    return normalized
+
+
+def _payload(
+    messages: list[dict],
+    *,
+    model: str,
+    tools: list | None,
+    stream: bool,
+    temperature: float,
+    max_tokens: int,
+) -> dict:
+    selected_model = str(model or "").strip()
+    if not selected_model:
+        raise OllamaError("A model ID is required.")
+    body = {
+        "model": selected_model,
+        "messages": _compatible_messages(messages),
+        "stream": stream,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if tools:
+        body["tools"] = tools
+    return body
+
+
+def _headers(api_key: str | None) -> dict[str, str]:
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _error_detail(response: requests.Response) -> str:
+    try:
+        body = response.json()
+        error = body.get("error", body) if isinstance(body, dict) else body
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("detail") or error)[:800]
+        return str(error)[:800]
+    except (ValueError, TypeError):
+        return (response.text or response.reason or "request failed").strip()[:800]
+
+
+def _post(
+    *,
+    base_url: str | None,
+    api_key: str | None,
+    payload: dict,
+    stream: bool,
+    timeout: int,
+) -> requests.Response:
+    """POST with small, bounded retries for provider throttling/outages."""
+    url = _chat_completions_url(base_url)
+    response: requests.Response | None = None
+    for attempt in range(3):
+        response = requests.post(
+            url,
+            headers=_headers(api_key),
+            json=payload,
+            stream=stream,
+            timeout=timeout,
+        )
+        if response.status_code != 429 and response.status_code < 500:
+            break
+        if attempt < 2:
+            retry_after = response.headers.get("Retry-After", "")
+            try:
+                delay = min(max(float(retry_after), 0.25), 15.0)
+            except ValueError:
+                delay = float(2 ** attempt)
+            response.close()
+            time.sleep(delay)
+    assert response is not None
+    if response.status_code >= 400:
+        detail = _error_detail(response)
+        response.close()
+        raise OllamaError(f"OpenAI-compatible endpoint returned HTTP {response.status_code}: {detail}")
+    return response
+
+
+def openai_chat(
+    messages,
+    tools=None,
+    model=None,
+    *,
+    base_url,
+    api_key="",
+    provider=None,
+    temperature=0.2,
+    max_tokens=8192,
+) -> dict:
+    """Call any OpenAI-compatible chat-completions endpoint."""
+    try:
+        response = _post(
+            base_url=base_url,
+            api_key=api_key,
+            payload=_payload(
+                messages,
+                model=model,
+                tools=tools,
+                stream=False,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ),
+            stream=False,
+            timeout=180,
+        )
+        try:
+            raw = response.json()
+        finally:
+            response.close()
+        message = dict(raw["choices"][0]["message"])
+        message["content"] = re.sub(
+            r"(?s)<think>.*?</think>", "", message.get("content") or ""
+        ).strip()
+        return message
+    except OllamaError:
+        raise
+    except Exception as exc:
+        label = f"{provider}/" if provider else ""
+        raise OllamaError(f"Model call failed ({label}{model}): {exc}") from exc
+
+
+def _canonical_tool_call(
+    name: str, arguments: dict, call_id: str | None = None
+) -> dict:
+    return {
+        "id": call_id or "call_0",
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
 
 def chat_stream(
     messages: list[dict],
@@ -226,266 +231,70 @@ def chat_stream(
     base_url: str | None = None,
     api_key: str | None = None,
 ) -> Iterator[str]:
-    selected_provider = str(provider or "").strip().lower()
-    if not selected_provider:
-        selected_provider = (
-            "mistral" if config.USE_MISTRAL
-            else "groq" if config.USE_GROQ
-            else "ollama"
-        )
-    if "mistral" in selected_provider:
-        yield from _mistral_stream(
-            messages, tools=tools, tool_calls_out=tool_calls_out,
-            model=model, base_url=base_url, api_key=api_key,
-        )
-    elif "groq" in selected_provider:
-        yield from _groq_stream(
-            messages, tools=tools, tool_calls_out=tool_calls_out,
-            model=model, base_url=base_url, api_key=api_key,
-        )
-    elif "ollama" in selected_provider:
-        yield from _ollama_stream(
-            messages, model=model, think=think, tools=tools,
-            tool_calls_out=tool_calls_out, base_url=base_url, api_key=api_key,
-        )
-    else:
-        raise OllamaError(
-            f"Unsupported supervisor model provider: {provider or 'unknown'}"
-        )
-
-def _mistral_stream(
-    messages, *, tools, tool_calls_out, model=None, base_url=None, api_key=None
-) -> Iterator[str]:
+    """Stream any model exposing OpenAI-compatible chat completions."""
+    del think  # Kept in the public signature for existing callers.
+    response: requests.Response | None = None
     try:
-        from mistralai.client import Mistral
-
-        # Hard timeout: without it a throttled/stalled Mistral request hangs
-        # the whole turn forever with no error surfacing anywhere.
-        # Model records use the common OpenAI-compatible base form ending in
-        # /v1.  The Mistral SDK appends its own /v1 route, so it expects the
-        # server root here; passing the stored value unchanged produces
-        # /v1/v1/chat/completions and a 404.
-        mistral_server = (base_url or "").rstrip("/").removesuffix("/v1")
-        client = Mistral(
-            api_key=config.MISTRAL_API_KEY if api_key is None else api_key,
-            server_url=mistral_server or None,
-            timeout_ms=120_000,
+        response = _post(
+            base_url=base_url,
+            api_key=api_key,
+            payload=_payload(
+                messages,
+                model=model,
+                tools=tools,
+                stream=True,
+                temperature=0.2,
+                max_tokens=8192,
+            ),
+            stream=True,
+            timeout=180,
         )
-
-        # Clean up messages: Mistral expects tool messages with specific shape
-        clean_messages = []
-        for m in messages:
-            if m["role"] == "tool":
-                clean_messages.append({
-                    "role": "tool",
-                    "tool_call_id": m.get("tool_call_id", "call_0"),
-                    "content": m.get("content") or "",
-                })
-            elif m.get("tool_calls"):
-                clean_messages.append({
-                    "role": "assistant",
-                    "content": m.get("content") or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.get("id") or f"call_{i}",
-                            "type": "function",
-                            "function": {
-                                "name": tc["function"]["name"],
-                                "arguments": _to_json_str(tc["function"]["arguments"]),
-                            },
-                        }
-                        for i, tc in enumerate(m["tool_calls"])
-                    ],
-                })
+        collected_calls: dict[int, dict[str, str]] = {}
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if isinstance(raw_line, bytes):
+                line = raw_line.decode("utf-8", errors="replace").strip()
             else:
-                clean_messages.append({"role": m["role"], "content": m.get("content") or ""})
-
-        kwargs = dict(
-            model=model or config.MISTRAL_MODEL,
-            messages=clean_messages,
-            stream=True,
-        )
-        if tools:
-            kwargs["tools"] = tools
-
-        stream = client.chat.stream(**kwargs)
-
-        collected_calls = {}
-        for event in stream:
-            delta = event.data.choices[0].delta
-
-            if delta.content:
-                yield delta.content
-
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index if hasattr(tc, 'index') else 0
-                    if idx not in collected_calls:
-                        collected_calls[idx] = {"id": tc.id or f"call_{idx}", "name": "", "arguments": ""}
-                    if tc.function.name:
-                        collected_calls[idx]["name"] += tc.function.name
-                    if tc.function.arguments:
-                        collected_calls[idx]["arguments"] += tc.function.arguments
-
-        if tool_calls_out is not None and collected_calls:
-            for call in collected_calls.values():
-                tool_calls_out.append(
-                    _canonical_tool_call(
-                        call["name"],
-                        json.loads(call["arguments"]),
-                        call.get("id"),
-                    )
-                )
-
-    except Exception as exc:
-        raise OllamaError(f"Mistral call failed: {exc}") from exc
-
-def _canonical_tool_call(
-    name: str, arguments: dict, call_id: str | None = None
-) -> dict:
-    """Return one provider-independent OpenAI-style tool call."""
-
-    return {
-        "id": call_id or "call_0",
-        "type": "function",
-        "function": {"name": name, "arguments": arguments},
-    }
-
-def _ollama_stream(
-    messages, *, model, think, tools, tool_calls_out, base_url=None, api_key=None
-) -> Iterator[str]:
-    try:
-        clean_messages = []
-        for message in messages:
-            entry = dict(message)
-            if message.get("tool_calls"):
-                entry["tool_calls"] = [
-                    {
-                        "function": {
-                            "name": call["function"]["name"],
-                            "arguments": (
-                                json.loads(call["function"]["arguments"] or "{}")
-                                if isinstance(call["function"].get("arguments"), str)
-                                else call["function"].get("arguments") or {}
-                            ),
-                        }
-                    }
-                    for call in message["tool_calls"]
-                ]
-            clean_messages.append(entry)
-        kwargs = dict(model=model, messages=clean_messages, stream=True, options={"num_ctx": 32768},
-                      think=config.THINK if think is None else think)
-        if tools:
-            kwargs["tools"] = tools
-        client_options = {}
-        if base_url:
-            client_options["host"] = base_url.removesuffix("/v1")
-        if api_key:
-            client_options["headers"] = {"Authorization": f"Bearer {api_key}"}
-        client = ollama.Client(**client_options) if client_options else ollama
-        stream = client.chat(**kwargs)
-        for chunk in stream:
-            message = chunk.message
-            if message.content:
-                yield message.content
-            if tool_calls_out is not None and message.tool_calls:
-                tool_calls_out.extend(
-                    _canonical_tool_call(
-                        call.function.name,
-                        dict(call.function.arguments or {}),
-                        getattr(call, "id", None),
-                    )
-                    for call in message.tool_calls
-                )
-    except Exception as exc:
-        raise OllamaError(f"Ollama call failed (model {model}): {exc}") from exc
-
-def _groq_stream(
-    messages, *, tools, tool_calls_out, model=None, base_url=None, api_key=None
-) -> Iterator[str]:
-    try:
-        from groq import Groq
-
-        client = Groq(
-            api_key=config.GROQ_API_KEY if api_key is None else api_key,
-            base_url=base_url or None,
-        )
-
-        clean_messages = []
-        for m in messages:
-            if m["role"] == "tool":
-                clean_messages.append({
-                    "role": "tool",
-                    "tool_call_id": m.get("tool_call_id", "call_0"),
-                    "name": m.get("name") or m.get("tool_name", ""),
-                    "content": m.get("content") or "",
-                })
+                line = str(raw_line or "").strip()
+            if not line or line.startswith(("event:", ":")):
                 continue
-
-            entry = {"role": m["role"], "content": m.get("content") or ""}
-
-            if m.get("tool_calls"):
-                entry["tool_calls"] = [
-                    {
-                        "id": tc.get("id") or f"call_{i}",
-                        "type": "function",
-                        "function": {
-                            "name": tc["function"]["name"],
-                            "arguments": _to_json_str(tc["function"]["arguments"]),
-                        },
-                    }
-                    for i, tc in enumerate(m["tool_calls"])
-                ]
-
-            clean_messages.append(entry)
-
-        kwargs = dict(
-            model=model or config.GROQ_MODEL,
-            messages=clean_messages,
-            stream=True,
-        )
-        if tools:
-            kwargs["tools"] = tools
-
-        stream = client.chat.completions.create(**kwargs)
-
-        collected_calls = {}
-        for chunk in stream:
-            delta = chunk.choices[0].delta
-
-            if delta.content:
-                yield delta.content
-
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    if idx not in collected_calls:
-                        collected_calls[idx] = {
-                            "id": tc.id or f"call_{idx}",
-                            "name": "",
-                            "arguments": "",
-                        }
-                    elif tc.id:
-                        collected_calls[idx]["id"] = tc.id
-                    if tc.function.name:
-                        collected_calls[idx]["name"] += tc.function.name
-                    if tc.function.arguments:
-                        collected_calls[idx]["arguments"] += tc.function.arguments
-
-        if tool_calls_out is not None and collected_calls:
-            for call in collected_calls.values():
-                tool_calls_out.append(
-                    _canonical_tool_call(
-                        call["name"],
-                        json.loads(call["arguments"]),
-                        call.get("id"),
-                    )
+            data = line[5:].strip() if line.startswith("data:") else line
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content") or ""
+            if isinstance(content, str) and content:
+                yield content
+            for position, tool_call in enumerate(delta.get("tool_calls") or []):
+                index = int(tool_call.get("index", position) or 0)
+                current = collected_calls.setdefault(
+                    index,
+                    {"id": f"call_{index}", "name": "", "arguments": ""},
                 )
-
+                if tool_call.get("id"):
+                    current["id"] = str(tool_call["id"])
+                function = tool_call.get("function") or {}
+                if function.get("name"):
+                    current["name"] += str(function["name"])
+                if function.get("arguments"):
+                    current["arguments"] += _json_arguments(function["arguments"])
+        if tool_calls_out is not None:
+            for call in collected_calls.values():
+                try:
+                    arguments = json.loads(call["arguments"] or "{}")
+                except (TypeError, ValueError):
+                    arguments = {}
+                tool_calls_out.append(
+                    _canonical_tool_call(call["name"], arguments, call["id"])
+                )
+    except OllamaError:
+        raise
     except Exception as exc:
-        raise OllamaError(f"Groq call failed: {exc}") from exc
-
-def _to_json_str(args) -> str:
-    if isinstance(args, str):
-        return args
-    return json.dumps(args)
+        label = f"{provider}/" if provider else ""
+        raise OllamaError(f"Model stream failed ({label}{model}): {exc}") from exc
+    finally:
+        if response is not None:
+            response.close()

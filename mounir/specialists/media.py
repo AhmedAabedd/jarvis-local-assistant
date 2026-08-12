@@ -314,9 +314,8 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
         fallback_model=config.MEDIA_MODEL,
         fallback_base_url=config.NVIDIA_BASE_URL,
         fallback_api_key=config.NVIDIA_API_KEY,
+        fallback_provider="NVIDIA",
     )
-    if not runtime["api_key"]:
-        return "Media agent failed: its NVIDIA API key is not set."
 
     selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
 
@@ -328,10 +327,11 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     return graph_runtime.run_tool_agent(
         messages,
         selected_tools,
-        lambda history, schemas: llm.nvidia_chat(
+        lambda history, schemas: llm.openai_chat(
             history,
             tools=schemas,
             model=runtime["model"],
+            provider=runtime["provider"],
             base_url=runtime["base_url"],
             api_key=runtime["api_key"],
         ),

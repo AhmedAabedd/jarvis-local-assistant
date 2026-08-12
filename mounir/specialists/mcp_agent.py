@@ -409,6 +409,7 @@ async def _run_async(
                     history,
                     tools=schemas,
                     model=spec["model"],
+                    provider=spec.get("provider"),
                     base_url=spec["base_url"],
                     api_key=api_key,
                 )

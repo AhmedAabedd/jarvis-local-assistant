@@ -1,5 +1,6 @@
-import { Bot, Mic, Send, Settings2 } from 'lucide-react'
+import { Bell, Bot, Check, History, Inbox, Mic, Send, Settings2, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { api } from '../../api/client'
 import type { Notification } from '../../api/types'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { useProfile } from '../../hooks/useStudioData'
@@ -17,14 +18,17 @@ export function ChatPage() {
   const profile = useProfile().data
   const assistantName = profile?.assistant_name || 'Mounir'
   const [notifications, setNotifications] = useState<Notification[]>([])
-  const addHeartbeat = useCallback(
-    (text: string) =>
-      setNotifications((current) => [
-        { message: text, created_at: new Date().toISOString() },
-        ...current,
-      ]),
-    [],
-  )
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [showNotificationHistory, setShowNotificationHistory] = useState(false)
+  const loadNotifications = useCallback(async () => {
+    try {
+      const data = await api.heartbeat.notifications()
+      setNotifications(data.notifications || [])
+    } catch {
+      // A notification refresh should never interrupt chat.
+    }
+  }, [])
+  const addHeartbeat = useCallback((_text: string) => void loadNotifications(), [loadNotifications])
   const chat = useChatSocket(addHeartbeat)
   const [text, setText] = useState('')
   const [voiceState, setVoiceState] = useState<VoiceState>('ready')
@@ -40,11 +44,34 @@ export function ChatPage() {
     bottom.current?.scrollIntoView({ behavior: 'smooth' })
   }, [chat.messages, chat.streaming])
   useEffect(() => {
-    fetch('/api/heartbeat/notifications')
-      .then((r) => r.json())
-      .then((data) => setNotifications(data.notifications || []))
-      .catch(() => undefined)
-  }, [])
+    void loadNotifications()
+  }, [loadNotifications])
+  useEffect(() => {
+    if (!notificationsOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setNotificationsOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [notificationsOpen])
+
+  const markNotificationRead = async (item: Notification) => {
+    if (!item.id) return
+    await api.heartbeat.markNotificationRead(item.id)
+    setNotifications((current) =>
+      current.map((candidate) =>
+        candidate.id === item.id ? { ...candidate, read_at: new Date().toISOString() } : candidate,
+      ),
+    )
+  }
+  const deleteNotification = async (item: Notification) => {
+    if (!item.id) return
+    await api.heartbeat.deleteNotification(item.id)
+    setNotifications((current) => current.filter((candidate) => candidate.id !== item.id))
+  }
+  const unreadNotifications = notifications.filter((item) => !item.read_at)
+  const readNotifications = notifications.filter((item) => item.read_at)
+  const visibleNotifications = showNotificationHistory ? readNotifications : unreadNotifications
 
   const submit = () => {
     if (chat.send(text)) setText('')
@@ -135,10 +162,22 @@ export function ChatPage() {
             <h1>{assistantName}</h1>
             <p>Private conversation on this device</p>
           </div>
-          <span className={`connection-pill ${chat.connection === 'online' ? 'online' : ''}`}>
-            <i />
-            {chat.connection}
-          </span>
+          <div className="chat-header__actions">
+            <span className={`connection-pill ${chat.connection === 'online' ? 'online' : ''}`}>
+              <i />
+              {chat.connection}
+            </span>
+            <button
+              className="notification-trigger"
+              type="button"
+              aria-label={`Open notifications, ${unreadNotifications.length} unread`}
+              aria-expanded={notificationsOpen}
+              onClick={() => setNotificationsOpen(true)}
+            >
+              <Bell size={16} />
+              <span className="notification-trigger__badge">{unreadNotifications.length}</span>
+            </button>
+          </div>
         </header>
         <div className="transcript" aria-live="polite">
           {!chat.messages.length && (
@@ -188,14 +227,71 @@ export function ChatPage() {
           </div>
         </div>
       </main>
-      <aside className="notification-panel">
-        <h2>
-          Heartbeat <span>{notifications.length}</span>
-        </h2>
+      {notificationsOpen && (
+        <button
+          className="notification-backdrop"
+          type="button"
+          aria-label="Close notifications"
+          onClick={() => setNotificationsOpen(false)}
+        />
+      )}
+      <aside
+        className={`notification-panel ${notificationsOpen ? 'notification-panel--open' : ''}`}
+        aria-hidden={!notificationsOpen}
+        aria-label="Notifications"
+      >
+        <div className="notification-panel__header">
+          <div>
+            <h2>Notifications</h2>
+            <p>{unreadNotifications.length} unread</p>
+          </div>
+          <button
+            className="notification-panel__close"
+            type="button"
+            aria-label="Close notifications"
+            onClick={() => setNotificationsOpen(false)}
+          >
+            <X size={17} />
+          </button>
+        </div>
+        <div className="notification-panel__toolbar">
+          <button
+            className="notification-view-button"
+            type="button"
+            onClick={() => setShowNotificationHistory((current) => !current)}
+          >
+            {showNotificationHistory ? <Inbox size={13} /> : <History size={13} />}
+            {showNotificationHistory ? 'Unread' : 'History'}
+          </button>
+        </div>
         <div className="notification-list">
-          {!notifications.length && <div className="empty-state">No updates yet.</div>}
-          {notifications.map((item, index) => (
+          {!visibleNotifications.length && (
+            <div className="empty-state">
+              {showNotificationHistory ? 'No read notifications.' : 'You are all caught up.'}
+            </div>
+          )}
+          {visibleNotifications.map((item, index) => (
             <article className="notification" key={item.id || index}>
+              <div className="notification__actions">
+                {!showNotificationHistory && (
+                  <button
+                    type="button"
+                    title="Mark as read"
+                    aria-label="Mark notification as read"
+                    onClick={() => void markNotificationRead(item)}
+                  >
+                    <Check size={12} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  title="Delete permanently"
+                  aria-label="Delete notification permanently"
+                  onClick={() => void deleteNotification(item)}
+                >
+                  <X size={12} />
+                </button>
+              </div>
               <p>{notificationText(item)}</p>
               <time>{formatTime(item.created_at)}</time>
             </article>

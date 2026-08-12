@@ -299,7 +299,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             finished_at TEXT,
             status TEXT NOT NULL DEFAULT 'running',
             message TEXT NOT NULL DEFAULT '',
-            error TEXT NOT NULL DEFAULT ''
+            error TEXT NOT NULL DEFAULT '',
+            notification_read_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS heartbeat_agent_state (
@@ -481,6 +482,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "last_error": "TEXT NOT NULL DEFAULT ''",
             "notify_telegram": "INTEGER NOT NULL DEFAULT 1 CHECK (notify_telegram IN (0, 1))",
             "notify_whatsapp": "INTEGER NOT NULL DEFAULT 0 CHECK (notify_whatsapp IN (0, 1))",
+        },
+        "heartbeat_runs": {
+            "notification_read_at": "TEXT",
         },
     }
     added_columns: set[tuple[str, str]] = set()
@@ -689,7 +693,9 @@ def _required(value, field: str) -> str:
 
 
 def _normalize_model_base_url(value) -> str:
-    base_url = _required(value, "base URL").rstrip("/")
+    base_url = str(value or "").strip().rstrip("/")
+    if not base_url:
+        return ""
     if not base_url.startswith(("http://", "https://")):
         raise ValueError("base URL must start with http:// or https://.")
     if base_url.endswith("/chat/completions"):
@@ -922,11 +928,6 @@ def _active_supervisor_model_defaults() -> dict:
         "base_url": "http://localhost:11434/v1",
         "api_key": "",
     }
-
-
-def _supervisor_provider_supported(provider: str) -> bool:
-    normalized = str(provider or "").strip().lower()
-    return any(name in normalized for name in ("mistral", "groq", "ollama"))
 
 
 def _migrate_builtin_email(conn: sqlite3.Connection) -> None:
@@ -1812,7 +1813,6 @@ def get_supervisor_config() -> dict:
             "label": f"{model['name']} — {model['model']}",
         }
         for model in list_models()
-        if _supervisor_provider_supported(model.get("provider", ""))
     ]
     return {
         "model_id": runtime["model_id"],
@@ -1828,10 +1828,8 @@ def update_supervisor_model(model_id: int) -> dict:
     except (TypeError, ValueError) as exc:
         raise ValueError("choose a model") from exc
     selected = get_model(requested_id)
-    if selected is None or not _supervisor_provider_supported(
-        selected.get("provider", "")
-    ):
-        raise ValueError("choose a configured Mistral, Groq, or Ollama model")
+    if selected is None:
+        raise ValueError("choose a configured model")
     with _connect() as conn:
         conn.execute(
             """
@@ -1870,14 +1868,15 @@ def get_builtin_agent_runtime(
     fallback_model: str,
     fallback_base_url: str,
     fallback_api_key: str,
+    fallback_provider: str = "",
 ) -> dict:
-    """Resolve the assigned Model record, falling back to the native adapter."""
+    """Resolve one assigned model record for the universal LLM adapter."""
     key = str(agent_key or "").removeprefix("builtin:").strip()
     try:
         with _connect() as conn:
             selected = conn.execute(
                 """
-                SELECT m.model, m.base_url, m.api_key
+                SELECT m.model, m.provider, m.base_url, m.api_key
                 FROM builtin_agent_settings s
                 JOIN models m ON m.id = s.model_id
                 WHERE s.agent_key = ?
@@ -1889,11 +1888,13 @@ def get_builtin_agent_runtime(
     if selected:
         return {
             "model": selected["model"],
+            "provider": selected["provider"],
             "base_url": selected["base_url"],
             "api_key": _resolve_key(selected["api_key"] or ""),
         }
     return {
         "model": fallback_model,
+        "provider": fallback_provider,
         "base_url": fallback_base_url,
         "api_key": fallback_api_key,
     }
@@ -1907,17 +1908,13 @@ def list_builtin_agents() -> list[dict]:
     result = []
     for definition in builtin_agents.definitions():
         key = definition["key"]
-        compatible = [
-            model for model in models
-            if builtin_agents.provider_matches(key, model.get("provider", ""))
-        ]
         options = [
             {
                 "id": model["id"],
                 "model": model["model"],
                 "label": f"{model['name']} — {model['model']}",
             }
-            for model in compatible
+            for model in models
         ]
         with _connect() as conn:
             setting = conn.execute(
@@ -1965,12 +1962,8 @@ def update_builtin_agent(
         except (TypeError, ValueError) as exc:
             raise ValueError("choose a model") from exc
         selected = get_model(requested_id)
-        if selected is None or not builtin_agents.provider_matches(
-            definition["key"], selected.get("provider", "")
-        ):
-            raise ValueError(
-                f"choose a configured {definition['provider']} model"
-            )
+        if selected is None:
+            raise ValueError("choose a configured model")
     normalized_enabled = (
         int(_bool(enabled, "enabled")) if enabled is not None else None
     )
@@ -2550,21 +2543,55 @@ def list_heartbeat_runs(limit: int = 10) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def list_heartbeat_notifications(limit: int = 25) -> list[dict]:
-    """Return recent heartbeat alerts suitable for user notifications."""
+def list_heartbeat_notifications(
+    limit: int = 25, *, unread_only: bool = False
+) -> list[dict]:
+    """Return persisted heartbeat alerts, optionally limited to unread items."""
     limit = max(1, min(int(limit), 100))
+    unread_clause = "AND notification_read_at IS NULL" if unread_only else ""
     with _connect() as conn:
         rows = conn.execute(
-            """
-            SELECT id, trigger, started_at, finished_at, message
+            f"""
+            SELECT id, trigger, started_at AS created_at, finished_at, message,
+                   notification_read_at AS read_at
             FROM heartbeat_runs
             WHERE status = 'alert' AND TRIM(message) != ''
+              {unread_clause}
             ORDER BY id DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def mark_heartbeat_notification_read(notification_id: int) -> bool:
+    """Archive one persisted alert by marking it read."""
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE heartbeat_runs
+            SET notification_read_at = COALESCE(notification_read_at, ?)
+            WHERE id = ? AND status = 'alert' AND TRIM(message) != ''
+            """,
+            (_now(), int(notification_id)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_heartbeat_notification(notification_id: int) -> bool:
+    """Permanently remove one persisted heartbeat alert."""
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM heartbeat_runs
+            WHERE id = ? AND status = 'alert' AND TRIM(message) != ''
+            """,
+            (int(notification_id),),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 # -----------------------------------------------------------------------------
@@ -2644,39 +2671,6 @@ def update_model(model_id: int, **kwargs) -> dict | None:
         ).fetchone()
         if current is None:
             return None
-        resulting_provider = fields.get("provider", current["provider"])
-        assigned = conn.execute(
-            """
-            SELECT agent_key FROM builtin_agent_settings
-            WHERE model_id = ?
-            """,
-            (model_id,),
-        ).fetchall()
-        incompatible = [
-            builtin_agents.definition(row["agent_key"])
-            for row in assigned
-            if not builtin_agents.provider_matches(
-                row["agent_key"], resulting_provider
-            )
-        ]
-        incompatible = [item for item in incompatible if item is not None]
-        if incompatible:
-            names = ", ".join(item["name"] for item in incompatible)
-            expected = incompatible[0]["provider"]
-            raise ValueError(
-                f"This model is assigned to {names} and must remain a {expected} model."
-            )
-        supervisor_assigned = conn.execute(
-            "SELECT 1 FROM supervisor_settings WHERE model_id = ?",
-            (model_id,),
-        ).fetchone()
-        if supervisor_assigned and not _supervisor_provider_supported(
-            resulting_provider
-        ):
-            raise ValueError(
-                "This model is assigned to Mounir and must remain a Mistral, "
-                "Groq, or Ollama model."
-            )
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
             conn.execute(
@@ -4042,6 +4036,7 @@ def build_specs() -> list[dict]:
                 "allowed_tools": placement.get("enabled_tools"),
 
                 "model": (s.get("model") or "").strip() or s["model_name"],
+                "provider": s.get("provider") or "OpenAI compatible",
                 "base_url": s["base_url"],
                 "api_key": _resolve_key(s.get("api_key") or ""),
 

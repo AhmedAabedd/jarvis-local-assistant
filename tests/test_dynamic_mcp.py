@@ -13,7 +13,7 @@ import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import PropertyMock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 # Keep tests away from the owner's real ~/.mounir database.
 _IMPORT_DATA_DIR = tempfile.TemporaryDirectory()
@@ -346,7 +346,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             )
         )
 
-    def test_builtin_agent_model_selection_is_persisted_and_provider_scoped(self):
+    def test_builtin_agent_model_selection_accepts_every_configured_provider(self):
         db.init()
         nvidia = db.add_model(
             "NVIDIA System",
@@ -367,8 +367,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             agent for agent in db.list_builtin_agents() if agent["key"] == "system"
         )
         options = {option["id"] for option in system["model_options"]}
-        self.assertIn(nvidia["id"], options)
-        self.assertNotIn(ollama["id"], options)
+        self.assertEqual(options, {nvidia["id"], ollama["id"]})
 
         updated = db.update_builtin_agent_model("system", nvidia["id"])
         self.assertEqual(updated["model"], nvidia["model"])
@@ -384,8 +383,9 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
         self.assertEqual(runtime["base_url"], nvidia["base_url"])
         self.assertEqual(runtime["api_key"], "preset-key")
-        with self.assertRaisesRegex(ValueError, "configured NVIDIA"):
-            db.update_builtin_agent_model("system", ollama["id"])
+        self.assertEqual(runtime["provider"], "NVIDIA")
+        updated = db.update_builtin_agent_model("system", ollama["id"])
+        self.assertEqual(updated["model_id"], ollama["id"])
 
     def test_fresh_database_keeps_user_registry_empty(self):
         db.init()
@@ -462,8 +462,10 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(runtime["base_url"], "https://models.example.test/v1")
         self.assertEqual(runtime["api_key"], "replacement-key")
         self.assertFalse(db.delete_model(system["model_id"]))
-        with self.assertRaisesRegex(ValueError, "must remain a NVIDIA model"):
-            db.update_model(system["model_id"], provider="Ollama")
+        self.assertEqual(
+            db.update_model(system["model_id"], provider="Ollama")["provider"],
+            "Ollama",
+        )
 
     def test_supervisor_model_is_user_created_selectable_and_used_at_runtime(self):
         db.init()
@@ -485,64 +487,62 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(runtime["base_url"], "https://mistral.example.test/v1")
         self.assertEqual(runtime["api_key"], "alternate-key")
         self.assertFalse(db.delete_model(alternate["id"]))
-        with self.assertRaisesRegex(ValueError, "assigned to Mounir"):
-            db.update_model(alternate["id"], provider="NVIDIA")
+        self.assertEqual(
+            db.update_model(alternate["id"], provider="NVIDIA")["provider"],
+            "NVIDIA",
+        )
 
-    def test_supervisor_chat_dispatch_uses_selected_mistral_record(self):
-        with patch.object(
-            llm_mod, "_mistral_stream", return_value=iter(["ready"])
-        ) as mistral_stream:
-            output = list(
+    def test_openai_compatible_adapter_uses_saved_endpoint_and_credentials(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [{"message": {"content": "ready", "tool_calls": []}}]
+        }
+
+        with patch.object(llm_mod.requests, "post", return_value=response) as post:
+            result = llm_mod.openai_chat(
+                [{"role": "user", "content": "hello"}],
+                model="custom-test",
+                provider="My private gateway",
+                base_url="https://models.example.test/v1",
+                api_key="custom-key",
+            )
+
+        self.assertEqual(result["content"], "ready")
+        request = post.call_args
+        self.assertEqual(request.args[0], "https://models.example.test/v1/chat/completions")
+        self.assertEqual(request.kwargs["json"]["model"], "custom-test")
+        self.assertEqual(
+            request.kwargs["headers"]["Authorization"], "Bearer custom-key"
+        )
+
+    def test_openai_compatible_stream_normalizes_tool_call_deltas(self):
+        response = Mock()
+        response.status_code = 200
+        response.iter_lines.return_value = iter(
+            [
+                'data: {"choices":[{"delta":{"content":"working "}}]}',
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tool_1","function":{"name":"read_file","arguments":"{\\\"path\\\":"}}]}}]}',
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\\"notes.md\\\"}"}}]}}]}',
+                "data: [DONE]",
+            ]
+        )
+
+        calls = []
+        with patch.object(llm_mod.requests, "post", return_value=response):
+            text = "".join(
                 llm_mod.chat_stream(
-                    [{"role": "user", "content": "hello"}],
-                    model="mistral-test",
-                    provider="Mistral",
-                    base_url="https://mistral.example.test/v1",
-                    api_key="test-key",
+                    [{"role": "user", "content": "read notes"}],
+                    model="gpt-test",
+                    provider="OpenAI",
+                    base_url="https://models.example.test/v1",
+                    tool_calls_out=calls,
                 )
             )
 
-        self.assertEqual(output, ["ready"])
-        self.assertEqual(mistral_stream.call_args.kwargs["model"], "mistral-test")
-        self.assertEqual(
-            mistral_stream.call_args.kwargs["base_url"],
-            "https://mistral.example.test/v1",
-        )
-        self.assertEqual(mistral_stream.call_args.kwargs["api_key"], "test-key")
-
-        with patch("mistralai.client.Mistral") as mistral_client:
-            mistral_client.return_value.chat.stream.return_value = []
-            self.assertEqual(
-                list(
-                    llm_mod.chat_stream(
-                        [{"role": "user", "content": "hello"}],
-                        model="mistral-test",
-                        provider="Mistral",
-                        base_url="https://api.mistral.ai/v1",
-                        api_key="test-key",
-                    )
-                ),
-                [],
-            )
-        self.assertEqual(
-            mistral_client.call_args.kwargs["server_url"],
-            "https://api.mistral.ai",
-        )
-
-        with patch.object(
-            llm_mod, "_ollama_stream", return_value=iter(["cloud-ready"])
-        ) as ollama_stream:
-            output = list(
-                llm_mod.chat_stream(
-                    [{"role": "user", "content": "hello"}],
-                    model="cloud-model",
-                    provider="Ollama Cloud",
-                    base_url="https://ollama.com/v1",
-                    api_key="ollama-key",
-                )
-            )
-        self.assertEqual(output, ["cloud-ready"])
-        self.assertEqual(ollama_stream.call_args.kwargs["api_key"], "ollama-key")
+        self.assertEqual(text, "working ")
+        self.assertEqual(calls[0]["function"]["name"], "read_file")
+        self.assertEqual(calls[0]["function"]["arguments"], {"path": "notes.md"})
 
     def test_builtin_specialist_enforces_heartbeat_tool_allowlist(self):
         calls = []
@@ -571,7 +571,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         with (
             patch.object(config, "NVIDIA_API_KEY", "test-key"),
             patch.object(system_agent, "_context", return_value="test device"),
-            patch.object(system_agent.llm, "nvidia_chat", side_effect=fake_chat),
+            patch.object(system_agent.llm, "openai_chat", side_effect=fake_chat),
             patch.object(system_agent, "set_volume") as set_volume,
         ):
             report = system_agent.run(
@@ -622,6 +622,15 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(
             notifications[0]["message"], "An important update is available."
         )
+        self.assertIsNone(notifications[0]["read_at"])
+        self.assertTrue(db.mark_heartbeat_notification_read(alert_run))
+        self.assertEqual(db.list_heartbeat_notifications(unread_only=True), [])
+        self.assertEqual(
+            db.list_heartbeat_notifications()[0]["id"], alert_run
+        )
+        self.assertTrue(db.delete_heartbeat_notification(alert_run))
+        self.assertEqual(db.list_heartbeat_notifications(), [])
+        self.assertFalse(db.delete_heartbeat_notification(alert_run))
 
     def test_heartbeat_runner_suppresses_quiet_checks_and_persists_alerts(self):
         db.init()
@@ -2057,6 +2066,26 @@ class AdminApiTests(TemporaryDatabaseTest):
                     response.json()["notifications"][0]["message"],
                     "A saved heartbeat notification.",
                 )
+                read = await client.patch(
+                    f"/api/heartbeat/notifications/{run_id}/read"
+                )
+                self.assertEqual(read.status_code, 200)
+                unread = await client.get(
+                    "/api/heartbeat/notifications?unread_only=true"
+                )
+                self.assertEqual(unread.json(), {"notifications": []})
+                history = await client.get("/api/heartbeat/notifications")
+                self.assertIsNotNone(
+                    history.json()["notifications"][0]["read_at"]
+                )
+                deleted = await client.delete(
+                    f"/api/heartbeat/notifications/{run_id}"
+                )
+                self.assertEqual(deleted.status_code, 200)
+                missing = await client.delete(
+                    f"/api/heartbeat/notifications/{run_id}"
+                )
+                self.assertEqual(missing.status_code, 404)
 
         asyncio.run(exercise_api())
 

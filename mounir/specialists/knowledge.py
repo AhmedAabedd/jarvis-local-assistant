@@ -361,9 +361,8 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
         fallback_model=config.KNOWLEDGE_MODEL,
         fallback_base_url=config.GEMINI_BASE_URL,
         fallback_api_key=config.GEMINI_API_KEY,
+        fallback_provider="Gemini",
     )
-    if not runtime["api_key"]:
-        return "Knowledge agent failed: its Gemini API key is not set."
 
     selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
 
@@ -385,10 +384,11 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     return graph_runtime.run_tool_agent(
         messages,
         selected_tools,
-        lambda history, schemas: llm.gemini_chat(
+        lambda history, schemas: llm.openai_chat(
             history,
             tools=schemas,
             model=runtime["model"],
+            provider=runtime["provider"],
             base_url=runtime["base_url"],
             api_key=runtime["api_key"],
         ),

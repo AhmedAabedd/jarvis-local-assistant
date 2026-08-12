@@ -316,7 +316,7 @@ export function OverviewPage() {
               }
             : undefined
         }
-        modelHint="Only models compatible with this agent are shown."
+        modelHint="Any saved OpenAI-compatible model can power this agent."
         busy={save.isPending}
         error={save.error instanceof Error ? save.error.message : ''}
         onModelChange={setModelId}
@@ -331,7 +331,7 @@ export function OverviewPage() {
         modelOptions={overview.data?.supervisor.model_options}
         tools={overview.data?.supervisor.tools}
         capabilitiesLabel="Tools"
-        modelHint="The primary model used to understand and route requests."
+        modelHint="Any saved OpenAI-compatible model can power the supervisor."
         busy={saveSupervisor.isPending}
         error={saveSupervisor.error instanceof Error ? saveSupervisor.error.message : ''}
         onModelChange={setSupervisorModelId}

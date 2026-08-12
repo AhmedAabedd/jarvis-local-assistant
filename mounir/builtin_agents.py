@@ -69,17 +69,6 @@ def definition(key: str) -> dict | None:
     }
 
 
-def provider_matches(key: str, provider: str) -> bool:
-    """Match the organizational provider label to the built-in adapter."""
-    item = definition(key)
-    if item is None:
-        return False
-    candidate = str(provider or "").strip().lower()
-    if item["provider"] == "NVIDIA":
-        return "nvidia" in candidate
-    return "gemini" in candidate or "google" in candidate
-
-
 def capabilities() -> list[dict]:
     """Return built-in tool schemas with heartbeat safety metadata."""
     result: list[dict] = []
