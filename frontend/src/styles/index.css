@@ -78,10 +78,12 @@ button {
 }
 
 .studio-shell {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
-  overflow-x: clip;
+  overflow: hidden;
 }
 .studio-sidebar {
   position: sticky;
@@ -182,9 +184,12 @@ button {
 }
 .studio-main {
   width: 100%;
+  height: 100%;
   min-width: 0;
+  min-height: 0;
   max-width: 100%;
-  overflow-x: clip;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0 36px 52px;
 }
 .page-header {
