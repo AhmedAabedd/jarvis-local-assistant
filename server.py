@@ -507,6 +507,14 @@ async def get_voice_settings():
     return db.get_voice_settings()
 
 
+@app.get("/api/tts-voices")
+async def get_tts_voices(provider: str, model: str):
+    try:
+        return tts.discover_voices(provider, model)
+    except (OSError, TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 @app.put("/api/voice-settings")
 async def update_voice_settings(req: dict):
     try:

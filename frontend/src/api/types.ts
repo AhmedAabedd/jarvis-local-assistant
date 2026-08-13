@@ -157,6 +157,19 @@ export interface VoiceSettings {
   tts: VoiceProvider
 }
 
+export interface TtsVoiceOption {
+  id: string
+  label: string
+  group: string
+}
+
+export interface TtsVoiceCatalog {
+  provider: string
+  model: string
+  discovery: 'model_manifest' | 'manual'
+  voices: TtsVoiceOption[]
+}
+
 export interface TelegramSettings {
   enabled: boolean
   token_configured: boolean

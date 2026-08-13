@@ -4,8 +4,9 @@ Synthesizes a chunk of text to audio and plays it. Called once per sentence by
 the voice loop so Mounir starts talking before the full reply is generated.
 
 Supported transports are OpenAI-compatible speech synthesis, Google Cloud TTS,
-and local Piper. The OpenAI-compatible path is provider-neutral and also works
-with local servers that implement the common ``/audio/speech`` contract.
+local Piper, and the multilingual MOSS-TTS-Nano ONNX runtime. The
+OpenAI-compatible path is provider-neutral and also works with local servers
+that implement the common ``/audio/speech`` contract.
 Heavy deps (piper, requests, numpy, sounddevice) are imported lazily.
 """
 
@@ -62,9 +63,53 @@ def synthesize_wav(text: str) -> bytes:
     runtime = db.get_voice_runtime("tts")
     if runtime["provider"] == "google":
         return _synthesize_google_wav(text, runtime)
+    if runtime["provider"] == "moss_onnx":
+        return _synthesize_moss_wav(text, runtime)
     if runtime["provider"] == "openai_compatible":
         return _synthesize_openai_compatible_wav(text, runtime)
     return _synthesize_piper_wav(text, runtime)
+
+
+def discover_voices(provider: str, model: str) -> dict:
+    """Return model-advertised voices when a provider defines discovery."""
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_provider = db.VOICE_PROVIDER_ALIASES["tts"].get(
+        normalized_provider, normalized_provider
+    )
+    if normalized_provider not in db.VOICE_PROVIDERS["tts"]:
+        raise ValueError("TTS provider is not supported")
+    model = str(model or "").strip()
+    if not model:
+        raise ValueError("TTS model is required")
+    if normalized_provider == "moss_onnx":
+        from . import moss_tts
+
+        voices = moss_tts.list_builtin_voices(model)
+        return {
+            "provider": normalized_provider,
+            "model": model,
+            "discovery": "model_manifest",
+            "voices": voices,
+        }
+    return {
+        "provider": normalized_provider,
+        "model": model,
+        "discovery": "manual",
+        "voices": [],
+    }
+
+
+def _synthesize_moss_wav(text: str, runtime: dict) -> bytes:
+    from . import moss_tts
+
+    voice = str(runtime.get("voice") or "").strip()
+    if not voice:
+        raise RuntimeError("The selected MOSS configuration has no voice identifier")
+    return moss_tts.synthesize_wav(
+        text,
+        engine_path=runtime["model"],
+        voice=voice,
+    )
 
 
 def _synthesize_piper_wav(text: str, runtime: dict) -> bytes:

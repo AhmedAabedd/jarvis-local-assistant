@@ -11,6 +11,7 @@ import type {
   Subagent,
   SubagentNode,
   TelegramSettings,
+  TtsVoiceCatalog,
   VoiceSettings,
   WhatsAppSettings,
 } from './types'
@@ -100,6 +101,10 @@ export const api = {
   voice: {
     get: () => request<VoiceSettings>('/api/voice-settings'),
     update: (body: object) => request<VoiceSettings>('/api/voice-settings', json('PUT', body)),
+    voices: (provider: string, model: string) => {
+      const query = new URLSearchParams({ provider, model })
+      return request<TtsVoiceCatalog>(`/api/tts-voices?${query}`)
+    },
   },
   telegram: {
     get: () => request<TelegramSettings>('/api/telegram'),

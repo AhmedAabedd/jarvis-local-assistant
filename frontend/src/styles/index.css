@@ -771,6 +771,38 @@ button {
   border-radius: 999px;
   box-shadow: inset 0 0 0 2px var(--accent-strong);
 }
+.voice-location-picker {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.voice-location-picker legend {
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+}
+.voice-location-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+.voice-location-picker label:has(input:checked) {
+  color: var(--text);
+}
+.voice-location-picker input[type='radio'] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 .field {
   min-width: 0;
   display: flex;

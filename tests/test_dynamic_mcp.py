@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import os
 import sqlite3
@@ -39,6 +40,52 @@ from mounir.specialists import mcp_agent
 from mounir.specialists import system as system_agent
 from mounir.specialists.mcp_agent import _call, _mcp_session, _system_prompt, discover_tools
 from mounir.telegram_bridge import TelegramBridge
+
+
+def _create_moss_package_fixture(
+    engine: Path, package_name: str, voices: list[dict]
+) -> None:
+    package = engine / "models" / package_name
+    codec = engine / "models" / "fixture-codec"
+    package.mkdir(parents=True)
+    codec.mkdir(parents=True)
+    (engine / "ort_cpu_runtime.py").write_text("# fixture runtime\n", encoding="utf-8")
+    (package / "tokenizer.model").write_bytes(b"tokenizer")
+    (package / "tts.onnx").write_bytes(b"onnx")
+    (package / "tts.data").write_bytes(b"weights")
+    (codec / "codec.onnx").write_bytes(b"onnx")
+    (codec / "codec.data").write_bytes(b"weights")
+    (package / "tts_meta.json").write_text(
+        json.dumps(
+            {
+                "files": {"prefill": "tts.onnx"},
+                "external_data_files": {"tts.onnx": ["tts.data"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (codec / "codec_meta.json").write_text(
+        json.dumps(
+            {
+                "files": {"decode": "codec.onnx"},
+                "external_data_files": {"codec.onnx": ["codec.data"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (package / "browser_poc_manifest.json").write_text(
+        json.dumps(
+            {
+                "model_files": {
+                    "tts_meta": "tts_meta.json",
+                    "codec_meta": "../fixture-codec/codec_meta.json",
+                    "tokenizer_model": "tokenizer.model",
+                },
+                "builtin_voices": voices,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 class TemporaryDatabaseTest(unittest.TestCase):
@@ -309,6 +356,65 @@ class DatabaseTests(TemporaryDatabaseTest):
             self.assertEqual(tts_mod.synthesize_wav("hello"), b"wav")
         self.assertEqual(call.call_args.args[1]["model"], "en-US-Neural2-D")
         self.assertEqual(call.call_args.args[1]["api_key"], "google-key")
+
+    def test_local_moss_tts_uses_selected_engine_and_voice(self):
+        db.init()
+        db.update_voice_settings(
+            tts={
+                "provider": "moss_onnx",
+                "model": "/models/MOSS-TTS-Nano",
+                "voice": "Adam",
+                "language": "auto",
+            }
+        )
+        from mounir import tts as tts_mod
+
+        with patch.object(tts_mod, "_synthesize_moss_wav", return_value=b"wav") as call:
+            self.assertEqual(tts_mod.synthesize_wav("Hello there."), b"wav")
+        self.assertEqual(call.call_args.args[1]["model"], "/models/MOSS-TTS-Nano")
+        self.assertEqual(call.call_args.args[1]["voice"], "Adam")
+
+    def test_local_moss_voices_are_discovered_from_the_selected_package(self):
+        from mounir import tts as tts_mod
+
+        engine = Path(self.temp_dir.name) / "custom-moss-engine"
+        _create_moss_package_fixture(
+            engine,
+            "different-model-name",
+            [
+                {
+                    "voice": "CustomOne",
+                    "display_name": "Custom voice one",
+                    "group": "Test voices",
+                    "prompt_audio_codes": [[1, 2]],
+                },
+                {
+                    "voice": "CustomTwo",
+                    "display_name": "Custom voice two",
+                    "group": "Test voices",
+                    "prompt_audio_codes": [[3, 4]],
+                },
+            ],
+        )
+
+        catalog = tts_mod.discover_voices("moss_onnx", str(engine))
+
+        self.assertEqual(catalog["discovery"], "model_manifest")
+        self.assertEqual(
+            catalog["voices"],
+            [
+                {
+                    "id": "CustomOne",
+                    "label": "Custom voice one",
+                    "group": "Test voices",
+                },
+                {
+                    "id": "CustomTwo",
+                    "label": "Custom voice two",
+                    "group": "Test voices",
+                },
+            ],
+        )
 
     def test_telegram_token_replacement_and_pairing_are_persisted(self):
         db.init()
@@ -2178,6 +2284,37 @@ class TransportTests(unittest.TestCase):
 
 
 class AdminApiTests(TemporaryDatabaseTest):
+    def test_tts_voice_catalog_api_reads_the_requested_model(self):
+        import httpx
+        import server as web_server
+
+        engine = Path(self.temp_dir.name) / "api-moss-engine"
+        _create_moss_package_fixture(
+            engine,
+            "user-selected-package",
+            [
+                {
+                    "voice": "UserVoice",
+                    "display_name": "User-selected voice",
+                    "group": "Custom",
+                }
+            ],
+        )
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                response = await client.get(
+                    "/api/tts-voices",
+                    params={"provider": "moss_onnx", "model": str(engine)},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["voices"][0]["id"], "UserVoice")
+
+        asyncio.run(exercise_api())
+
     def test_heartbeat_task_crud_api_keeps_tool_confirmation_safety(self):
         import httpx
         import server as web_server
@@ -3265,7 +3402,7 @@ class InterfaceRoutingTests(unittest.TestCase):
                 self.conversation = Conversation(system_prompt="test")
                 self.requests = []
 
-            def respond(self, text):
+            def respond(self, text, *, voice=False):
                 self.requests.append(text)
                 self.confirmed = mounir_tools.request_confirmation("send email?")
                 yield "Telegram reply"
@@ -3329,6 +3466,7 @@ class InterfaceRoutingTests(unittest.TestCase):
         class FakeBot:
             def __init__(self):
                 self.sent = []
+                self.sent_voice = []
                 self.handlers = []
 
             def register_message_handler(self, handler, **filters):
@@ -3345,6 +3483,9 @@ class InterfaceRoutingTests(unittest.TestCase):
             def send_message(self, chat_id, text, **kwargs):
                 self.sent.append((chat_id, text, kwargs))
 
+            def send_voice(self, chat_id, voice, **kwargs):
+                self.sent_voice.append((chat_id, voice.read(), kwargs))
+
             def reply_to(self, message, text):
                 self.sent.append((message.chat.id, text, {}))
 
@@ -3355,9 +3496,11 @@ class InterfaceRoutingTests(unittest.TestCase):
             def __init__(self):
                 self.conversation = Conversation(system_prompt="test")
                 self.requests = []
+                self.voice_requests = []
 
-            def respond(self, text):
+            def respond(self, text, *, voice=False):
                 self.requests.append(text)
+                self.voice_requests.append(voice)
                 yield "Voice-note reply"
 
         fake_bot = FakeBot()
@@ -3380,6 +3523,13 @@ class InterfaceRoutingTests(unittest.TestCase):
                 "mounir.telegram_bridge.stt.transcribe",
                 return_value=("hello", "en"),
             ) as transcribe,
+            patch(
+                "mounir.telegram_bridge.tts.synthesize_wav",
+                return_value=b"wave reply",
+            ) as synthesize,
+            patch.object(
+                bridge, "_encode_voice", return_value=io.BytesIO(b"opus reply")
+            ) as encode,
         ):
             bridge._handle_audio(message)
 
@@ -3394,7 +3544,11 @@ class InterfaceRoutingTests(unittest.TestCase):
         decode.assert_called_once_with(b"telegram audio")
         transcribe.assert_called_once_with([0.1, -0.1])
         self.assertEqual(fake_agent.requests, ["hello"])
-        self.assertEqual(fake_bot.sent[-1][1], "Voice-note reply")
+        self.assertEqual(fake_agent.voice_requests, [True])
+        synthesize.assert_called_once_with("Voice-note reply")
+        encode.assert_called_once_with(b"wave reply")
+        self.assertEqual(fake_bot.sent_voice, [(42, b"opus reply", {})])
+        self.assertEqual(fake_bot.sent, [])
 
     def test_telegram_stops_polling_when_token_is_rejected(self):
         class UnauthorizedError(Exception):

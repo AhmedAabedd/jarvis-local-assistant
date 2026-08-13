@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Save } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
+import type { TtsVoiceOption, VoiceSettings } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Feedback } from '../../components/ui/Feedback'
@@ -10,257 +11,610 @@ import { Loading } from '../../components/ui/Loading'
 import { keys } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 
+type VoiceSection = 'stt' | 'tts'
+type ConnectionLocation = 'cloud' | 'local'
+type LocalTtsProvider = 'piper' | 'moss_onnx'
+type CloudTtsProvider = 'openai_compatible' | 'google'
+
+function LocationPicker({
+  name,
+  value,
+  onChange,
+}: {
+  name: string
+  value: ConnectionLocation
+  onChange: (value: ConnectionLocation) => void
+}) {
+  return (
+    <fieldset className="voice-location-picker field--full">
+      <legend>Connection location</legend>
+      <label>
+        <input
+          type="radio"
+          name={name}
+          value="cloud"
+          checked={value === 'cloud'}
+          onChange={() => onChange('cloud')}
+        />
+        <span>Cloud</span>
+      </label>
+      <label>
+        <input
+          type="radio"
+          name={name}
+          value="local"
+          checked={value === 'local'}
+          onChange={() => onChange('local')}
+        />
+        <span>Local</span>
+      </label>
+    </fieldset>
+  )
+}
+
+function SectionPicker({
+  value,
+  onChange,
+}: {
+  value: VoiceSection
+  onChange: (value: VoiceSection) => void
+}) {
+  return (
+    <div className="model-location-picker" role="tablist" aria-label="Voice configuration">
+      <span
+        className={`model-location-picker__indicator ${value === 'tts' ? 'is-local' : ''}`}
+        aria-hidden="true"
+      />
+      <button
+        type="button"
+        role="tab"
+        className={value === 'stt' ? 'is-active' : ''}
+        aria-selected={value === 'stt'}
+        onClick={() => onChange('stt')}
+      >
+        Speech-to-text
+      </button>
+      <button
+        type="button"
+        role="tab"
+        className={value === 'tts' ? 'is-active' : ''}
+        aria-selected={value === 'tts'}
+        onClick={() => onChange('tts')}
+      >
+        Text-to-speech
+      </button>
+    </div>
+  )
+}
+
 export function VoicePage() {
-  const client = useQueryClient(),
-    query = useQuery({ queryKey: keys.voice, queryFn: api.voice.get }),
-    [stt, setStt] = useState<string>(),
-    [tts, setTts] = useState<string>(),
-    [success, setSuccess] = useState('')
-  const update = useMutation({
-    mutationFn: api.voice.update,
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: keys.voice })
-      setSuccess('Voice settings saved.')
-    },
-  })
+  const client = useQueryClient()
+  const query = useQuery({ queryKey: keys.voice, queryFn: api.voice.get })
+  const [section, setSection] = useState<VoiceSection>('stt')
+  const [sttLocation, setSttLocation] = useState<ConnectionLocation>()
+  const [ttsLocation, setTtsLocation] = useState<ConnectionLocation>()
+  const [localTtsProvider, setLocalTtsProvider] = useState<LocalTtsProvider>()
+  const [cloudTtsProvider, setCloudTtsProvider] = useState<CloudTtsProvider>()
+  const [mossModel, setMossModel] = useState<string>()
+  const [mossVoices, setMossVoices] = useState<TtsVoiceOption[] | null>(null)
+  const [mossVoice, setMossVoice] = useState<string>()
+  const [mossChecking, setMossChecking] = useState(false)
+  const [mossModelError, setMossModelError] = useState('')
+  const [sttMessage, setSttMessage] = useState('')
+  const [sttError, setSttError] = useState('')
+  const [ttsMessage, setTtsMessage] = useState('')
+  const [ttsError, setTtsError] = useState('')
+
+  const sttUpdate = useMutation({ mutationFn: api.voice.update })
+  const ttsUpdate = useMutation({ mutationFn: api.voice.update })
+  const currentTtsProvider = query.data?.tts.provider || ''
+  const selectedSttLocation =
+    sttLocation ?? (query.data?.stt.provider === 'local_whisper' ? 'local' : 'cloud')
+  const selectedTtsLocation =
+    ttsLocation ??
+    (currentTtsProvider === 'piper' || currentTtsProvider === 'moss_onnx' ? 'local' : 'cloud')
+  const selectedLocalTtsProvider =
+    localTtsProvider ??
+    (currentTtsProvider === 'moss_onnx' ? 'moss_onnx' : ('piper' as LocalTtsProvider))
+  const selectedCloudTtsProvider =
+    cloudTtsProvider ??
+    (currentTtsProvider === 'google' ? 'google' : ('openai_compatible' as CloudTtsProvider))
+  const mossModelValue =
+    mossModel ?? (currentTtsProvider === 'moss_onnx' ? query.data?.tts.model || '' : '')
+  const configuredMossVoice = currentTtsProvider === 'moss_onnx' ? query.data?.tts.voice || '' : ''
+  const mossVoiceValue = mossVoice ?? configuredMossVoice
+  const mossReady = selectedLocalTtsProvider === 'moss_onnx' && mossVoices !== null
+  const selectedMossVoice = mossVoices?.some(
+    (voice) => voice.id.toLowerCase() === mossVoiceValue.toLowerCase(),
+  )
+    ? mossVoiceValue
+    : mossVoices?.[0]?.id || ''
+
+  useEffect(() => {
+    const model = mossModelValue.trim()
+    const shouldDiscover =
+      section === 'tts' &&
+      selectedTtsLocation === 'local' &&
+      selectedLocalTtsProvider === 'moss_onnx' &&
+      Boolean(model)
+    if (!shouldDiscover) {
+      setMossChecking(false)
+      setMossModelError('')
+      setMossVoices(null)
+      return
+    }
+
+    let cancelled = false
+    setMossChecking(true)
+    setMossModelError('')
+    setMossVoices(null)
+    const timeout = window.setTimeout(async () => {
+      try {
+        const catalog = await api.voice.voices('moss_onnx', model)
+        if (!cancelled) setMossVoices(catalog.voices)
+      } catch (error) {
+        if (!cancelled) {
+          setMossModelError(
+            error instanceof Error
+              ? error.message
+              : 'This is not a supported MOSS model directory.',
+          )
+        }
+      } finally {
+        if (!cancelled) setMossChecking(false)
+      }
+    }, 300)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeout)
+    }
+  }, [mossModelValue, section, selectedLocalTtsProvider, selectedTtsLocation])
+
   if (query.isLoading)
     return (
       <>
-        <PageHeader title="Voice" description="Configure speech recognition and voice output" />
+        <PageHeader
+          title="Voice"
+          description="This configuration applies to Mounir voice mode and to voice messages sent to Mounir through Telegram."
+        />
         <Loading />
       </>
     )
-  const sttProvider = stt || query.data?.stt.provider || 'local_whisper',
-    ttsProvider = tts || query.data?.tts.provider || 'piper',
-    remoteStt = sttProvider === 'openai_compatible',
-    compatibleTts = ttsProvider === 'openai_compatible',
-    googleTts = ttsProvider === 'google'
-  const submit = (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    setSuccess('')
-    const values = Object.fromEntries(new FormData(e.currentTarget).entries())
-    update.mutate({
-      stt: {
-        provider: values.stt_provider,
-        model: values.stt_model,
-        language: values.stt_language,
-        base_url: values.stt_base_url,
-        api_key: values.stt_api_key,
-      },
-      tts: {
-        provider: values.tts_provider,
-        model: values.tts_model,
-        voice: values.tts_voice,
-        language: values.tts_language,
-        base_url: values.tts_base_url,
-        api_key: values.tts_api_key,
-      },
-    })
+  if (query.error || !query.data)
+    return (
+      <>
+        <PageHeader
+          title="Voice"
+          description="This configuration applies to Mounir voice mode and to voice messages sent to Mounir through Telegram."
+        />
+        <div className="page-content">
+          <Feedback
+            message={
+              query.error instanceof Error
+                ? query.error.message
+                : 'Voice settings could not be loaded.'
+            }
+          />
+        </div>
+      </>
+    )
+
+  const settings = query.data as VoiceSettings
+  const refreshSettings = async () => {
+    await client.invalidateQueries({ queryKey: keys.voice })
   }
+
+  const submitStt = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSttError('')
+    setSttMessage('')
+    const values = Object.fromEntries(new FormData(event.currentTarget).entries())
+    const provider = selectedSttLocation === 'local' ? 'local_whisper' : 'openai_compatible'
+    try {
+      await sttUpdate.mutateAsync({
+        stt: {
+          provider,
+          model: values.stt_model,
+          language: values.stt_language,
+          base_url: values.stt_base_url,
+          api_key: values.stt_api_key,
+        },
+      })
+      await refreshSettings()
+      setSttMessage('Speech-to-text settings saved.')
+    } catch (error) {
+      setSttError(
+        error instanceof Error ? error.message : 'Could not save speech-to-text settings.',
+      )
+    }
+  }
+
+  const submitTts = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setTtsError('')
+    setTtsMessage('')
+    setMossModelError('')
+    const form = event.currentTarget
+    const values = Object.fromEntries(new FormData(form).entries())
+    const provider =
+      selectedTtsLocation === 'local' ? selectedLocalTtsProvider : selectedCloudTtsProvider
+
+    if (provider === 'moss_onnx' && !mossReady) {
+      if (!mossModelError) {
+        setMossModelError('Enter a supported MOSS model directory before saving.')
+      }
+      return
+    }
+
+    try {
+      await ttsUpdate.mutateAsync({
+        tts: {
+          provider,
+          model: values.tts_model,
+          voice: values.tts_voice,
+          language: values.tts_language,
+          base_url: values.tts_base_url,
+          api_key: values.tts_api_key,
+        },
+      })
+      await refreshSettings()
+      setTtsMessage('Text-to-speech settings saved.')
+    } catch (error) {
+      setTtsError(
+        error instanceof Error ? error.message : 'Could not save text-to-speech settings.',
+      )
+    }
+  }
+
+  const updateMossModel = (value: string) => {
+    setMossModel(value)
+    setMossModelError('')
+    setMossVoices(null)
+  }
+
   return (
     <>
       <PageHeader
         title="Voice"
-        description="Configure speech recognition and voice output across Mounir"
+        description="This configuration applies to Mounir voice mode and to voice messages sent to Mounir through Telegram."
       />
-      <div className="page-content">
-        <form className="stack" onSubmit={submit}>
-          <p className="voice-settings-note">
-            This configuration applies to Mounir voice mode and to voice messages sent to
-            Mounir through Telegram.
-            <br />
-            Telegram uses it only for voice input, while Mounir still replies with text.
-          </p>
-          <div className="settings-grid">
-            <Card title="Speech-to-text" description="Choose how voice messages are transcribed.">
-              <div className="card__body form-grid">
-                <div className="guidance field--full">
-                  Choose Faster Whisper for a supported local model, or connect a hosted or local
-                  service exposing the OpenAI-compatible <code>/audio/transcriptions</code> API.
-                </div>
-                <Field full label="Connection type">
-                  <select
-                    name="stt_provider"
-                    value={sttProvider}
-                    onChange={(e) => setStt(e.target.value)}
-                  >
-                    <option value="local_whisper">Faster Whisper (local)</option>
-                    <option value="openai_compatible">
-                      OpenAI-compatible API (hosted or local)
-                    </option>
-                  </select>
-                </Field>
-                <Field
-                  full
-                  label={remoteStt ? 'Model ID' : 'Model name or path'}
-                  hint={
-                    remoteStt
-                      ? 'The exact transcription model ID accepted by your endpoint.'
-                      : 'Enter the name or full directory path of a model supported by Faster Whisper.'
-                  }
-                >
-                  <input
-                    name="stt_model"
-                    defaultValue={query.data?.stt.model}
-                    placeholder={remoteStt ? 'whisper-1 or provider model ID' : 'Model name or path'}
-                    required
-                  />
-                </Field>
-                <Field
-                  full
-                  label="Language"
-                  hint="Choose Auto-detect for multilingual speech, or force Whisper to use one language."
-                >
-                  <select name="stt_language" defaultValue={query.data?.stt.language || 'auto'}>
-                    <option value="auto">Auto-detect</option>
-                    <option value="en">English</option>
-                    <option value="fr">French</option>
-                    <option value="ar">Arabic</option>
-                  </select>
-                </Field>
-                {remoteStt && (
-                  <>
-                    <Field
-                      full
-                      label="API URL"
-                      hint="An API root or the complete /audio/transcriptions endpoint."
-                    >
-                      <input
-                        type="url"
-                        name="stt_base_url"
-                        defaultValue={query.data?.stt.base_url}
-                        placeholder="https://provider.example/v1"
-                        required
-                      />
-                    </Field>
-                    <Field
-                      full
-                      label="API key"
-                      hint={
-                        query.data?.stt.api_key_configured
-                          ? 'A key is saved. Leave blank to keep it.'
-                          : 'Optional for local or unauthenticated endpoints.'
-                      }
-                    >
-                      <input type="password" name="stt_api_key" />
-                    </Field>
-                  </>
-                )}
-              </div>
-            </Card>
-            <Card title="Text-to-speech" description="Choose how replies are converted to audio.">
-              <div className="card__body form-grid">
-                <div className="guidance field--full">
-                  Connect any hosted or local service exposing the OpenAI-compatible{' '}
-                  <code>/audio/speech</code> API. Piper remains available for fully offline speech.
-                </div>
-                <Field full label="Connection type">
-                  <select
-                    name="tts_provider"
-                    value={ttsProvider}
-                    onChange={(e) => setTts(e.target.value)}
-                  >
-                    <option value="piper">Piper (local)</option>
-                    <option value="openai_compatible">
-                      OpenAI-compatible API (hosted or local)
-                    </option>
-                    <option value="google">Google Cloud Text-to-Speech</option>
-                  </select>
-                </Field>
-                <Field
-                  full
-                  label={googleTts ? 'Voice name' : compatibleTts ? 'Model ID' : 'Voice model path'}
-                  hint={
-                    compatibleTts
-                      ? 'The exact speech model ID accepted by your endpoint.'
-                      : googleTts
-                        ? 'The exact voice name accepted by Google Cloud Text-to-Speech.'
-                        : 'Enter the full file path of a voice model supported by Piper.'
-                  }
-                >
-                  <input
-                    name="tts_model"
-                    defaultValue={query.data?.tts.model}
-                    placeholder={
-                      compatibleTts
-                        ? 'tts-1 or provider model ID'
-                        : googleTts
-                          ? 'Voice name'
-                          : 'Full path to Piper voice model'
-                    }
-                    required
-                  />
-                </Field>
-                {compatibleTts && (
+      <div className="page-content stack">
+        <SectionPicker value={section} onChange={setSection} />
+
+        {section === 'stt' && (
+          <Card>
+            <form className="card__body form-grid" onSubmit={submitStt}>
+              <LocationPicker
+                name="stt_location"
+                value={selectedSttLocation}
+                onChange={setSttLocation}
+              />
+              {selectedSttLocation === 'local' ? (
+                <>
                   <Field
+                    key="local-stt-model"
                     full
-                    label="Voice"
-                    hint="The voice identifier accepted by the selected model."
+                    label="Whisper model"
+                    hint="Enter a Faster Whisper model name or a compatible local model directory."
                   >
                     <input
-                      name="tts_voice"
-                      defaultValue={query.data?.tts.voice}
-                      placeholder="alloy or provider voice ID"
+                      name="stt_model"
+                      defaultValue={
+                        settings.stt.provider === 'local_whisper' ? settings.stt.model : 'small'
+                      }
+                      placeholder="small or full model path"
                       required
                     />
                   </Field>
-                )}
-                {googleTts && (
-                  <Field full label="Language code">
-                    <input name="tts_language" defaultValue={query.data?.tts.language || 'en-US'} />
+                  <Field
+                    key="cloud-stt-model"
+                    full
+                    label="Language"
+                    hint="Choose Auto-detect for multilingual speech, or force one language."
+                  >
+                    <select name="stt_language" defaultValue={settings.stt.language || 'auto'}>
+                      <option value="auto">Auto-detect</option>
+                      <option value="en">English</option>
+                      <option value="fr">French</option>
+                      <option value="ar">Arabic</option>
+                    </select>
                   </Field>
-                )}
-                {(compatibleTts || googleTts) && (
-                  <>
-                    <Field
-                      full
-                      label="API URL"
-                      hint={
-                        compatibleTts
-                          ? 'An API root or the complete /audio/speech endpoint.'
-                          : 'The Google Cloud Text-to-Speech API root.'
+                </>
+              ) : (
+                <>
+                  <Field
+                    full
+                    label="Model ID"
+                    hint="The transcription model ID accepted by the OpenAI-compatible endpoint."
+                  >
+                    <input
+                      name="stt_model"
+                      defaultValue={
+                        settings.stt.provider === 'openai_compatible' ? settings.stt.model : ''
                       }
+                      placeholder="whisper-1 or provider model ID"
+                      required
+                    />
+                  </Field>
+                  <Field
+                    full
+                    label="Language"
+                    hint="Choose Auto-detect for multilingual speech, or force one language."
+                  >
+                    <select name="stt_language" defaultValue={settings.stt.language || 'auto'}>
+                      <option value="auto">Auto-detect</option>
+                      <option value="en">English</option>
+                      <option value="fr">French</option>
+                      <option value="ar">Arabic</option>
+                    </select>
+                  </Field>
+                  <Field
+                    full
+                    label="API URL"
+                    hint="An API root or the complete /audio/transcriptions endpoint."
+                  >
+                    <input
+                      type="url"
+                      name="stt_base_url"
+                      defaultValue={
+                        settings.stt.provider === 'openai_compatible' ? settings.stt.base_url : ''
+                      }
+                      placeholder="https://provider.example/v1"
+                      required
+                    />
+                  </Field>
+                  <Field
+                    full
+                    label="API key"
+                    hint={
+                      settings.stt.provider === 'openai_compatible' &&
+                      settings.stt.api_key_configured
+                        ? 'A key is saved. Leave blank to keep it.'
+                        : 'Optional for local or unauthenticated compatible endpoints.'
+                    }
+                  >
+                    <input type="password" name="stt_api_key" />
+                  </Field>
+                </>
+              )}
+              <div className="field--full">
+                <Feedback
+                  message={sttError || sttMessage}
+                  kind={sttMessage ? 'success' : 'error'}
+                />
+              </div>
+              <div className="form-footer">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  icon={<Save size={14} />}
+                  busy={sttUpdate.isPending}
+                >
+                  Save
+                </Button>
+              </div>
+            </form>
+          </Card>
+        )}
+
+        {section === 'tts' && (
+          <Card>
+            <form className="card__body form-grid" onSubmit={submitTts}>
+              <LocationPicker
+                name="tts_location"
+                value={selectedTtsLocation}
+                onChange={(value) => {
+                  setTtsLocation(value)
+                  setTtsError('')
+                  setTtsMessage('')
+                  setMossModelError('')
+                }}
+              />
+              {selectedTtsLocation === 'local' ? (
+                <>
+                  <Field full label="Local engine">
+                    <select
+                      value={selectedLocalTtsProvider}
+                      onChange={(event) => {
+                        setLocalTtsProvider(event.target.value as LocalTtsProvider)
+                        setTtsError('')
+                        setTtsMessage('')
+                        setMossModelError('')
+                      }}
+                    >
+                      <option value="piper">Piper</option>
+                      <option value="moss_onnx">MOSS TTS Nano ONNX</option>
+                    </select>
+                  </Field>
+                  {selectedLocalTtsProvider === 'piper' ? (
+                    <Field
+                      key="piper-model"
+                      full
+                      label="Piper voice model"
+                      hint="Full path to a Piper .onnx voice model."
                     >
                       <input
-                        type="url"
-                        name="tts_base_url"
-                        defaultValue={query.data?.tts.base_url}
-                        placeholder={
-                          compatibleTts
-                            ? 'https://provider.example/v1'
-                            : 'https://texttospeech.googleapis.com/v1'
-                        }
+                        name="tts_model"
+                        defaultValue={currentTtsProvider === 'piper' ? settings.tts.model : ''}
+                        placeholder="/full/path/to/voice.onnx"
                         required
                       />
                     </Field>
-                    <Field
-                      full
-                      label="API key"
-                      hint={
-                        query.data?.tts.api_key_configured
-                          ? 'A key is saved. Leave blank to keep it.'
-                          : compatibleTts
-                            ? 'Optional for local or unauthenticated endpoints.'
-                            : 'Required by the Google transport.'
+                  ) : (
+                    <>
+                      <Field
+                        key="moss-model"
+                        full
+                        label="MOSS engine directory"
+                        hint="Directory containing the compatible MOSS runtime and ONNX models."
+                        error={mossModelError}
+                      >
+                        <input
+                          name="tts_model"
+                          value={mossModelValue}
+                          onChange={(event) => updateMossModel(event.target.value)}
+                          placeholder="/full/path/to/MOSS-TTS-Nano"
+                          required
+                        />
+                      </Field>
+                      {mossReady && (
+                        <Field
+                          full
+                          label="Voice"
+                          hint={
+                            mossVoices.length
+                              ? `${mossVoices.length} voices discovered from this model package.`
+                              : 'This package exposes no voice catalog; enter its supported voice identifier.'
+                          }
+                        >
+                          {mossVoices.length ? (
+                            <select
+                              name="tts_voice"
+                              value={selectedMossVoice}
+                              onChange={(event) => setMossVoice(event.target.value)}
+                              required
+                            >
+                              {mossVoices.map((voice) => (
+                                <option key={voice.id} value={voice.id}>
+                                  {voice.label === voice.id
+                                    ? voice.id
+                                    : `${voice.id} — ${voice.label}`}
+                                  {voice.group ? ` (${voice.group})` : ''}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              name="tts_voice"
+                              value={mossVoiceValue}
+                              onChange={(event) => setMossVoice(event.target.value)}
+                              placeholder="Voice ID supported by this model"
+                              required
+                            />
+                          )}
+                        </Field>
+                      )}
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Field full label="Cloud provider">
+                    <select
+                      value={selectedCloudTtsProvider}
+                      onChange={(event) =>
+                        setCloudTtsProvider(event.target.value as CloudTtsProvider)
                       }
                     >
-                      <input type="password" name="tts_api_key" />
-                    </Field>
-                  </>
-                )}
+                      <option value="openai_compatible">OpenAI-compatible API</option>
+                      <option value="google">Google Cloud Text-to-Speech</option>
+                    </select>
+                  </Field>
+                  {selectedCloudTtsProvider === 'openai_compatible' ? (
+                    <>
+                      <Field key="compatible-tts-model" full label="Model ID">
+                        <input
+                          name="tts_model"
+                          defaultValue={
+                            currentTtsProvider === 'openai_compatible' ? settings.tts.model : ''
+                          }
+                          placeholder="tts-1 or provider model ID"
+                          required
+                        />
+                      </Field>
+                      <Field
+                        key="compatible-tts-voice"
+                        full
+                        label="Voice"
+                        hint="Voice identifier accepted by the endpoint."
+                      >
+                        <input
+                          name="tts_voice"
+                          defaultValue={
+                            currentTtsProvider === 'openai_compatible' ? settings.tts.voice : ''
+                          }
+                          placeholder="alloy or provider voice ID"
+                          required
+                        />
+                      </Field>
+                    </>
+                  ) : (
+                    <>
+                      <Field key="google-tts-voice" full label="Voice name">
+                        <input
+                          name="tts_model"
+                          defaultValue={currentTtsProvider === 'google' ? settings.tts.model : ''}
+                          placeholder="Google voice name"
+                          required
+                        />
+                      </Field>
+                      <Field full label="Language code">
+                        <input
+                          name="tts_language"
+                          defaultValue={
+                            currentTtsProvider === 'google'
+                              ? settings.tts.language || 'en-US'
+                              : 'en-US'
+                          }
+                          placeholder="en-US"
+                        />
+                      </Field>
+                    </>
+                  )}
+                  <Field key={`${selectedCloudTtsProvider}-api-url`} full label="API URL">
+                    <input
+                      type="url"
+                      name="tts_base_url"
+                      defaultValue={
+                        currentTtsProvider === selectedCloudTtsProvider
+                          ? settings.tts.base_url
+                          : selectedCloudTtsProvider === 'google'
+                            ? 'https://texttospeech.googleapis.com/v1'
+                            : ''
+                      }
+                      placeholder={
+                        selectedCloudTtsProvider === 'google'
+                          ? 'https://texttospeech.googleapis.com/v1'
+                          : 'https://provider.example/v1'
+                      }
+                      required
+                    />
+                  </Field>
+                  <Field
+                    full
+                    label="API key"
+                    hint={
+                      currentTtsProvider === selectedCloudTtsProvider &&
+                      settings.tts.api_key_configured
+                        ? 'A key is saved. Leave blank to keep it.'
+                        : selectedCloudTtsProvider === 'google'
+                          ? 'Required by Google Cloud Text-to-Speech.'
+                          : 'Optional for unauthenticated compatible endpoints.'
+                    }
+                  >
+                    <input type="password" name="tts_api_key" />
+                  </Field>
+                </>
+              )}
+              <div className="field--full">
+                <Feedback
+                  message={ttsError || ttsMessage}
+                  kind={ttsMessage ? 'success' : 'error'}
+                />
               </div>
-            </Card>
-          </div>
-          <Feedback
-            message={update.error instanceof Error ? update.error.message : success}
-            kind={success ? 'success' : 'error'}
-          />
-          <div className="form-footer">
-            <Button variant="primary" icon={<Save size={14} />} busy={update.isPending}>
-              Save voice settings
-            </Button>
-          </div>
-        </form>
+              <div className="form-footer">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  icon={<Save size={14} />}
+                  busy={ttsUpdate.isPending || mossChecking}
+                >
+                  Save
+                </Button>
+              </div>
+            </form>
+          </Card>
+        )}
       </div>
     </>
   )

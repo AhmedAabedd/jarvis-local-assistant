@@ -232,7 +232,7 @@ jobs.
 | Media and System | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
 | Knowledge | Configurable Gemini/OpenAI-compatible profile |
 | Speech to text | Faster Whisper-compatible local models in CTranslate2 format, or provider-neutral OpenAI-compatible transcription APIs |
-| Text to speech | Local Piper, provider-neutral OpenAI-compatible speech APIs, or Google Cloud TTS |
+| Text to speech | Local Piper, local MOSS-TTS-Nano ONNX, provider-neutral OpenAI-compatible speech APIs, or Google Cloud TTS |
 
 An OpenAI-compatible endpoint can be local or remote. Ollama-compatible endpoints,
 LocalAI, vLLM, cloud gateways, and vendor endpoints can work for dynamic agents when
@@ -275,8 +275,9 @@ Supported voice backends:
 - STT: local **Faster Whisper**, which accepts Whisper models in compatible
   **CTranslate2 format**, or any hosted/self-hosted service implementing the
   OpenAI-compatible `POST /audio/transcriptions` contract (including Groq)
-- TTS: local **Piper**, any hosted/self-hosted service implementing the
-  OpenAI-compatible `POST /audio/speech` contract, or native **Google Cloud TTS**
+- TTS: local **Piper**, multilingual **MOSS-TTS-Nano ONNX**, any hosted/self-hosted
+  service implementing the OpenAI-compatible `POST /audio/speech` contract, or
+  native **Google Cloud TTS**
 
 Local STT does not load arbitrary speech or audio model families. It supports only
 models that Faster Whisper can load. A recognized model name uses Faster Whisper's
@@ -532,6 +533,11 @@ python voice_cli.py --wake
 
 Piper requires a local `.onnx` voice model and its matching `.onnx.json` file.
 Configure their path in Agent Studio or through `MOUNIR_PIPER_MODEL`.
+MOSS-TTS-Nano requires the official runtime directory with both ONNX model
+repositories under its `models/` directory; select that directory and a built-in
+voice preset in Agent Studio. Agent Studio discovers voice presets from the
+selected package's manifest, so compatible packages are not limited to a fixed
+application-defined voice list.
 
 ---
 
@@ -679,6 +685,10 @@ The fastest correct mental model is:
    still references the agent.
 11. Secrets may be accepted by configuration endpoints but must never be returned by
     read APIs.
+12. User-supplied models and providers must drive their own discoverable options;
+    never hard-code a catalog copied from one developer installation. When a provider
+    has no discovery standard, accept its identifiers directly and prefer broadly
+    adopted compatibility contracts such as OpenAI-compatible APIs.
 
 When changing the project, preserve those invariants. Prefer adding provider or
 transport adapters over hard-coding one service into the supervisor. A capability

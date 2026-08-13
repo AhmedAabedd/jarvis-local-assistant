@@ -6,17 +6,18 @@ the same class as a standalone compatibility entry point.
 
 from __future__ import annotations
 
-import threading
 import hmac
+import io
 import secrets
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 
 import telebot
 
-from . import config, db, stt, tools, trace
+from . import config, db, stt, tools, trace, tts
 from .agent import Agent
 
 MAX_MESSAGE_CHARS = 4096
@@ -217,6 +218,50 @@ class TelegramBridge:
                 except telebot.apihelper.ApiTelegramException:
                     bot.send_message(chat_id, chunk)
 
+    @staticmethod
+    def _encode_voice(wav_bytes: bytes) -> io.BytesIO:
+        """Convert synthesized WAV audio to Telegram's OGG/Opus voice format."""
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "48k",
+                "-application",
+                "voip",
+                "-f",
+                "ogg",
+                "pipe:1",
+            ],
+            input=wav_bytes,
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            detail = proc.stderr.decode(errors="ignore")[-300:].strip()
+            raise RuntimeError(detail or "could not encode Telegram voice reply")
+        voice = io.BytesIO(proc.stdout)
+        voice.name = "reply.ogg"
+        return voice
+
+    def _send_voice(self, chat_id: int, text: str) -> None:
+        """Synthesize and send a reply as a Telegram voice note."""
+        wav_bytes = tts.synthesize_wav(text)
+        if not wav_bytes:
+            raise RuntimeError("text-to-speech returned no audio")
+        voice = self._encode_voice(wav_bytes)
+        bot = self._ensure_bot()
+        with self._send_lock:
+            bot.send_chat_action(chat_id, "upload_voice")
+            bot.send_voice(chat_id, voice)
+
     def send_notification(self, text: str) -> bool:
         """Send a proactive message to the paired chat, if one exists."""
         chat_id = self._allowed_chat()
@@ -283,8 +328,8 @@ class TelegramBridge:
             raise RuntimeError(detail or "unsupported audio format")
         return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
-    def _answer(self, chat_id: int, text: str) -> None:
-        """Run one authorized Telegram turn and send its text reply."""
+    def _answer(self, chat_id: int, text: str, *, voice_reply: bool = False) -> None:
+        """Run one authorized Telegram turn and send a text or voice reply."""
         with self.turn_lock:
             trace.node("telegram")
             trace.event(f"← {text[:120]}")
@@ -295,13 +340,23 @@ class TelegramBridge:
             typing.start()
             try:
                 with tools.use_confirmation_handler(self._telegram_confirm):
-                    reply = "".join(self.agent.respond(text)).strip()
+                    reply = "".join(
+                        self.agent.respond(text, voice=voice_reply)
+                    ).strip()
             except Exception as exc:
                 reply = f"[error] {exc}"
             finally:
                 done.set()
                 typing.join(timeout=1)
-        self._send(chat_id, reply or "(no reply)")
+        outbound = reply or "(no reply)"
+        if voice_reply:
+            try:
+                self._send_voice(chat_id, outbound)
+            except Exception as exc:
+                trace.kv("telegram voice", f"reply failed, sent text instead: {exc}")
+                self._send(chat_id, outbound)
+        else:
+            self._send(chat_id, outbound)
         trace.event(f"→ {len(reply)} chars")
 
     def _handle_text(self, message) -> None:
@@ -412,7 +467,7 @@ class TelegramBridge:
             bot.reply_to(message, "I couldn't detect any speech in that audio.")
             return
         trace.kv("telegram audio", f"transcribed {len(text)} chars")
-        self._answer(chat_id, text)
+        self._answer(chat_id, text, voice_reply=True)
 
     def _handle_other(self, message) -> None:
         if self._allowed_chat() == message.chat.id:

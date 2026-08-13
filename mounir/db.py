@@ -1407,7 +1407,7 @@ def update_profile(**kwargs) -> dict:
 
 VOICE_PROVIDERS = {
     "stt": {"local_whisper", "openai_compatible"},
-    "tts": {"piper", "openai_compatible", "google"},
+    "tts": {"piper", "moss_onnx", "openai_compatible", "google"},
 }
 
 STT_LANGUAGES = {"auto", "en", "fr", "ar"}
@@ -1418,7 +1418,11 @@ VOICE_PROVIDER_ALIASES = {
         "groq": "openai_compatible",
         "openai": "openai_compatible",
     },
-    "tts": {"local": "piper", "openai": "openai_compatible"},
+    "tts": {
+        "local": "piper",
+        "moss": "moss_onnx",
+        "openai": "openai_compatible",
+    },
 }
 
 
@@ -1501,9 +1505,11 @@ def update_voice_settings(*, stt=None, tts=None) -> dict:
             ).strip()
             if len(voice) > 160:
                 raise ValueError("TTS voice is too long")
-            if provider == "openai_compatible" and not voice:
+            if provider in {"openai_compatible", "moss_onnx"} and not voice:
                 raise ValueError("TTS voice is required for this provider")
-            updates["tts_voice"] = voice if provider == "openai_compatible" else ""
+            updates["tts_voice"] = (
+                voice if provider in {"openai_compatible", "moss_onnx"} else ""
+            )
         api_key = supplied.get("api_key")
         if api_key is not None and str(api_key).strip():
             updates[f"{kind}_api_key"] = str(api_key).strip()
