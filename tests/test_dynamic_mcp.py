@@ -152,6 +152,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             stt_mod, "_transcribe_openai_compatible", return_value=("hello", "en")
         ) as transcribe:
             self.assertEqual(stt_mod.transcribe([0.1]), ("hello", "en"))
+        self.assertEqual(transcribe.call_args.args[1], "en")
         self.assertEqual(transcribe.call_args.args[2]["model"], "whisper-test")
         self.assertEqual(transcribe.call_args.args[2]["api_key"], "speech-key")
 
@@ -162,6 +163,17 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(synthesize.call_args.args[1]["model"], "speech-test")
         self.assertEqual(synthesize.call_args.args[1]["voice"], "voice-test")
         self.assertEqual(synthesize.call_args.args[1]["api_key"], "voice-key")
+
+    def test_voice_configuration_rejects_unsupported_stt_language(self):
+        db.init()
+        with self.assertRaisesRegex(ValueError, "STT language is not supported"):
+            db.update_voice_settings(
+                stt={
+                    "provider": "local_whisper",
+                    "model": "small",
+                    "language": "not-a-language",
+                }
+            )
 
     def test_compatible_voice_endpoints_allow_local_servers_without_api_keys(self):
         db.init()

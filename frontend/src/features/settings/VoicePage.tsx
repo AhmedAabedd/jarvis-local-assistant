@@ -109,9 +109,14 @@ export function VoicePage() {
                 <Field
                   full
                   label="Language"
-                  hint="Use auto for detection, or a language code such as en, fr, or ar."
+                  hint="Choose Auto-detect for multilingual speech, or force Whisper to use one language."
                 >
-                  <input name="stt_language" defaultValue={query.data?.stt.language || 'auto'} />
+                  <select name="stt_language" defaultValue={query.data?.stt.language || 'auto'}>
+                    <option value="auto">Auto-detect</option>
+                    <option value="en">English</option>
+                    <option value="fr">French</option>
+                    <option value="ar">Arabic</option>
+                  </select>
                 </Field>
                 {remoteStt && (
                   <>

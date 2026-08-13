@@ -1410,6 +1410,8 @@ VOICE_PROVIDERS = {
     "tts": {"piper", "openai_compatible", "google"},
 }
 
+STT_LANGUAGES = {"auto", "en", "fr", "ar"}
+
 VOICE_PROVIDER_ALIASES = {
     "stt": {
         "local": "local_whisper",
@@ -1467,8 +1469,12 @@ def update_voice_settings(*, stt=None, tts=None) -> dict:
             raise ValueError(f"{kind.upper()} provider is not supported")
         model = _required(supplied.get("model"), f"{kind.upper()} model")
         language = str(supplied.get("language") or "auto").strip()
-        if len(language) > 32:
-            raise ValueError(f"{kind.upper()} language is too long")
+        if kind == "stt":
+            language = language.lower()
+            if language not in STT_LANGUAGES:
+                raise ValueError("STT language is not supported")
+        elif len(language) > 32:
+            raise ValueError("TTS language is too long")
         base_url = str(supplied.get("base_url") or "").strip()
         remote = provider in {"openai_compatible", "google"}
         if remote:
