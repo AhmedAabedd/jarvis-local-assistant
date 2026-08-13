@@ -130,6 +130,34 @@ def _error_detail(response: requests.Response) -> str:
         return (response.text or response.reason or "request failed").strip()[:800]
 
 
+def _is_retryable_response(response: requests.Response, detail: str = "") -> bool:
+    """Recognize both standard and provider-specific transient failures.
+
+    NVIDIA's hosted NIM gateway reports an unhealthy model deployment as HTTP
+    400 with ``DEGRADED function cannot be invoked``.  Although the status code
+    normally means a bad request, that particular response is infrastructure
+    health state and is safe to retry just like a 5xx response.
+    """
+    if response.status_code == 429 or response.status_code >= 500:
+        return True
+    return (
+        response.status_code == 400
+        and "degraded function cannot be invoked" in detail.lower()
+    )
+
+
+def _endpoint_error(status_code: int, detail: str) -> OllamaError:
+    if "degraded function cannot be invoked" in detail.lower():
+        return OllamaError(
+            "The provider's model deployment is temporarily degraded and could "
+            "not be invoked after retries. Try again shortly or select another "
+            f"model for this agent (HTTP {status_code}: {detail})."
+        )
+    return OllamaError(
+        f"OpenAI-compatible endpoint returned HTTP {status_code}: {detail}"
+    )
+
+
 def _post(
     *,
     base_url: str | None,
@@ -141,6 +169,7 @@ def _post(
     """POST with small, bounded retries for provider throttling/outages."""
     url = _chat_completions_url(base_url)
     response: requests.Response | None = None
+    detail = ""
     for attempt in range(3):
         response = requests.post(
             url,
@@ -149,7 +178,8 @@ def _post(
             stream=stream,
             timeout=timeout,
         )
-        if response.status_code != 429 and response.status_code < 500:
+        detail = _error_detail(response) if response.status_code >= 400 else ""
+        if not _is_retryable_response(response, detail):
             break
         if attempt < 2:
             retry_after = response.headers.get("Retry-After", "")
@@ -161,9 +191,8 @@ def _post(
             time.sleep(delay)
     assert response is not None
     if response.status_code >= 400:
-        detail = _error_detail(response)
         response.close()
-        raise OllamaError(f"OpenAI-compatible endpoint returned HTTP {response.status_code}: {detail}")
+        raise _endpoint_error(response.status_code, detail)
     return response
 
 

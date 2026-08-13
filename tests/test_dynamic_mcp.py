@@ -729,6 +729,79 @@ class DatabaseTests(TemporaryDatabaseTest):
             request.kwargs["headers"]["Authorization"], "Bearer custom-key"
         )
 
+    def test_openai_compatible_adapter_retries_nvidia_degraded_deployment(self):
+        degraded = []
+        for _ in range(2):
+            response = Mock()
+            response.status_code = 400
+            response.headers = {}
+            response.json.return_value = {
+                "detail": (
+                    "Function id 'c4ed50ff-b5c3-409d-ab57-b79c33f5bb39': "
+                    "DEGRADED function cannot be invoked"
+                )
+            }
+            degraded.append(response)
+        ready = Mock()
+        ready.status_code = 200
+        ready.json.return_value = {
+            "choices": [{"message": {"content": "ready", "tool_calls": []}}]
+        }
+
+        with (
+            patch.object(
+                llm_mod.requests, "post", side_effect=[*degraded, ready]
+            ) as post,
+            patch.object(llm_mod.time, "sleep") as sleep,
+        ):
+            result = llm_mod.openai_chat(
+                [{"role": "user", "content": "hello"}],
+                model="nvidia/test-model",
+                provider="NVIDIA",
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key="test-key",
+            )
+
+        self.assertEqual(result["content"], "ready")
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertTrue(all(response.close.called for response in degraded))
+
+    def test_openai_compatible_adapter_explains_persistent_degraded_deployment(self):
+        responses = []
+        for _ in range(3):
+            response = Mock()
+            response.status_code = 400
+            response.headers = {}
+            response.json.return_value = {
+                "error": {
+                    "message": (
+                        "Function id 'provider-function-id': "
+                        "DEGRADED function cannot be invoked"
+                    )
+                }
+            }
+            responses.append(response)
+
+        with (
+            patch.object(llm_mod.requests, "post", side_effect=responses) as post,
+            patch.object(llm_mod.time, "sleep"),
+            self.assertRaisesRegex(
+                llm_mod.OllamaError,
+                "provider's model deployment is temporarily degraded",
+            ),
+        ):
+            llm_mod.openai_chat(
+                [{"role": "user", "content": "hello"}],
+                model="nvidia/test-model",
+                provider="NVIDIA",
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key="test-key",
+            )
+
+        self.assertEqual(post.call_count, 3)
+        self.assertTrue(all(response.close.called for response in responses))
+
     def test_openai_compatible_stream_normalizes_tool_call_deltas(self):
         response = Mock()
         response.status_code = 200
