@@ -362,7 +362,9 @@ Heartbeat Tasks let Mounir watch for several independent changes without waiting
 for a question. Every record controls:
 
 - its name, normal-language task prompt, and enabled state
-- its independent interval, next run, status, and history
+- its independent interval, optional execution limit, remaining runs, next run,
+  status, and history; tasks can run continuously, while completing the final
+  run of a limited task pauses it automatically
 - which specialists Mounir may delegate to
 - which approval-free tools each selected specialist may use
 - which exact duplicate actions should be suppressed

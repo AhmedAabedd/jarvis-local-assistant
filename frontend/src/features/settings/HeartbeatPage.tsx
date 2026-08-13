@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Bell, Clock, History, Plus, Play, Save, Trash2, Users } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
 import type { HeartbeatCapability, HeartbeatSettings, HeartbeatTask } from '../../api/types'
@@ -21,6 +21,10 @@ interface TaskDraft {
   name: string
   enabled: boolean
   interval_minutes: number
+  execution_limit: number
+  remaining_runs: number
+  saved_execution_limit: number
+  saved_remaining_runs: number
   instructions: string
   notify_telegram: boolean
   notify_whatsapp: boolean
@@ -47,6 +51,10 @@ function taskDraft(task: HeartbeatTask): TaskDraft {
     name: task.name,
     enabled: task.enabled,
     interval_minutes: task.interval_minutes,
+    execution_limit: task.execution_limit,
+    remaining_runs: task.remaining_runs,
+    saved_execution_limit: task.execution_limit,
+    saved_remaining_runs: task.remaining_runs,
     instructions: task.instructions,
     notify_telegram: task.notify_telegram,
     notify_whatsapp: task.notify_whatsapp,
@@ -65,6 +73,10 @@ function newTask(): TaskDraft {
     name: '',
     enabled: false,
     interval_minutes: 30,
+    execution_limit: -1,
+    remaining_runs: -1,
+    saved_execution_limit: -1,
+    saved_remaining_runs: -1,
     instructions: '',
     notify_telegram: true,
     notify_whatsapp: false,
@@ -80,6 +92,7 @@ function taskPayload(draft: TaskDraft) {
     name: draft.name,
     enabled: draft.enabled,
     interval_minutes: draft.interval_minutes,
+    execution_limit: draft.execution_limit,
     instructions: draft.instructions,
     notify_telegram: draft.notify_telegram,
     notify_whatsapp: draft.notify_whatsapp,
@@ -111,6 +124,7 @@ export function HeartbeatPage() {
   const [activeTab, setActiveTab] = useState<EditorTab>('setup')
   const [success, setSuccess] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<HeartbeatTask | null>(null)
+  const runLimitInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (!selectedTask) {
@@ -284,6 +298,12 @@ export function HeartbeatPage() {
                         <Clock size={12} /> Every {intervalLabel(task.interval_minutes)}
                       </span>
                       <span>
+                        <History size={12} />{' '}
+                        {task.execution_limit === -1
+                          ? 'Always runs'
+                          : `${task.remaining_runs} run${task.remaining_runs === 1 ? '' : 's'} remaining`}
+                      </span>
+                      <span>
                         <Users size={12} /> {task.selected_agents.length} agent
                         {task.selected_agents.length === 1 ? '' : 's'}
                       </span>
@@ -337,7 +357,7 @@ export function HeartbeatPage() {
                   <Button
                     icon={<Play size={14} />}
                     busy={run.isPending}
-                    disabled={save.isPending}
+                    disabled={save.isPending || draft.remaining_runs === 0}
                     onClick={() => {
                       setSuccess('')
                       run.mutate(draft)
@@ -430,10 +450,66 @@ export function HeartbeatPage() {
                         <option value={1440}>Daily</option>
                       </select>
                     </Field>
+                    <div className="field field--full">
+                      <span className="field__label">Run limit</span>
+                      <div className="heartbeat-run-limit-controls">
+                        <div className="heartbeat-run-limit">
+                          <input
+                            type="checkbox"
+                            aria-label="Run forever"
+                            checked={draft.execution_limit === -1}
+                            onChange={(event) => {
+                              updateDraft(
+                                event.target.checked
+                                  ? { execution_limit: -1, remaining_runs: -1 }
+                                  : draft.saved_execution_limit === -1
+                                    ? { execution_limit: 1, remaining_runs: 1 }
+                                    : {
+                                        execution_limit: draft.saved_execution_limit,
+                                        remaining_runs: draft.saved_remaining_runs,
+                                      },
+                              )
+                              if (!event.target.checked) {
+                                window.requestAnimationFrame(() =>
+                                  runLimitInputRef.current?.focus(),
+                                )
+                              }
+                            }}
+                          />
+                          <span>Run forever</span>
+                        </div>
+                        {draft.execution_limit !== -1 && (
+                          <input
+                            type="number"
+                            ref={runLimitInputRef}
+                            min={1}
+                            max={10000}
+                            step={1}
+                            value={draft.execution_limit}
+                            aria-label="Number of executions"
+                            onChange={(event) => {
+                              const execution_limit = Number(event.target.value)
+                              updateDraft({
+                                execution_limit,
+                                remaining_runs:
+                                  execution_limit === draft.saved_execution_limit
+                                    ? draft.saved_remaining_runs
+                                    : execution_limit,
+                              })
+                            }}
+                          />
+                        )}
+                      </div>
+                      <span className="field__hint">
+                        {draft.execution_limit === -1
+                          ? 'Runs continuously until paused.'
+                          : `Remaining executions: ${draft.remaining_runs}`}
+                      </span>
+                    </div>
                     <Field
                       full
                       label="What should Mounir do?"
-                      hint="Write this like a normal request. You are notified only when something needs attention."
+                      hint="Describe the exact result Mounir should check for or produce, including when it should notify you and what information the alert should contain."
                     >
                       <textarea
                         rows={6}

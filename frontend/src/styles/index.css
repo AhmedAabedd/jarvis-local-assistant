@@ -704,6 +704,35 @@ button {
 .heartbeat-run-list {
   padding: 0;
 }
+.heartbeat-run-limit-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 40px;
+  gap: 10px;
+}
+.heartbeat-run-limit-controls > input[type='number'] {
+  flex: 0 0 120px;
+  width: 120px;
+}
+.heartbeat-run-limit {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  width: fit-content;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+.heartbeat-run-limit input {
+  width: 15px;
+  height: 15px;
+  min-height: 15px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

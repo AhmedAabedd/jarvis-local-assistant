@@ -231,6 +231,8 @@ export interface HeartbeatTask {
   name: string
   enabled: boolean
   interval_minutes: number
+  execution_limit: number
+  remaining_runs: number
   instructions: string
   notify_telegram: boolean
   notify_whatsapp: boolean

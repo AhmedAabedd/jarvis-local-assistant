@@ -620,6 +620,70 @@ class DatabaseTests(TemporaryDatabaseTest):
             "Priority mail",
         )
 
+    def test_heartbeat_task_pauses_after_its_last_execution(self):
+        db.init()
+        task = db.create_heartbeat_task(
+            name="Finite system watch",
+            instructions="Check the system twice.",
+            enabled=True,
+            interval_minutes=15,
+            execution_limit=2,
+            selected_agents=["builtin:system"],
+            selected_tools=[
+                {"agent_key": "builtin:system", "tool_name": "system_status"}
+            ],
+        )
+        self.assertEqual(task["execution_limit"], 2)
+        self.assertEqual(task["remaining_runs"], 2)
+
+        first_run = db.begin_heartbeat_task_run(task["id"], "scheduled")
+        after_first = db.finish_heartbeat_task_run(
+            task["id"], first_run, status="quiet"
+        )
+        self.assertEqual(after_first["remaining_runs"], 1)
+        self.assertTrue(after_first["enabled"])
+        self.assertIsNotNone(after_first["next_run_at"])
+
+        second_run = db.begin_heartbeat_task_run(task["id"], "scheduled")
+        completed = db.finish_heartbeat_task_run(
+            task["id"], second_run, status="error", error="Temporary failure"
+        )
+        self.assertEqual(completed["remaining_runs"], 0)
+        self.assertFalse(completed["enabled"])
+        self.assertIsNone(completed["next_run_at"])
+        with self.assertRaisesRegex(RuntimeError, "no remaining executions"):
+            db.begin_heartbeat_task_run(task["id"], "manual")
+
+        unchanged = db.update_heartbeat_task(task["id"], name="Still completed")
+        self.assertEqual(unchanged["remaining_runs"], 0)
+        reset = db.update_heartbeat_task(task["id"], execution_limit=3)
+        self.assertEqual(reset["remaining_runs"], 3)
+
+    def test_heartbeat_task_can_run_without_an_execution_limit(self):
+        db.init()
+        task = db.create_heartbeat_task(
+            name="Continuous system watch",
+            instructions="Keep checking the system.",
+            enabled=True,
+            interval_minutes=15,
+            selected_agents=["builtin:system"],
+            selected_tools=[
+                {"agent_key": "builtin:system", "tool_name": "system_status"}
+            ],
+        )
+        self.assertEqual(task["execution_limit"], -1)
+        self.assertEqual(task["remaining_runs"], -1)
+
+        for _ in range(2):
+            run_id = db.begin_heartbeat_task_run(task["id"], "scheduled")
+            task = db.finish_heartbeat_task_run(
+                task["id"], run_id, status="quiet"
+            )
+
+        self.assertEqual(task["remaining_runs"], -1)
+        self.assertTrue(task["enabled"])
+        self.assertIsNotNone(task["next_run_at"])
+
     def test_multi_record_migration_runs_once_and_preserves_deletion(self):
         db.init()
         tasks = db.list_heartbeat_tasks()
@@ -2370,6 +2434,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                         "instructions": "Read service state and report changes.",
                         "enabled": True,
                         "interval_minutes": 15,
+                        "execution_limit": 3,
                         "selected_agents": [agent_key],
                         "selected_tools": [
                             {"agent_key": agent_key, "tool_name": "read_state"}
@@ -2379,6 +2444,8 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(created.status_code, 200)
                 task = created.json()
                 self.assertTrue(task["enabled"])
+                self.assertEqual(task["execution_limit"], 3)
+                self.assertEqual(task["remaining_runs"], 3)
                 self.assertEqual(task["selected_agents"], [agent_key])
 
                 listing = await client.get("/api/heartbeat")

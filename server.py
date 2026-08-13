@@ -765,6 +765,7 @@ def _heartbeat_task_fields(req: dict) -> dict:
         "name",
         "enabled",
         "interval_minutes",
+        "execution_limit",
         "instructions",
         "selected_agents",
         "selected_tools",

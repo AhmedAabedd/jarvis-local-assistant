@@ -298,6 +298,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             name TEXT NOT NULL,
             enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
             interval_minutes INTEGER NOT NULL DEFAULT 30,
+            execution_limit INTEGER NOT NULL DEFAULT -1,
+            remaining_runs INTEGER NOT NULL DEFAULT -1,
             instructions TEXT NOT NULL,
             next_run_at TEXT,
             last_run_at TEXT,
@@ -571,6 +573,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "last_error": "TEXT NOT NULL DEFAULT ''",
             "notify_telegram": "INTEGER NOT NULL DEFAULT 1 CHECK (notify_telegram IN (0, 1))",
             "notify_whatsapp": "INTEGER NOT NULL DEFAULT 0 CHECK (notify_whatsapp IN (0, 1))",
+        },
+        "heartbeat_tasks": {
+            "execution_limit": "INTEGER NOT NULL DEFAULT -1",
+            "remaining_runs": "INTEGER NOT NULL DEFAULT -1",
         },
         "heartbeat_runs": {
             "notification_read_at": "TEXT",
@@ -2556,6 +2562,8 @@ def _heartbeat_task_dict(
         "name": row["name"],
         "enabled": bool(row["enabled"]),
         "interval_minutes": int(row["interval_minutes"] or 30),
+        "execution_limit": int(row["execution_limit"]),
+        "remaining_runs": int(row["remaining_runs"]),
         "instructions": row["instructions"],
         "next_run_at": row["next_run_at"],
         "last_run_at": row["last_run_at"],
@@ -2639,6 +2647,7 @@ def create_heartbeat_task(
     instructions: str,
     enabled: bool = False,
     interval_minutes: int = 30,
+    execution_limit: int = -1,
     selected_agents: list[str] | None = None,
     selected_tools: list[dict] | None = None,
     notify_telegram: bool = True,
@@ -2650,6 +2659,7 @@ def create_heartbeat_task(
         instructions=instructions,
         enabled=enabled,
         interval_minutes=interval_minutes,
+        execution_limit=execution_limit,
         selected_agents=selected_agents or [],
         selected_tools=selected_tools or [],
         notify_telegram=notify_telegram,
@@ -2680,10 +2690,31 @@ def _save_heartbeat_task(task_id: int | None, **changes) -> dict | None:
 
         name = str(value("name", "") or "").strip()
         instructions = str(value("instructions", "") or "").strip()
-        enabled = value("enabled", False)
+        enabled = (
+            value("enabled", False)
+            if "enabled" in changes or current is None
+            else bool(current["enabled"])
+        )
         interval = value("interval_minutes", 30)
-        notify_telegram = value("notify_telegram", True)
-        notify_whatsapp = value("notify_whatsapp", False)
+        execution_limit = value("execution_limit", -1)
+        previous_execution_limit = (
+            int(current["execution_limit"]) if current is not None else None
+        )
+        remaining_runs = (
+            int(current["remaining_runs"])
+            if current is not None and execution_limit == previous_execution_limit
+            else execution_limit
+        )
+        notify_telegram = (
+            value("notify_telegram", True)
+            if "notify_telegram" in changes or current is None
+            else bool(current["notify_telegram"])
+        )
+        notify_whatsapp = (
+            value("notify_whatsapp", False)
+            if "notify_whatsapp" in changes or current is None
+            else bool(current["notify_whatsapp"])
+        )
 
         if not name:
             raise ValueError("heartbeat task name is required")
@@ -2699,6 +2730,12 @@ def _save_heartbeat_task(task_id: int | None, **changes) -> dict | None:
             raise ValueError("interval must be a whole number of minutes")
         if not 5 <= interval <= 1440:
             raise ValueError("interval must be between 5 and 1440 minutes")
+        if isinstance(execution_limit, bool) or not isinstance(execution_limit, int):
+            raise ValueError("execution count must be a whole number")
+        if execution_limit != -1 and not 1 <= execution_limit <= 10000:
+            raise ValueError(
+                "execution count must be always run or between 1 and 10000"
+            )
         if not isinstance(notify_telegram, bool) or not isinstance(
             notify_whatsapp, bool
         ):
@@ -2731,6 +2768,10 @@ def _save_heartbeat_task(task_id: int | None, **changes) -> dict | None:
             changes.get("selected_tools", existing_tools),
         )
         if enabled:
+            if remaining_runs == 0:
+                raise ValueError(
+                    "increase the execution count before enabling this completed task"
+                )
             if not agents:
                 raise ValueError("select at least one agent before enabling this task")
             missing = [
@@ -2751,14 +2792,17 @@ def _save_heartbeat_task(task_id: int | None, **changes) -> dict | None:
             cur = conn.execute(
                 """
                 INSERT INTO heartbeat_tasks (
-                    name, enabled, interval_minutes, instructions, next_run_at,
+                    name, enabled, interval_minutes, execution_limit,
+                    remaining_runs, instructions, next_run_at,
                     notify_telegram, notify_whatsapp, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
                     int(enabled),
                     interval,
+                    execution_limit,
+                    remaining_runs,
                     instructions,
                     next_run,
                     int(notify_telegram),
@@ -2772,15 +2816,17 @@ def _save_heartbeat_task(task_id: int | None, **changes) -> dict | None:
             conn.execute(
                 """
                 UPDATE heartbeat_tasks
-                SET name = ?, enabled = ?, interval_minutes = ?, instructions = ?,
-                    next_run_at = ?, notify_telegram = ?, notify_whatsapp = ?,
-                    updated_at = ?
+                SET name = ?, enabled = ?, interval_minutes = ?, execution_limit = ?,
+                    remaining_runs = ?, instructions = ?, next_run_at = ?,
+                    notify_telegram = ?, notify_whatsapp = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     name,
                     int(enabled),
                     interval,
+                    execution_limit,
+                    remaining_runs,
                     instructions,
                     next_run,
                     int(notify_telegram),
@@ -3197,6 +3243,8 @@ def begin_heartbeat_task_run(task_id: int, trigger: str) -> int:
     task = get_heartbeat_task(task_id)
     if task is None:
         raise ValueError("heartbeat task not found")
+    if task["remaining_runs"] == 0:
+        raise RuntimeError("This heartbeat task has no remaining executions.")
     started = _now()
     next_run = (
         datetime.now(timezone.utc)
@@ -3238,22 +3286,31 @@ def finish_heartbeat_task_run(
     message = str(message or "").strip()[:8000]
     error = " ".join(str(error or "").split())[:2000]
     with _connect() as conn:
-        conn.execute(
+        finished_run = conn.execute(
             """
             UPDATE heartbeat_runs
             SET finished_at = ?, status = ?, message = ?, error = ?
-            WHERE id = ? AND heartbeat_task_id = ?
+            WHERE id = ? AND heartbeat_task_id = ? AND status = 'running'
             """,
             (finished, status, message, error, int(run_id), int(task_id)),
-        )
-        conn.execute(
-            """
-            UPDATE heartbeat_tasks
-            SET last_status = ?, last_message = ?, last_error = ?
-            WHERE id = ?
-            """,
-            (status, message, error, int(task_id)),
-        )
+        ).rowcount
+        if finished_run:
+            conn.execute(
+                """
+                UPDATE heartbeat_tasks
+                SET last_status = ?, last_message = ?, last_error = ?,
+                    remaining_runs = CASE
+                        WHEN remaining_runs > 0 THEN remaining_runs - 1
+                        ELSE remaining_runs
+                    END,
+                    enabled = CASE WHEN remaining_runs = 1 THEN 0 ELSE enabled END,
+                    next_run_at = CASE
+                        WHEN remaining_runs = 1 THEN NULL ELSE next_run_at
+                    END
+                WHERE id = ?
+                """,
+                (status, message, error, int(task_id)),
+            )
         conn.execute(
             """
             DELETE FROM heartbeat_runs

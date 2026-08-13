@@ -412,7 +412,11 @@ export function VoicePage() {
               />
               {selectedTtsLocation === 'local' ? (
                 <>
-                  <Field full label="Local engine">
+                  <Field
+                    full
+                    label="Local engine"
+                    hint="Choose the local text-to-speech runtime installed on this computer."
+                  >
                     <select
                       value={selectedLocalTtsProvider}
                       onChange={(event) => {
