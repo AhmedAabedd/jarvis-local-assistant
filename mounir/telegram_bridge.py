@@ -9,13 +9,14 @@ from __future__ import annotations
 import threading
 import hmac
 import secrets
+import subprocess
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 
 import telebot
 
-from . import db, tools, trace
+from . import config, db, stt, tools, trace
 from .agent import Agent
 
 MAX_MESSAGE_CHARS = 4096
@@ -99,9 +100,12 @@ class TelegramBridge:
         bot.exception_handler = _PollingExceptionHandler(self)
         bot.register_message_handler(self._handle_text, content_types=["text"])
         bot.register_message_handler(
+            self._handle_audio, content_types=["voice", "audio"]
+        )
+        bot.register_message_handler(
             self._handle_other,
             content_types=[
-                "photo", "voice", "audio", "video", "document", "sticker", "location"
+                "photo", "video", "document", "sticker", "location"
             ],
         )
         self.bot = bot
@@ -250,6 +254,56 @@ class TelegramBridge:
                 pass
             done.wait(4)
 
+    @staticmethod
+    def _decode_audio(raw: bytes):
+        """Convert a Telegram audio payload to Whisper's 16 kHz mono float array."""
+        import numpy as np
+
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                "pipe:0",
+                "-f",
+                "f32le",
+                "-ar",
+                str(config.SAMPLE_RATE),
+                "-ac",
+                "1",
+                "pipe:1",
+            ],
+            input=raw,
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            detail = proc.stderr.decode(errors="ignore")[-300:].strip()
+            raise RuntimeError(detail or "unsupported audio format")
+        return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+
+    def _answer(self, chat_id: int, text: str) -> None:
+        """Run one authorized Telegram turn and send its text reply."""
+        with self.turn_lock:
+            trace.node("telegram")
+            trace.event(f"← {text[:120]}")
+            done = threading.Event()
+            typing = threading.Thread(
+                target=self._keep_typing, args=(chat_id, done), daemon=True
+            )
+            typing.start()
+            try:
+                with tools.use_confirmation_handler(self._telegram_confirm):
+                    reply = "".join(self.agent.respond(text)).strip()
+            except Exception as exc:
+                reply = f"[error] {exc}"
+            finally:
+                done.set()
+                typing.join(timeout=1)
+        self._send(chat_id, reply or "(no reply)")
+        trace.event(f"→ {len(reply)} chars")
+
     def _handle_text(self, message) -> None:
         chat_id = message.chat.id
         allowed = self._allowed_chat()
@@ -315,28 +369,57 @@ class TelegramBridge:
             self._send(chat_id, "Conversation cleared.")
             return
 
-        with self.turn_lock:
-            trace.node("telegram")
-            trace.event(f"← {text[:120]}")
-            done = threading.Event()
-            typing = threading.Thread(
-                target=self._keep_typing, args=(chat_id, done), daemon=True
+        self._answer(chat_id, text)
+
+    def _handle_audio(self, message) -> None:
+        """Download and transcribe an authorized Telegram voice/audio message."""
+        chat_id = message.chat.id
+        allowed = self._allowed_chat()
+        bot = self._ensure_bot()
+        if allowed is None:
+            bot.reply_to(
+                message,
+                "This bot is not paired yet. Open Telegram settings in Agent Studio "
+                "and generate a pairing code.",
             )
-            typing.start()
-            try:
-                with tools.use_confirmation_handler(self._telegram_confirm):
-                    reply = "".join(self.agent.respond(text)).strip()
-            except Exception as exc:
-                reply = f"[error] {exc}"
-            finally:
-                done.set()
-                typing.join(timeout=1)
-        self._send(chat_id, reply or "(no reply)")
-        trace.event(f"→ {len(reply)} chars")
+            return
+        if chat_id != allowed:
+            bot.reply_to(message, "Sorry, this is a private assistant.")
+            return
+
+        media = getattr(message, "voice", None) or getattr(message, "audio", None)
+        file_id = getattr(media, "file_id", "")
+        if not file_id:
+            bot.reply_to(message, "I could not read that audio attachment.")
+            return
+
+        try:
+            bot.send_chat_action(chat_id, "typing")
+            file_info = bot.get_file(file_id)
+            raw = bot.download_file(file_info.file_path)
+            audio = self._decode_audio(raw)
+            text, _language = stt.transcribe(audio)
+        except Exception as exc:
+            trace.kv("telegram audio", f"transcription failed: {exc}")
+            bot.reply_to(
+                message,
+                "I couldn't transcribe that audio. Check Agent Studio → Voice "
+                "and make sure its speech-to-text provider is available.",
+            )
+            return
+
+        if not text:
+            bot.reply_to(message, "I couldn't detect any speech in that audio.")
+            return
+        trace.kv("telegram audio", f"transcribed {len(text)} chars")
+        self._answer(chat_id, text)
 
     def _handle_other(self, message) -> None:
         if self._allowed_chat() == message.chat.id:
-            self._ensure_bot().reply_to(message, "I can only read text here for now.")
+            self._ensure_bot().reply_to(
+                message,
+                "I can currently read text, voice notes, and audio files here.",
+            )
 
     def _poll(self) -> None:
         bot = self._ensure_bot()

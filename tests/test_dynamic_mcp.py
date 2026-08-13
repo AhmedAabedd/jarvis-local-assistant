@@ -3311,6 +3311,79 @@ class InterfaceRoutingTests(unittest.TestCase):
         )
         self.assertFalse(unpaired.send_notification("Heartbeat update"))
 
+    def test_telegram_voice_message_uses_configured_stt(self):
+        db.init()
+
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+                self.handlers = []
+
+            def register_message_handler(self, handler, **filters):
+                self.handlers.append((handler, filters))
+
+            def get_file(self, file_id):
+                self.requested_file_id = file_id
+                return SimpleNamespace(file_path="voice/note.oga")
+
+            def download_file(self, file_path):
+                self.downloaded_path = file_path
+                return b"telegram audio"
+
+            def send_message(self, chat_id, text, **kwargs):
+                self.sent.append((chat_id, text, kwargs))
+
+            def reply_to(self, message, text):
+                self.sent.append((message.chat.id, text, {}))
+
+            def send_chat_action(self, *_args, **_kwargs):
+                return None
+
+        class FakeAgent:
+            def __init__(self):
+                self.conversation = Conversation(system_prompt="test")
+                self.requests = []
+
+            def respond(self, text):
+                self.requests.append(text)
+                yield "Voice-note reply"
+
+        fake_bot = FakeBot()
+        fake_agent = FakeAgent()
+        bridge = TelegramBridge(
+            agent=fake_agent,
+            token="123:abc",
+            chat_id="42",
+            bot_factory=lambda _token: fake_bot,
+        )
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=42),
+            voice=SimpleNamespace(file_id="voice-file-id"),
+            audio=None,
+        )
+
+        with (
+            patch.object(bridge, "_decode_audio", return_value=[0.1, -0.1]) as decode,
+            patch(
+                "mounir.telegram_bridge.stt.transcribe",
+                return_value=("hello", "en"),
+            ) as transcribe,
+        ):
+            bridge._handle_audio(message)
+
+        self.assertEqual(fake_bot.requested_file_id, "voice-file-id")
+        self.assertEqual(fake_bot.downloaded_path, "voice/note.oga")
+        self.assertTrue(
+            any(
+                filters.get("content_types") == ["voice", "audio"]
+                for _handler, filters in fake_bot.handlers
+            )
+        )
+        decode.assert_called_once_with(b"telegram audio")
+        transcribe.assert_called_once_with([0.1, -0.1])
+        self.assertEqual(fake_agent.requests, ["hello"])
+        self.assertEqual(fake_bot.sent[-1][1], "Voice-note reply")
+
     def test_telegram_stops_polling_when_token_is_rejected(self):
         class UnauthorizedError(Exception):
             error_code = 401

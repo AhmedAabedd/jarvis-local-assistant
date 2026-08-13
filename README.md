@@ -231,7 +231,7 @@ jobs.
 | Dynamic MCP specialists | OpenAI-compatible chat-completions endpoints with tool calling |
 | Media and System | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
 | Knowledge | Configurable Gemini/OpenAI-compatible profile |
-| Speech to text | Local Faster Whisper or provider-neutral OpenAI-compatible transcription APIs |
+| Speech to text | Faster Whisper-compatible local models in CTranslate2 format, or provider-neutral OpenAI-compatible transcription APIs |
 | Text to speech | Local Piper, provider-neutral OpenAI-compatible speech APIs, or Google Cloud TTS |
 
 An OpenAI-compatible endpoint can be local or remote. Ollama-compatible endpoints,
@@ -272,10 +272,18 @@ entry point supports push-to-talk and hands-free wake word operation.
 
 Supported voice backends:
 
-- STT: local **Faster Whisper**, or any hosted/self-hosted service implementing
-  the OpenAI-compatible `POST /audio/transcriptions` contract (including Groq)
+- STT: local **Faster Whisper**, which accepts Whisper models in compatible
+  **CTranslate2 format**, or any hosted/self-hosted service implementing the
+  OpenAI-compatible `POST /audio/transcriptions` contract (including Groq)
 - TTS: local **Piper**, any hosted/self-hosted service implementing the
   OpenAI-compatible `POST /audio/speech` contract, or native **Google Cloud TTS**
+
+Local STT does not load arbitrary speech or audio model families. It supports only
+models that Faster Whisper can load. A recognized model name uses Faster Whisper's
+standard model download and cache behavior. A model stored elsewhere must be provided
+as a full directory path and must already be converted to the compatible CTranslate2
+format. Other local STT engines can be connected only when they expose the supported
+OpenAI-compatible transcription API.
 
 Voice configuration—including model, voice, language, endpoint, and credential—is
 managed from **Agent Studio → Voice**. Voice-originated turns also receive an explicit

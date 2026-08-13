@@ -59,15 +59,24 @@ export function VoicePage() {
   }
   return (
     <>
-      <PageHeader title="Voice" description="Configure speech recognition and voice output" />
+      <PageHeader
+        title="Voice"
+        description="Configure speech recognition and voice output across Mounir"
+      />
       <div className="page-content">
         <form className="stack" onSubmit={submit}>
+          <p className="voice-settings-note">
+            This configuration applies to Mounir voice mode and to voice messages sent to
+            Mounir through Telegram.
+            <br />
+            Telegram uses it only for voice input, while Mounir still replies with text.
+          </p>
           <div className="settings-grid">
             <Card title="Speech-to-text" description="Choose how voice messages are transcribed.">
               <div className="card__body form-grid">
                 <div className="guidance field--full">
-                  Connect any hosted or local service exposing the OpenAI-compatible{' '}
-                  <code>/audio/transcriptions</code> API, or run Whisper fully offline.
+                  Choose Faster Whisper for a supported local model, or connect a hosted or local
+                  service exposing the OpenAI-compatible <code>/audio/transcriptions</code> API.
                 </div>
                 <Field full label="Connection type">
                   <select
@@ -87,13 +96,13 @@ export function VoicePage() {
                   hint={
                     remoteStt
                       ? 'The exact transcription model ID accepted by your endpoint.'
-                      : 'A Faster Whisper size such as small, or a local model path.'
+                      : 'Enter the name or full directory path of a model supported by Faster Whisper.'
                   }
                 >
                   <input
                     name="stt_model"
                     defaultValue={query.data?.stt.model}
-                    placeholder={remoteStt ? 'whisper-1 or provider model ID' : 'small'}
+                    placeholder={remoteStt ? 'whisper-1 or provider model ID' : 'Model name or path'}
                     required
                   />
                 </Field>
@@ -159,13 +168,21 @@ export function VoicePage() {
                   hint={
                     compatibleTts
                       ? 'The exact speech model ID accepted by your endpoint.'
-                      : undefined
+                      : googleTts
+                        ? 'The exact voice name accepted by Google Cloud Text-to-Speech.'
+                        : 'Enter the full file path of a voice model supported by Piper.'
                   }
                 >
                   <input
                     name="tts_model"
                     defaultValue={query.data?.tts.model}
-                    placeholder={compatibleTts ? 'tts-1 or provider model ID' : undefined}
+                    placeholder={
+                      compatibleTts
+                        ? 'tts-1 or provider model ID'
+                        : googleTts
+                          ? 'Voice name'
+                          : 'Full path to Piper voice model'
+                    }
                     required
                   />
                 </Field>

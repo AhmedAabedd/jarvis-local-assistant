@@ -1266,6 +1266,12 @@ select:disabled {
   font-size: 12px;
   line-height: 1.55;
 }
+.voice-settings-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
