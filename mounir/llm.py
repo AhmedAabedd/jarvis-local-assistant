@@ -94,7 +94,7 @@ def _payload(
     model: str,
     tools: list | None,
     stream: bool,
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
 ) -> dict:
     selected_model = str(model or "").strip()
@@ -104,9 +104,10 @@ def _payload(
         "model": selected_model,
         "messages": _compatible_messages(messages),
         "stream": stream,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if temperature is not None:
+        body["temperature"] = temperature
     if tools:
         body["tools"] = tools
     return body
@@ -204,7 +205,7 @@ def openai_chat(
     base_url,
     api_key="",
     provider=None,
-    temperature=0.2,
+    temperature: float | None = None,
     max_tokens=8192,
 ) -> dict:
     """Call any OpenAI-compatible chat-completions endpoint."""
@@ -272,7 +273,7 @@ def chat_stream(
                 model=model,
                 tools=tools,
                 stream=True,
-                temperature=0.2,
+                temperature=None,
                 max_tokens=8192,
             ),
             stream=True,

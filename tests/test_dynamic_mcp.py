@@ -725,9 +725,28 @@ class DatabaseTests(TemporaryDatabaseTest):
         request = post.call_args
         self.assertEqual(request.args[0], "https://models.example.test/v1/chat/completions")
         self.assertEqual(request.kwargs["json"]["model"], "custom-test")
+        self.assertNotIn("temperature", request.kwargs["json"])
         self.assertEqual(
             request.kwargs["headers"]["Authorization"], "Bearer custom-key"
         )
+
+    def test_openai_compatible_adapter_sends_explicit_temperature(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [{"message": {"content": "ready", "tool_calls": []}}]
+        }
+
+        with patch.object(llm_mod.requests, "post", return_value=response) as post:
+            llm_mod.openai_chat(
+                [{"role": "user", "content": "hello"}],
+                model="custom-test",
+                provider="Custom",
+                base_url="https://models.example.test/v1",
+                temperature=0.7,
+            )
+
+        self.assertEqual(post.call_args.kwargs["json"]["temperature"], 0.7)
 
     def test_openai_compatible_adapter_retries_nvidia_degraded_deployment(self):
         degraded = []
@@ -815,7 +834,9 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
 
         calls = []
-        with patch.object(llm_mod.requests, "post", return_value=response):
+        with patch.object(
+            llm_mod.requests, "post", return_value=response
+        ) as post:
             text = "".join(
                 llm_mod.chat_stream(
                     [{"role": "user", "content": "read notes"}],
@@ -827,6 +848,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             )
 
         self.assertEqual(text, "working ")
+        self.assertNotIn("temperature", post.call_args.kwargs["json"])
         self.assertEqual(calls[0]["function"]["name"], "read_file")
         self.assertEqual(calls[0]["function"]["arguments"], {"path": "notes.md"})
 
