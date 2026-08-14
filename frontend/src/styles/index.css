@@ -832,6 +832,114 @@ button {
   accent-color: var(--accent);
   cursor: pointer;
 }
+.telegram-reply-picker {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.telegram-reply-picker legend {
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+}
+.telegram-reply-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.telegram-reply-picker label:has(input:checked) {
+  color: var(--text);
+}
+.telegram-reply-picker input[type='radio'] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.telegram-reply-picker:disabled label,
+.telegram-reply-picker:disabled input {
+  cursor: wait;
+  opacity: 0.65;
+}
+.telegram-command-guide {
+  padding-top: 18px;
+  border-top: 1px solid var(--line-soft);
+}
+.telegram-command-guide__header {
+  padding-bottom: 10px;
+}
+.telegram-command-guide__header strong,
+.telegram-command-guide__header small {
+  display: block;
+}
+.telegram-command-guide__header strong {
+  font-size: 12px;
+}
+.telegram-command-guide__header small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.telegram-command-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 24px;
+}
+.telegram-command-row {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.telegram-command-row:last-child {
+  grid-column: 1 / -1;
+  border-bottom: 0;
+}
+.telegram-command-row code {
+  width: fit-content;
+  padding: 4px 7px;
+  border: 1px solid rgb(89 201 142 / 22%);
+  border-radius: 6px;
+  color: var(--accent);
+  background: rgb(89 201 142 / 7%);
+  font-size: 11px;
+  font-weight: 700;
+}
+.telegram-command-row span,
+.telegram-command-row strong,
+.telegram-command-row small {
+  display: block;
+  min-width: 0;
+}
+.telegram-command-row strong {
+  font-size: 11px;
+  font-weight: 650;
+}
+.telegram-command-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+@media (max-width: 700px) {
+  .telegram-command-list {
+    grid-template-columns: 1fr;
+  }
+  .telegram-command-row:last-child {
+    grid-column: auto;
+  }
+}
 .field {
   min-width: 0;
   display: flex;

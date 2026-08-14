@@ -418,6 +418,7 @@ class DatabaseTests(TemporaryDatabaseTest):
 
     def test_telegram_token_replacement_and_pairing_are_persisted(self):
         db.init()
+        self.assertEqual(db.get_telegram_settings()["reply_mode"], "text")
         with self.assertRaisesRegex(ValueError, "bot token"):
             db.update_telegram_settings(enabled=True)
 
@@ -427,6 +428,12 @@ class DatabaseTests(TemporaryDatabaseTest):
         paired = db.pair_telegram_chat(42, "Mounir Owner", "owner")
         self.assertTrue(paired["paired"])
         self.assertEqual(paired["chat_name"], "Mounir Owner")
+
+        voice_mode = db.update_telegram_settings(reply_mode="voice")
+        self.assertEqual(voice_mode["reply_mode"], "voice")
+        self.assertEqual(db.get_telegram_settings()["reply_mode"], "voice")
+        with self.assertRaisesRegex(ValueError, "text or voice"):
+            db.update_telegram_settings(reply_mode="automatic")
 
         replaced = db.update_telegram_settings(bot_token="456:second")
         self.assertFalse(replaced["paired"])
@@ -3335,6 +3342,37 @@ class AdminApiTests(TemporaryDatabaseTest):
 
         asyncio.run(exercise_api())
 
+    def test_telegram_reply_mode_api_updates_the_running_bridge(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                voice_mode = await client.put(
+                    "/api/telegram", json={"reply_mode": "voice"}
+                )
+                self.assertEqual(voice_mode.status_code, 200)
+                self.assertEqual(voice_mode.json()["reply_mode"], "voice")
+                self.assertEqual(web_server.telegram_service.reply_mode, "voice")
+
+                invalid = await client.put(
+                    "/api/telegram", json={"reply_mode": "automatic"}
+                )
+                self.assertEqual(invalid.status_code, 400)
+
+                text_mode = await client.put(
+                    "/api/telegram", json={"reply_mode": "text"}
+                )
+                self.assertEqual(text_mode.json()["reply_mode"], "text")
+                self.assertEqual(web_server.telegram_service.reply_mode, "text")
+
+        asyncio.run(exercise_api())
+
 
 class InterfaceRoutingTests(unittest.TestCase):
     def test_server_lifespan_owns_telegram_bridge(self):
@@ -3533,7 +3571,6 @@ class InterfaceRoutingTests(unittest.TestCase):
         class FakeBot:
             def __init__(self):
                 self.sent = []
-                self.sent_voice = []
                 self.handlers = []
 
             def register_message_handler(self, handler, **filters):
@@ -3550,9 +3587,6 @@ class InterfaceRoutingTests(unittest.TestCase):
             def send_message(self, chat_id, text, **kwargs):
                 self.sent.append((chat_id, text, kwargs))
 
-            def send_voice(self, chat_id, voice, **kwargs):
-                self.sent_voice.append((chat_id, voice.read(), kwargs))
-
             def reply_to(self, message, text):
                 self.sent.append((message.chat.id, text, {}))
 
@@ -3563,11 +3597,9 @@ class InterfaceRoutingTests(unittest.TestCase):
             def __init__(self):
                 self.conversation = Conversation(system_prompt="test")
                 self.requests = []
-                self.voice_requests = []
 
-            def respond(self, text, *, voice=False):
+            def respond(self, text):
                 self.requests.append(text)
-                self.voice_requests.append(voice)
                 yield "Voice-note reply"
 
         fake_bot = FakeBot()
@@ -3576,6 +3608,7 @@ class InterfaceRoutingTests(unittest.TestCase):
             agent=fake_agent,
             token="123:abc",
             chat_id="42",
+            reply_mode="text",
             bot_factory=lambda _token: fake_bot,
         )
         message = SimpleNamespace(
@@ -3590,13 +3623,6 @@ class InterfaceRoutingTests(unittest.TestCase):
                 "mounir.telegram_bridge.stt.transcribe",
                 return_value=("hello", "en"),
             ) as transcribe,
-            patch(
-                "mounir.telegram_bridge.tts.synthesize_wav",
-                return_value=b"wave reply",
-            ) as synthesize,
-            patch.object(
-                bridge, "_encode_voice", return_value=io.BytesIO(b"opus reply")
-            ) as encode,
         ):
             bridge._handle_audio(message)
 
@@ -3611,11 +3637,147 @@ class InterfaceRoutingTests(unittest.TestCase):
         decode.assert_called_once_with(b"telegram audio")
         transcribe.assert_called_once_with([0.1, -0.1])
         self.assertEqual(fake_agent.requests, ["hello"])
-        self.assertEqual(fake_agent.voice_requests, [True])
-        synthesize.assert_called_once_with("Voice-note reply")
-        encode.assert_called_once_with(b"wave reply")
-        self.assertEqual(fake_bot.sent_voice, [(42, b"opus reply", {})])
-        self.assertEqual(fake_bot.sent, [])
+        self.assertEqual(fake_bot.sent[-1][1], "Voice-note reply")
+
+    def test_telegram_commands_persist_reply_mode_and_control_typed_replies(self):
+        db.init()
+        db.update_telegram_settings(reply_mode="text")
+
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+                self.sent_voice = []
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def send_message(self, chat_id, text, **kwargs):
+                self.sent.append((chat_id, text, kwargs))
+
+            def send_voice(self, chat_id, voice, **kwargs):
+                self.sent_voice.append((chat_id, voice.read(), kwargs))
+
+            def send_chat_action(self, *_args, **_kwargs):
+                return None
+
+        class FakeAgent:
+            def __init__(self):
+                self.conversation = Conversation(system_prompt="test")
+                self.requests = []
+
+            def respond(self, text, *, voice=False):
+                self.requests.append((text, voice))
+                yield "Spoken reply"
+
+        fake_bot = FakeBot()
+        fake_agent = FakeAgent()
+        bridge = TelegramBridge(
+            agent=fake_agent,
+            token="123:abc",
+            chat_id="42",
+            reply_mode="text",
+            bot_factory=lambda _token: fake_bot,
+        )
+
+        with (
+            patch("mounir.telegram_bridge.tts.synthesize_wav", return_value=b"wav") as synthesize,
+            patch.object(bridge, "_encode_voice", return_value=io.BytesIO(b"opus")),
+        ):
+            bridge._handle_text(
+                SimpleNamespace(chat=SimpleNamespace(id=42), text="/vocal")
+            )
+            bridge._handle_text(
+                SimpleNamespace(chat=SimpleNamespace(id=42), text="Typed request")
+            )
+            bridge._handle_text(
+                SimpleNamespace(chat=SimpleNamespace(id=42), text="/status")
+            )
+
+        self.assertEqual(bridge.reply_mode, "voice")
+        self.assertEqual(db.get_telegram_settings()["reply_mode"], "voice")
+        self.assertEqual(fake_agent.requests, [("Typed request", True)])
+        synthesize.assert_called_once_with("Spoken reply")
+        self.assertEqual(fake_bot.sent_voice, [(42, b"opus", {})])
+        self.assertIn("Voice replies enabled", fake_bot.sent[0][1])
+        self.assertIn("Reply mode: Voice", fake_bot.sent[-1][1])
+
+        bridge._handle_text(SimpleNamespace(chat=SimpleNamespace(id=42), text="/text"))
+        self.assertEqual(bridge.reply_mode, "text")
+        self.assertEqual(db.get_telegram_settings()["reply_mode"], "text")
+
+    def test_telegram_voice_reply_falls_back_to_text_when_tts_fails(self):
+        db.init()
+
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def send_message(self, chat_id, text, **kwargs):
+                self.sent.append((chat_id, text, kwargs))
+
+            def send_chat_action(self, *_args, **_kwargs):
+                return None
+
+        class FakeAgent:
+            conversation = Conversation(system_prompt="test")
+
+            @staticmethod
+            def respond(_text, *, voice=False):
+                self.assertTrue(voice)
+                yield "Readable fallback"
+
+        fake_bot = FakeBot()
+        bridge = TelegramBridge(
+            agent=FakeAgent(),
+            token="123:abc",
+            chat_id="42",
+            reply_mode="voice",
+            bot_factory=lambda _token: fake_bot,
+        )
+        with patch(
+            "mounir.telegram_bridge.tts.synthesize_wav",
+            side_effect=RuntimeError("TTS offline"),
+        ):
+            bridge._answer(42, "Hello")
+
+        self.assertEqual(fake_bot.sent[-1][1], "Readable fallback")
+
+    def test_telegram_registers_its_command_menu_when_polling_connects(self):
+        class FakeBot:
+            def __init__(self):
+                self.commands = []
+                self.polling_started = False
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def get_me(self):
+                return SimpleNamespace(username="mounir_bot")
+
+            def set_my_commands(self, commands):
+                self.commands = commands
+
+            def infinity_polling(self, **_kwargs):
+                self.polling_started = True
+
+        fake_bot = FakeBot()
+        bridge = TelegramBridge(
+            token="123:abc",
+            chat_id="42",
+            reply_mode="text",
+            bot_factory=lambda _token: fake_bot,
+        )
+
+        bridge._poll()
+
+        self.assertTrue(fake_bot.polling_started)
+        self.assertEqual(
+            [command.command for command in fake_bot.commands],
+            ["vocal", "text", "status", "reset", "help"],
+        )
 
     def test_telegram_stops_polling_when_token_is_rejected(self):
         class UnauthorizedError(Exception):

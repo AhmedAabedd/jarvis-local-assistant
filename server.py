@@ -213,6 +213,7 @@ telegram_service = TelegramBridge(
     turn_lock=_agent_lock,
     token=_telegram_saved["bot_token"],
     chat_id=_telegram_saved["chat_id"],
+    reply_mode=_telegram_saved["reply_mode"],
     on_paired=_telegram_paired,
     on_status=_telegram_status,
 )
@@ -253,6 +254,7 @@ def _apply_telegram_settings() -> dict:
     started = telegram_service.reconfigure(
         token=saved["bot_token"],
         chat_id=saved["chat_id"],
+        reply_mode=saved["reply_mode"],
         start=bool(saved["enabled"] and saved["bot_token"]),
     )
     if saved["enabled"] and saved["bot_token"] and not started:
@@ -542,10 +544,13 @@ async def get_telegram_settings():
 
 @app.put("/api/telegram")
 async def update_telegram_settings(req: dict):
-    allowed = {"enabled", "bot_token", "clear_token"}
+    allowed = {"enabled", "bot_token", "reply_mode", "clear_token"}
     fields = {key: value for key, value in req.items() if key in allowed}
     try:
-        db.update_telegram_settings(**fields)
+        saved = db.update_telegram_settings(**fields)
+        if set(fields) == {"reply_mode"}:
+            telegram_service.set_reply_mode(saved["reply_mode"])
+            return _telegram_public_state()
         return await asyncio.to_thread(_apply_telegram_settings)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

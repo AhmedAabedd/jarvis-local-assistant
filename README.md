@@ -310,6 +310,12 @@ the form. Tokens are never returned by the admin API. Invalid or revoked tokens 
 polling cleanly and show an actionable error instead of producing an endless retry
 traceback.
 
+Telegram replies default to text. The saved reply mode can be changed from Agent
+Studio or with `/vocal` and `/text`; it applies independently of whether the request
+was typed or recorded. `/status`, `/reset`, and `/help` are also registered in
+Telegram's command menu. Voice replies use the configured text-to-speech provider
+and fall back to text if speech generation is unavailable.
+
 Web and Telegram maintain **separate conversation histories**. Tool execution is
 serialized across both channels so simultaneous requests cannot race while acting
 on shared tools, accounts, services, or devices. Confirmations return to their

@@ -380,6 +380,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             chat_name TEXT NOT NULL DEFAULT '',
             chat_username TEXT NOT NULL DEFAULT '',
             bot_username TEXT NOT NULL DEFAULT '',
+            reply_mode TEXT NOT NULL DEFAULT 'text'
+                CHECK (reply_mode IN ('text', 'voice')),
             connection_status TEXT NOT NULL DEFAULT 'disabled',
             last_error TEXT NOT NULL DEFAULT '',
             last_tested_at TEXT,
@@ -585,6 +587,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         },
         "voice_settings": {
             "tts_voice": "TEXT NOT NULL DEFAULT ''",
+        },
+        "telegram_settings": {
+            "reply_mode": "TEXT NOT NULL DEFAULT 'text' CHECK (reply_mode IN ('text', 'voice'))",
         },
     }
     added_columns: set[tuple[str, str]] = set()
@@ -1557,6 +1562,7 @@ def get_telegram_settings(*, include_secret: bool = False) -> dict:
             "chat_name": "",
             "chat_username": "",
             "bot_username": "",
+            "reply_mode": "text",
             "connection_status": "disabled",
             "last_error": "",
             "last_tested_at": None,
@@ -1577,6 +1583,7 @@ def update_telegram_settings(
     *,
     enabled: bool | None = None,
     bot_token: str | None = None,
+    reply_mode: str | None = None,
     clear_token: bool = False,
 ) -> dict:
     if enabled is not None and not isinstance(enabled, bool):
@@ -1587,6 +1594,10 @@ def update_telegram_settings(
             raise ValueError("bot token is required")
         if len(bot_token) > 512:
             raise ValueError("bot token is too long")
+    if reply_mode is not None:
+        reply_mode = str(reply_mode or "").strip().lower()
+        if reply_mode not in {"text", "voice"}:
+            raise ValueError("Telegram reply mode must be text or voice")
     current = get_telegram_settings(include_secret=True)
     fields: dict[str, object] = {}
     token_changed = bot_token is not None and bot_token != current["bot_token"]
@@ -1603,6 +1614,8 @@ def update_telegram_settings(
             last_tested_at=None,
         )
     else:
+        if reply_mode is not None:
+            fields["reply_mode"] = reply_mode
         if bot_token is not None:
             fields["bot_token"] = bot_token
         if token_changed:
@@ -1616,18 +1629,19 @@ def update_telegram_settings(
                 last_error="",
                 last_tested_at=None,
             )
-        active = current["enabled"] if enabled is None else enabled
-        resulting_token = "" if clear_token else (bot_token or current["bot_token"])
-        resulting_chat = "" if token_changed else current["chat_id"]
-        if active and not resulting_token:
-            raise ValueError("add a bot token before enabling Telegram")
-        if enabled is not None:
-            fields["enabled"] = int(enabled)
-        fields["connection_status"] = (
-            "disabled" if not active
-            else "configured" if resulting_chat
-            else "waiting_pairing"
-        )
+        if enabled is not None or bot_token is not None:
+            active = current["enabled"] if enabled is None else enabled
+            resulting_token = bot_token or current["bot_token"]
+            resulting_chat = "" if token_changed else current["chat_id"]
+            if active and not resulting_token:
+                raise ValueError("add a bot token before enabling Telegram")
+            if enabled is not None:
+                fields["enabled"] = int(enabled)
+            fields["connection_status"] = (
+                "disabled" if not active
+                else "configured" if resulting_chat
+                else "waiting_pairing"
+            )
     fields["updated_at"] = _now()
     with _connect() as conn:
         sets = ", ".join(f"{key} = ?" for key in fields)

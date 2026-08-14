@@ -25,6 +25,13 @@ CONFIRM_TIMEOUT_SECONDS = 120
 INVALID_TOKEN_MESSAGE = (
     "Telegram rejected the bot token. Replace it in Agent Studio."
 )
+BOT_COMMANDS = (
+    ("vocal", "Reply with voice messages"),
+    ("text", "Reply with text messages"),
+    ("status", "Show the current reply mode"),
+    ("reset", "Clear the conversation"),
+    ("help", "Show available commands"),
+)
 
 
 class _PollingExceptionHandler:
@@ -45,6 +52,7 @@ class TelegramBridge:
         turn_lock: threading.Lock | None = None,
         token: str | None = None,
         chat_id: str | None = None,
+        reply_mode: str | None = None,
         confirm_timeout: float = CONFIRM_TIMEOUT_SECONDS,
         bot_factory: Callable[[str], telebot.TeleBot] = telebot.TeleBot,
         on_paired: Callable[[int, str, str], None] | None = None,
@@ -55,6 +63,9 @@ class TelegramBridge:
         saved = db.get_telegram_settings(include_secret=True)
         self.token = saved["bot_token"] if token is None else token
         self.chat_id = saved["chat_id"] if chat_id is None else chat_id
+        self.reply_mode = self._normalize_reply_mode(
+            saved.get("reply_mode", "text") if reply_mode is None else reply_mode
+        )
         self.confirm_timeout = confirm_timeout
         self._bot_factory = bot_factory
         self._on_paired = on_paired
@@ -111,6 +122,31 @@ class TelegramBridge:
         )
         self.bot = bot
         return bot
+
+    @staticmethod
+    def _normalize_reply_mode(reply_mode: str) -> str:
+        mode = str(reply_mode or "").strip().lower()
+        if mode not in {"text", "voice"}:
+            raise ValueError("Telegram reply mode must be text or voice")
+        return mode
+
+    def set_reply_mode(self, reply_mode: str, *, persist: bool = False) -> str:
+        """Apply one output preference, optionally saving it for future runs."""
+        mode = self._normalize_reply_mode(reply_mode)
+        if persist:
+            db.update_telegram_settings(reply_mode=mode)
+        self.reply_mode = mode
+        return mode
+
+    @staticmethod
+    def _register_commands(bot: telebot.TeleBot) -> None:
+        """Publish Mounir's supported commands to Telegram's slash menu."""
+        bot.set_my_commands(
+            [
+                telebot.types.BotCommand(command=command, description=description)
+                for command, description in BOT_COMMANDS
+            ]
+        )
 
     def _handle_polling_exception(self, exception: Exception) -> bool:
         """Stop retrying permanent authentication failures."""
@@ -182,7 +218,9 @@ class TelegramBridge:
             self._pair_code = ""
             self._pair_expires_at = 0.0
 
-    def reconfigure(self, *, token: str, chat_id: str, start: bool) -> bool:
+    def reconfigure(
+        self, *, token: str, chat_id: str, start: bool, reply_mode: str | None = None
+    ) -> bool:
         """Apply saved settings immediately, with at most one poller alive."""
         with self._lifecycle_lock:
             self.stop()
@@ -190,6 +228,8 @@ class TelegramBridge:
                 return False
             self.token = str(token or "").strip()
             self.chat_id = str(chat_id or "").strip()
+            if reply_mode is not None:
+                self.set_reply_mode(reply_mode)
             self.username = ""
             self.last_error = ""
             self.cancel_pairing()
@@ -328,8 +368,9 @@ class TelegramBridge:
             raise RuntimeError(detail or "unsupported audio format")
         return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
-    def _answer(self, chat_id: int, text: str, *, voice_reply: bool = False) -> None:
-        """Run one authorized Telegram turn and send a text or voice reply."""
+    def _answer(self, chat_id: int, text: str) -> None:
+        """Run one authorized Telegram turn using the saved output mode."""
+        reply_mode = self.reply_mode
         with self.turn_lock:
             trace.node("telegram")
             trace.event(f"← {text[:120]}")
@@ -340,16 +381,19 @@ class TelegramBridge:
             typing.start()
             try:
                 with tools.use_confirmation_handler(self._telegram_confirm):
-                    reply = "".join(
-                        self.agent.respond(text, voice=voice_reply)
-                    ).strip()
+                    response = (
+                        self.agent.respond(text, voice=True)
+                        if reply_mode == "voice"
+                        else self.agent.respond(text)
+                    )
+                    reply = "".join(response).strip()
             except Exception as exc:
                 reply = f"[error] {exc}"
             finally:
                 done.set()
                 typing.join(timeout=1)
         outbound = reply or "(no reply)"
-        if voice_reply:
+        if reply_mode == "voice":
             try:
                 self._send_voice(chat_id, outbound)
             except Exception as exc:
@@ -359,14 +403,28 @@ class TelegramBridge:
             self._send(chat_id, outbound)
         trace.event(f"→ {len(reply)} chars")
 
+    @staticmethod
+    def _parse_command(text: str) -> tuple[str, str]:
+        if not text.startswith("/"):
+            return "", ""
+        head, _, argument = text.partition(" ")
+        command = head[1:].partition("@")[0].strip().lower()
+        return command, argument.strip()
+
+    def _send_help(self, chat_id: int) -> None:
+        lines = ["Available commands:"]
+        lines.extend(f"/{command} — {description}" for command, description in BOT_COMMANDS)
+        self._send(chat_id, "\n".join(lines))
+
     def _handle_text(self, message) -> None:
         chat_id = message.chat.id
         allowed = self._allowed_chat()
         bot = self._ensure_bot()
         text = (message.text or "").strip()
+        command, argument = self._parse_command(text)
 
-        if text.lower().startswith("/pair"):
-            supplied = text.partition(" ")[2].strip()
+        if command == "pair":
+            supplied = argument
             with self._pair_lock:
                 valid = bool(
                     self._pair_code
@@ -415,13 +473,40 @@ class TelegramBridge:
                 pending.set()
                 return
 
-        if text == "/start":
-            self._send(chat_id, f"{db.get_profile()['assistant_name']} here. Say the word.")
+        if command == "start":
+            self._send(
+                chat_id,
+                f"{db.get_profile()['assistant_name']} here. Say the word, or use /help.",
+            )
             return
-        if text == "/reset":
+        if command == "reset":
             with self.turn_lock:
                 self.agent.conversation.reset()
             self._send(chat_id, "Conversation cleared.")
+            return
+        if command == "help":
+            self._send_help(chat_id)
+            return
+        if command == "status":
+            self._send(chat_id, f"Reply mode: {self.reply_mode.capitalize()}.")
+            return
+        if command in {"vocal", "text"}:
+            mode = "voice" if command == "vocal" else "text"
+            try:
+                self.set_reply_mode(mode, persist=True)
+            except Exception as exc:
+                trace.kv("telegram command", f"could not save reply mode: {exc}")
+                self._send(chat_id, "I couldn't save that reply mode. Try again.")
+                return
+            detail = (
+                "Voice replies enabled."
+                if mode == "voice"
+                else "Text replies enabled."
+            )
+            self._send(chat_id, detail)
+            return
+        if command:
+            self._send(chat_id, "Unknown command. Use /help to see what is available.")
             return
 
         self._answer(chat_id, text)
@@ -467,7 +552,7 @@ class TelegramBridge:
             bot.reply_to(message, "I couldn't detect any speech in that audio.")
             return
         trace.kv("telegram audio", f"transcribed {len(text)} chars")
-        self._answer(chat_id, text, voice_reply=True)
+        self._answer(chat_id, text)
 
     def _handle_other(self, message) -> None:
         if self._allowed_chat() == message.chat.id:
@@ -482,6 +567,10 @@ class TelegramBridge:
             try:
                 me = bot.get_me()
                 self.username = getattr(me, "username", "") or ""
+                try:
+                    self._register_commands(bot)
+                except Exception as exc:
+                    trace.kv("telegram commands", f"could not update menu: {exc}")
                 trace.kv("telegram", f"@{self.username} (long polling)")
                 paired = self._allowed_chat()
                 trace.kv("paired chat", str(paired) if paired else "not paired yet")

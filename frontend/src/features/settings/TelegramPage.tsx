@@ -102,6 +102,83 @@ export function TelegramPage() {
           onChange={(enabled) => update.mutate({ enabled })}
         />
         <Card
+          title="Reply mode and commands"
+          description={`Choose how ${assistant} responds, or manage the same setting directly from Telegram.`}
+        >
+          <div className="card__body stack">
+            <fieldset className="telegram-reply-picker" disabled={update.isPending}>
+              <legend>Response format</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="telegram-reply-mode"
+                  value="text"
+                  checked={state.reply_mode === 'text'}
+                  onChange={() => update.mutate({ reply_mode: 'text' })}
+                />
+                <span>Text</span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="telegram-reply-mode"
+                  value="voice"
+                  checked={state.reply_mode === 'voice'}
+                  onChange={() => update.mutate({ reply_mode: 'voice' })}
+                />
+                <span>Voice</span>
+              </label>
+            </fieldset>
+            <span className="field__hint">
+              Voice replies use the text-to-speech configuration from the Voice page. If speech
+              generation fails, {assistant} sends the reply as text.
+            </span>
+            <section className="telegram-command-guide" aria-labelledby="telegram-command-title">
+              <div className="telegram-command-guide__header">
+                <strong id="telegram-command-title">Control from Telegram</strong>
+                <small>Send these commands in your paired chat.</small>
+              </div>
+              <div className="telegram-command-list">
+                <div className="telegram-command-row">
+                  <code>/vocal</code>
+                  <span>
+                    <strong>Enable voice replies</strong>
+                    <small>Future responses are sent as voice messages.</small>
+                  </span>
+                </div>
+                <div className="telegram-command-row">
+                  <code>/text</code>
+                  <span>
+                    <strong>Enable text replies</strong>
+                    <small>Future responses are sent as text messages.</small>
+                  </span>
+                </div>
+                <div className="telegram-command-row">
+                  <code>/status</code>
+                  <span>
+                    <strong>Check reply mode</strong>
+                    <small>Shows whether Text or Voice is currently active.</small>
+                  </span>
+                </div>
+                <div className="telegram-command-row">
+                  <code>/help</code>
+                  <span>
+                    <strong>View available commands</strong>
+                    <small>Displays the command list inside Telegram.</small>
+                  </span>
+                </div>
+                <div className="telegram-command-row">
+                  <code>/reset</code>
+                  <span>
+                    <strong>Clear the conversation</strong>
+                    <small>Starts a fresh Telegram conversation with {assistant}.</small>
+                  </span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </Card>
+        <Card
           title="Bot connection"
           description="Create a bot with BotFather and save its token. Saved tokens are never returned by the API."
         >

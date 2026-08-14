@@ -172,6 +172,7 @@ export interface TtsVoiceCatalog {
 
 export interface TelegramSettings {
   enabled: boolean
+  reply_mode: 'text' | 'voice'
   token_configured: boolean
   paired: boolean
   running?: boolean
