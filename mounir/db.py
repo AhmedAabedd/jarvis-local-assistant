@@ -23,7 +23,9 @@ and Mounir expands it at runtime.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -31,11 +33,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import builtin_agents, config as cfg, default_agents
+from . import builtin_agents, config as cfg
 
 DB_PATH: Path = cfg.DATA_DIR / "mounir.db"
 LEGACY_REGISTRY: Path = cfg.DATA_DIR / "mcp_agents.json"
 MCP_TRANSPORTS = {"stdio", "streamable_http", "sse"}
+MCP_CREDENTIAL_FILE_LIMIT = 2 * 1024 * 1024
+MCP_CREDENTIAL_FILE_COUNT = 10
 MAX_SUBAGENT_DEPTH = 4
 HEARTBEAT_DEFAULT_INSTRUCTIONS = (
     "Check my connected services for new items that genuinely need my attention. "
@@ -62,6 +66,10 @@ def _now() -> str:
 @contextmanager
 def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        DB_PATH.parent.chmod(0o700)
+    except OSError:
+        pass
     conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
     # UI-entered credentials are stored locally in this DB. Restrict it to the
     # current OS user even when the process was started with a permissive umask.
@@ -80,6 +88,11 @@ def _connect():
         raise
     finally:
         conn.close()
+        for path in (DB_PATH, Path(f"{DB_PATH}-wal"), Path(f"{DB_PATH}-shm")):
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -106,8 +119,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             -- the saved server instead of being inferred from its package.
             description TEXT NOT NULL DEFAULT '',
 
-            -- Optional built-in onboarding adapter. Ordinary MCP servers leave
-            -- this empty and use the standard transport/authentication fields.
+            -- Retained only for upgrading old databases. New setup is described
+            -- entirely by the generic fields below.
             setup_type TEXT NOT NULL DEFAULT '',
 
             -- stdio | sse | streamable_http
@@ -128,8 +141,16 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             -- }
             env TEXT NOT NULL DEFAULT '{}',
 
-            -- none | bearer | header | custom (UI metadata; runtime uses headers)
+            -- none | bearer | header | custom | oauth
             auth_scheme TEXT NOT NULL DEFAULT '',
+
+            -- Optional user-defined local initialization or authorization command.
+            setup_command TEXT NOT NULL DEFAULT '',
+
+            oauth_redirect_uri TEXT NOT NULL DEFAULT '',
+            oauth_tokens TEXT NOT NULL DEFAULT '',
+            oauth_token_expires_at REAL NOT NULL DEFAULT 0,
+            oauth_client_info TEXT NOT NULL DEFAULT '',
 
             -- untested | connected | stale | failed
             connection_status TEXT NOT NULL DEFAULT 'untested',
@@ -153,6 +174,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_mcp_server_tools_server_position
             ON mcp_server_tools (mcp_server_id, position);
+
+        CREATE TABLE IF NOT EXISTS mcp_server_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mcp_server_id INTEGER NOT NULL
+                REFERENCES mcp_servers(id) ON DELETE CASCADE,
+            env_var TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            content BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (mcp_server_id, env_var)
+        );
 
         CREATE TABLE IF NOT EXISTS subagents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -548,6 +580,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "headers": "TEXT NOT NULL DEFAULT '{}'",
             "env": "TEXT NOT NULL DEFAULT '{}'",
             "auth_scheme": "TEXT NOT NULL DEFAULT ''",
+            "setup_command": "TEXT NOT NULL DEFAULT ''",
+            "oauth_redirect_uri": "TEXT NOT NULL DEFAULT ''",
+            "oauth_tokens": "TEXT NOT NULL DEFAULT ''",
+            "oauth_token_expires_at": "REAL NOT NULL DEFAULT 0",
+            "oauth_client_info": "TEXT NOT NULL DEFAULT ''",
             "connection_status": "TEXT NOT NULL DEFAULT 'untested'",
             "last_tested_at": "TEXT",
             "last_error": "TEXT NOT NULL DEFAULT ''",
@@ -601,6 +638,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 added_columns.add((table, column))
+    # Retire the former provider-specific onboarding adapter without removing
+    # any user-owned server, connection, environment, or subagent records.
+    conn.execute(
+        "UPDATE mcp_servers SET setup_type = '' WHERE setup_type = 'gmail_oauth'"
+    )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_task
@@ -1019,11 +1061,26 @@ def server_for_api(server: dict | None) -> dict | None:
     if server is None:
         return None
     result = dict(server)
+    result.pop("setup_type", None)
     result["headers"], headers_configured = _masked_json_object(result.get("headers"))
     result["env"], env_configured = _masked_json_object(result.get("env"))
     result["headers_configured"] = headers_configured
     result["env_configured"] = env_configured
-    result["credentials_configured"] = headers_configured or env_configured
+    result["oauth_connected"] = bool(result.pop("oauth_tokens", ""))
+    result.pop("oauth_token_expires_at", None)
+    result.pop("oauth_client_info", None)
+    result["credential_files"] = list_server_files(int(result["id"]))
+    result["credentials_configured"] = bool(
+        headers_configured
+        or env_configured
+        or result["oauth_connected"]
+        or result["credential_files"]
+    )
+    result["setup_configured"] = bool(
+        result.get("setup_command")
+        or result.get("auth_scheme") == "oauth"
+        or result["credential_files"]
+    )
     return result
 
 
@@ -1091,18 +1148,6 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _unique_name(conn: sqlite3.Connection, table: str, preferred: str) -> str:
-    """Return a readable unused name for a seeded model or server."""
-    candidate = preferred
-    suffix = 2
-    while conn.execute(
-        f"SELECT 1 FROM {table} WHERE lower(name) = lower(?)", (candidate,)
-    ).fetchone():
-        candidate = f"{preferred} {suffix}"
-        suffix += 1
-    return candidate
-
-
 def _active_supervisor_model_defaults() -> dict:
     if cfg.USE_MISTRAL:
         return {
@@ -1126,231 +1171,11 @@ def _active_supervisor_model_defaults() -> dict:
     }
 
 
-def _migrate_builtin_email(conn: sqlite3.Connection) -> None:
-    """Move the former hard-coded Gmail specialist into the dynamic registry once."""
-    migration_key = "builtin_email_to_dynamic_v1"
-    if conn.execute(
-        "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
-    ).fetchone():
-        return
-
-    existing = conn.execute(
-        "SELECT 1 FROM subagents WHERE lower(name) = 'email'"
-    ).fetchone()
-    if not existing:
-        base_url = _normalize_model_base_url(default_agents.email_model_base_url())
-        model_row = conn.execute(
-            "SELECT id FROM models WHERE model = ? AND rtrim(base_url, '/') = ? LIMIT 1",
-            (default_agents.EMAIL_MODEL, base_url),
-        ).fetchone()
-        if model_row:
-            model_id = model_row["id"]
-        else:
-            model_id = _add_model(
-                conn,
-                _unique_name(conn, "models", default_agents.EMAIL_MODEL_NAME),
-                default_agents.EMAIL_MODEL,
-                "Ollama Cloud",
-                base_url,
-                cfg.OLLAMA_API_KEY,
-            )
-
-        server_row = conn.execute(
-            """
-            SELECT id FROM mcp_servers
-            WHERE transport = 'stdio' AND connection = ?
-            LIMIT 1
-            """,
-            (default_agents.EMAIL_SERVER_COMMAND,),
-        ).fetchone()
-        if server_row:
-            server_id = server_row["id"]
-        else:
-            server_id = _add_server(
-                conn,
-                _unique_name(conn, "mcp_servers", default_agents.EMAIL_SERVER_NAME),
-                default_agents.EMAIL_SERVER_COMMAND,
-                description=default_agents.EMAIL_SERVER_DESCRIPTION,
-                setup_type=default_agents.EMAIL_SERVER_SETUP_TYPE,
-            )
-
-        _add_subagent(
-            conn,
-            default_agents.EMAIL_AGENT_NAME,
-            default_agents.EMAIL_DESCRIPTION,
-            default_agents.EMAIL_SYSTEM_PROMPT,
-            model_id,
-            server_id,
-            confirm_tools=default_agents.EMAIL_CONFIRM_TOOLS,
-            dedupe_tools=default_agents.EMAIL_DEDUPE_TOOLS,
-        )
-
-    conn.execute(
-        "INSERT INTO app_meta (key, value) VALUES (?, ?)",
-        (migration_key, _now()),
-    )
-    conn.commit()
-
-
-def _migrate_builtin_researcher(conn: sqlite3.Connection) -> None:
-    """Move the former hand-written web researcher into the dynamic registry once."""
-    migration_key = "builtin_researcher_to_dynamic_v1"
-    if conn.execute(
-        "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
-    ).fetchone():
-        return
-
-    existing = conn.execute(
-        "SELECT 1 FROM subagents WHERE lower(name) = 'researcher'"
-    ).fetchone()
-    if not existing:
-        base_url = _normalize_model_base_url(
-            default_agents.researcher_model_base_url()
-        )
-        model_row = conn.execute(
-            "SELECT id FROM models WHERE model = ? AND rtrim(base_url, '/') = ? LIMIT 1",
-            (default_agents.RESEARCHER_MODEL, base_url),
-        ).fetchone()
-        if model_row:
-            model_id = model_row["id"]
-        else:
-            model_id = _add_model(
-                conn,
-                _unique_name(conn, "models", default_agents.RESEARCHER_MODEL_NAME),
-                default_agents.RESEARCHER_MODEL,
-                "Ollama Cloud",
-                base_url,
-                cfg.OLLAMA_API_KEY,
-            )
-
-        command = default_agents.researcher_server_command()
-        server_row = conn.execute(
-            """
-            SELECT id FROM mcp_servers
-            WHERE transport = 'stdio' AND connection = ?
-            LIMIT 1
-            """,
-            (command,),
-        ).fetchone()
-        if server_row:
-            server_id = server_row["id"]
-        else:
-            server_id = _add_server(
-                conn,
-                _unique_name(
-                    conn, "mcp_servers", default_agents.RESEARCHER_SERVER_NAME
-                ),
-                command,
-                description=default_agents.RESEARCHER_SERVER_DESCRIPTION,
-            )
-
-        _add_subagent(
-            conn,
-            default_agents.RESEARCHER_AGENT_NAME,
-            default_agents.RESEARCHER_DESCRIPTION,
-            default_agents.RESEARCHER_SYSTEM_PROMPT,
-            model_id,
-            server_id,
-            confirm_tools=default_agents.RESEARCHER_CONFIRM_TOOLS,
-        )
-
-    conn.execute(
-        "INSERT INTO app_meta (key, value) VALUES (?, ?)",
-        (migration_key, _now()),
-    )
-    conn.commit()
-
-
-def _migrate_server_metadata(conn: sqlite3.Connection) -> None:
-    """Attach UI metadata to already-seeded servers without inspecting commands."""
-    migration_key = "dynamic_server_metadata_v1"
-    if conn.execute(
-        "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
-    ).fetchone():
-        return
-
-    presets = (
-        (
-            default_agents.EMAIL_AGENT_NAME,
-            default_agents.EMAIL_SERVER_DESCRIPTION,
-            default_agents.EMAIL_SERVER_SETUP_TYPE,
-        ),
-        (
-            default_agents.RESEARCHER_AGENT_NAME,
-            default_agents.RESEARCHER_SERVER_DESCRIPTION,
-            "",
-        ),
-    )
-    for agent_name, description, setup_type in presets:
-        conn.execute(
-            """
-            UPDATE mcp_servers
-            SET description = CASE
-                    WHEN trim(description) = '' THEN ? ELSE description END,
-                setup_type = CASE
-                    WHEN trim(setup_type) = '' THEN ? ELSE setup_type END
-            WHERE id IN (
-                SELECT mcp_server_id FROM subagents WHERE lower(name) = lower(?)
-            )
-            """,
-            (description, setup_type, agent_name),
-        )
-    conn.execute(
-        "INSERT INTO app_meta (key, value) VALUES (?, ?)",
-        (migration_key, _now()),
-    )
-    conn.commit()
-
-
-def _migrate_action_deduplication(conn: sqlite3.Connection) -> None:
-    """Enable duplicate-send protection for an existing seeded Email agent."""
-    migration_key = "dynamic_action_deduplication_v1"
-    if conn.execute(
-        "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
-    ).fetchone():
-        return
-    conn.execute(
-        """
-        UPDATE subagents SET dedupe_tools = ?
-        WHERE lower(name) = lower(?)
-          AND (dedupe_tools IS NULL OR trim(dedupe_tools) IN ('', '[]'))
-        """,
-        (
-            json.dumps(default_agents.EMAIL_DEDUPE_TOOLS),
-            default_agents.EMAIL_AGENT_NAME,
-        ),
-    )
-    conn.execute(
-        "INSERT INTO app_meta (key, value) VALUES (?, ?)",
-        (migration_key, _now()),
-    )
-    conn.commit()
-
-
 def init() -> None:
     """Create tables and migrate only configuration the user already owns."""
-    existing_installation = DB_PATH.exists()
     with _connect() as conn:
         _init_schema(conn)
         _migrate_legacy(conn)
-        # Email and Researcher used to be hard-coded specialists. Preserve the
-        # one-time conversion for upgrades, but never populate a fresh user's
-        # intentionally empty registry.
-        registry_policy_key = "user_owned_empty_registry_v1"
-        registry_policy_set = conn.execute(
-            "SELECT 1 FROM app_meta WHERE key = ?", (registry_policy_key,)
-        ).fetchone()
-        if not registry_policy_set:
-            if existing_installation:
-                _migrate_builtin_email(conn)
-                _migrate_builtin_researcher(conn)
-            conn.execute(
-                "INSERT INTO app_meta (key, value) VALUES (?, ?)",
-                (registry_policy_key, _now()),
-            )
-            conn.commit()
-        _migrate_server_metadata(conn)
-        _migrate_action_deduplication(conn)
 
 
 # -----------------------------------------------------------------------------
@@ -3565,6 +3390,231 @@ def delete_model_result(model_id: int) -> DeletionResult:
 # MCP servers
 # -----------------------------------------------------------------------------
 
+_ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _credential_dir(server_id: int) -> Path:
+    return DB_PATH.parent / "mcp_credentials" / f"server-{int(server_id)}"
+
+
+def _clear_materialized_server_files(server_id: int) -> None:
+    directory = _credential_dir(server_id)
+    if not directory.exists():
+        return
+    for path in directory.iterdir():
+        if path.is_file():
+            path.unlink(missing_ok=True)
+    try:
+        directory.rmdir()
+        directory.parent.rmdir()
+    except OSError:
+        pass
+
+
+def list_server_files(server_id: int) -> list[dict]:
+    """Return only safe metadata for private files attached to one server."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT env_var, filename
+            FROM mcp_server_files
+            WHERE mcp_server_id = ?
+            ORDER BY env_var
+            """,
+            (int(server_id),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def replace_server_files(
+    server_id: int,
+    uploads: list[dict] | None = None,
+    removals: list[str] | None = None,
+) -> list[dict]:
+    """Apply explicit file replacements/removals without exposing stored bytes."""
+    if get_server(server_id) is None:
+        raise ValueError("Server not found.")
+    server_environment = json.loads(get_server(server_id).get("env") or "{}")
+    normalized_uploads: list[tuple[str, str, bytes]] = []
+    seen: set[str] = set()
+    for upload in uploads or []:
+        env_var = str((upload or {}).get("env_var") or "").strip()
+        filename = Path(str((upload or {}).get("filename") or "credential")).name
+        content = (upload or {}).get("content")
+        if not _ENV_VAR_RE.fullmatch(env_var):
+            raise ValueError(f"Invalid environment variable name: {env_var or 'empty'}.")
+        if env_var in seen:
+            raise ValueError(f"Credential file {env_var} is duplicated.")
+        if env_var in server_environment:
+            raise ValueError(f"Environment variable {env_var} is already configured.")
+        if not isinstance(content, bytes) or not content:
+            raise ValueError(f"Choose a credential file for {env_var}.")
+        if len(content) > MCP_CREDENTIAL_FILE_LIMIT:
+            raise ValueError("Each credential file must be 2 MB or smaller.")
+        seen.add(env_var)
+        normalized_uploads.append((env_var, filename[:255] or "credential", content))
+    normalized_removals = {
+        str(value).strip() for value in (removals or []) if str(value).strip()
+    }
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for env_var in normalized_removals:
+            conn.execute(
+                "DELETE FROM mcp_server_files WHERE mcp_server_id = ? AND env_var = ?",
+                (server_id, env_var),
+            )
+        for env_var, filename, content in normalized_uploads:
+            conn.execute(
+                """
+                INSERT INTO mcp_server_files
+                    (mcp_server_id, env_var, filename, content, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(mcp_server_id, env_var) DO UPDATE SET
+                    filename = excluded.filename,
+                    content = excluded.content,
+                    created_at = excluded.created_at
+                """,
+                (server_id, env_var, filename, content, _now()),
+            )
+        count = conn.execute(
+            "SELECT COUNT(*) FROM mcp_server_files WHERE mcp_server_id = ?",
+            (server_id,),
+        ).fetchone()[0]
+        if count > MCP_CREDENTIAL_FILE_COUNT:
+            raise ValueError(
+                f"A server can have at most {MCP_CREDENTIAL_FILE_COUNT} credential files."
+            )
+        if normalized_uploads or normalized_removals:
+            conn.execute(
+                """
+                UPDATE mcp_servers
+                SET connection_status = 'stale', last_error = ''
+                WHERE id = ?
+                """,
+                (server_id,),
+            )
+        conn.commit()
+    _clear_materialized_server_files(server_id)
+    return list_server_files(server_id)
+
+
+def _materialized_server_file_env(server_id: int) -> dict[str, str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT env_var, filename, content
+            FROM mcp_server_files
+            WHERE mcp_server_id = ?
+            ORDER BY env_var
+            """,
+            (server_id,),
+        ).fetchall()
+    if not rows:
+        return {}
+    directory = _credential_dir(server_id)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.chmod(0o700)
+    result: dict[str, str] = {}
+    for row in rows:
+        suffix = Path(row["filename"]).suffix
+        if len(suffix) > 16 or not re.fullmatch(r"\.[A-Za-z0-9]+", suffix or ""):
+            suffix = ""
+        digest = hashlib.sha256(row["env_var"].encode()).hexdigest()[:12]
+        path = directory / f"credential-{digest}{suffix}"
+        path.write_bytes(bytes(row["content"]))
+        path.chmod(0o600)
+        result[row["env_var"]] = str(path)
+    return result
+
+
+def get_server_oauth_state(server_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT oauth_tokens, oauth_token_expires_at, oauth_client_info,
+                   oauth_redirect_uri
+            FROM mcp_servers WHERE id = ?
+            """,
+            (server_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_server_oauth_state(
+    server_id: int,
+    *,
+    tokens: str | None = None,
+    token_expires_at: float | None = None,
+    client_info: str | None = None,
+) -> None:
+    fields = {}
+    if tokens is not None:
+        fields["oauth_tokens"] = tokens
+    if token_expires_at is not None:
+        fields["oauth_token_expires_at"] = float(token_expires_at)
+    if client_info is not None:
+        fields["oauth_client_info"] = client_info
+    if not fields:
+        return
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE mcp_servers SET {sets} WHERE id = ?",
+            (*fields.values(), server_id),
+        )
+        conn.commit()
+
+
+def prepare_server_oauth(server_id: int, redirect_uri: str) -> None:
+    current = get_server_oauth_state(server_id)
+    if current is None:
+        raise ValueError("Server not found.")
+    changed = current.get("oauth_redirect_uri") not in {"", redirect_uri}
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE mcp_servers
+            SET oauth_redirect_uri = ?,
+                oauth_tokens = CASE WHEN ? THEN '' ELSE oauth_tokens END,
+                oauth_token_expires_at = CASE WHEN ? THEN 0 ELSE oauth_token_expires_at END,
+                oauth_client_info = CASE WHEN ? THEN '' ELSE oauth_client_info END
+            WHERE id = ?
+            """,
+            (redirect_uri, int(changed), int(changed), int(changed), server_id),
+        )
+        conn.commit()
+
+
+def clear_server_oauth(server_id: int) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE mcp_servers
+            SET oauth_tokens = '', oauth_token_expires_at = 0,
+                oauth_client_info = '',
+                connection_status = 'stale', last_error = ''
+            WHERE id = ?
+            """,
+            (server_id,),
+        )
+        conn.commit()
+
+
+def clear_server_oauth_tokens(server_id: int) -> None:
+    """Force a fresh authorization while retaining registered client metadata."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE mcp_servers
+            SET oauth_tokens = '', oauth_token_expires_at = 0,
+                connection_status = 'stale', last_error = ''
+            WHERE id = ?
+            """,
+            (server_id,),
+        )
+        conn.commit()
+
+
 def _add_server(
     conn: sqlite3.Connection,
     name: str,
@@ -3575,18 +3625,24 @@ def _add_server(
     description: str = "",
     setup_type: str = "",
     auth_scheme: str = "",
+    setup_command: str = "",
 ) -> int:
     transport, connection = _validate_transport(transport, connection)
     auth_scheme = str(auth_scheme or "").strip()
-    if auth_scheme not in {"", "none", "bearer", "header", "custom"}:
+    if auth_scheme not in {"", "none", "bearer", "header", "custom", "oauth"}:
         raise ValueError("authentication method is not supported")
+    if transport == "stdio" and auth_scheme == "oauth":
+        raise ValueError("OAuth is available only for remote MCP servers.")
+    setup_command = str(setup_command or "").strip()
+    if transport != "stdio" and setup_command:
+        raise ValueError("Setup commands are available only for local MCP servers.")
     try:
         cur = conn.execute(
             """
             INSERT INTO mcp_servers
                 (name, description, setup_type, transport, connection, headers, env,
-                 auth_scheme, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 auth_scheme, setup_command, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
@@ -3597,6 +3653,7 @@ def _add_server(
                 _json_object(headers, "headers"),
                 _json_object(env, "environment"),
                 auth_scheme,
+                setup_command,
                 _now(),
             ),
         )
@@ -3614,6 +3671,7 @@ def add_server(
     env="{}",
     description: str = "",
     auth_scheme: str = "",
+    setup_command: str = "",
 ) -> dict:
     with _connect() as conn:
         sid = _add_server(
@@ -3625,6 +3683,7 @@ def add_server(
             env,
             description,
             auth_scheme=auth_scheme,
+            setup_command=setup_command,
         )
         return get_server(sid)
 
@@ -3651,6 +3710,7 @@ def update_server(server_id: int, **kwargs) -> dict | None:
         "env",
         "description",
         "auth_scheme",
+        "setup_command",
     }
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
@@ -3679,9 +3739,40 @@ def update_server(server_id: int, **kwargs) -> dict | None:
         fields["description"] = (fields["description"] or "").strip()
     if "auth_scheme" in fields:
         fields["auth_scheme"] = str(fields["auth_scheme"] or "").strip()
-        if fields["auth_scheme"] not in {"", "none", "bearer", "header", "custom"}:
+        if fields["auth_scheme"] not in {
+            "", "none", "bearer", "header", "custom", "oauth"
+        }:
             raise ValueError("authentication method is not supported")
-    connection_fields = {"transport", "connection", "headers", "env"}
+    effective_auth = fields.get("auth_scheme", current.get("auth_scheme") or "")
+    if transport == "stdio" and effective_auth == "oauth":
+        raise ValueError("OAuth is available only for remote MCP servers.")
+    if "setup_command" in fields:
+        fields["setup_command"] = str(fields["setup_command"] or "").strip()
+    effective_setup = fields.get("setup_command", current.get("setup_command") or "")
+    if transport != "stdio" and effective_setup:
+        raise ValueError("Setup commands are available only for local MCP servers.")
+    effective_env = (
+        json.loads(fields["env"])
+        if "env" in fields
+        else json.loads(current.get("env") or "{}")
+    )
+    file_env = {item["env_var"] for item in list_server_files(server_id)}
+    duplicate_env = sorted(file_env.intersection(effective_env))
+    if duplicate_env:
+        raise ValueError(
+            f"Environment variable {duplicate_env[0]} is already used by a credential file."
+        )
+    oauth_changed = (
+        connection != current["connection"]
+        or effective_auth != (current.get("auth_scheme") or "")
+    )
+    if oauth_changed:
+        fields["oauth_tokens"] = ""
+        fields["oauth_token_expires_at"] = 0
+        fields["oauth_client_info"] = ""
+    connection_fields = {
+        "transport", "connection", "headers", "env", "auth_scheme"
+    }
     connection_changed = any(
         key in fields and fields[key] != current.get(key)
         for key in connection_fields
@@ -3707,6 +3798,7 @@ def delete_server(server_id: int) -> bool:
 
 
 def delete_server_result(server_id: int) -> DeletionResult:
+    result: DeletionResult
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute(
@@ -3725,10 +3817,13 @@ def delete_server_result(server_id: int) -> DeletionResult:
         try:
             cur = conn.execute("DELETE FROM mcp_servers WHERE id = ?", (server_id,))
             conn.commit()
-            return DeletionResult("deleted" if cur.rowcount else "not_found")
+            result = DeletionResult("deleted" if cur.rowcount else "not_found")
         except sqlite3.IntegrityError:
             conn.rollback()
             return DeletionResult("in_use", ("another saved configuration",))
+    if result.deleted:
+        _clear_materialized_server_files(server_id)
+    return result
 
 
 def get_server_tools_state(server_id: int) -> dict | None:
@@ -4134,7 +4229,8 @@ _SUBAGENT_SELECT = """
            CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
            m.name AS model_name, m.model, m.provider, m.base_url, m.api_key,
            srv.name AS server_name, srv.transport, srv.connection,
-           srv.headers, srv.env
+           srv.headers, srv.env, srv.auth_scheme,
+           srv.oauth_redirect_uri, srv.setup_command
     FROM subagents s
     JOIN models m ON s.model_id = m.id
     JOIN mcp_servers srv ON s.mcp_server_id = srv.id
@@ -4812,12 +4908,18 @@ def build_server_spec(server_id: int) -> dict | None:
     server = get_server(server_id)
     if server is None:
         return None
+    env = _resolved_json_object(server.get("env") or "{}")
+    env.update(_materialized_server_file_env(server_id))
     return {
+        "server_id": server_id,
         "name": server["name"],
         "transport": server.get("transport") or "stdio",
         "connection": server["connection"],
         "headers": _resolved_json_object(server.get("headers") or "{}"),
-        "env": _resolved_json_object(server.get("env") or "{}"),
+        "env": env,
+        "auth_scheme": server.get("auth_scheme") or "",
+        "oauth_redirect_uri": server.get("oauth_redirect_uri") or "",
+        "setup_command": server.get("setup_command") or "",
     }
 
 
@@ -4831,6 +4933,8 @@ def build_specs() -> list[dict]:
     for s in list_subagents():
         if not s.get("enabled"):
             continue
+        server_env = _resolved_json_object(s.get("env") or "{}")
+        server_env.update(_materialized_server_file_env(int(s["mcp_server_id"])))
         for placement in s.get("placements") or []:
             specs.append({
                 "id": s["id"],
@@ -4845,7 +4949,9 @@ def build_specs() -> list[dict]:
                 "connection": s["connection"],
 
                 "headers": _resolved_json_object(s.get("headers") or "{}"),
-                "env": _resolved_json_object(s.get("env") or "{}"),
+                "env": dict(server_env),
+                "auth_scheme": s.get("auth_scheme") or "",
+                "oauth_redirect_uri": s.get("oauth_redirect_uri") or "",
 
                 "parent_agent_id": placement.get("parent_agent_id"),
                 "parent_name": placement.get("parent_name") or "Mounir",

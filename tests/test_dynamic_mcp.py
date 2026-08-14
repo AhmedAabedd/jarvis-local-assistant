@@ -32,6 +32,7 @@ from mounir import (
     langgraph_agent,
     llm as llm_mod,
     mcp_agents,
+    mcp_oauth,
     tools as mounir_tools,
 )
 from mounir.agent import Agent
@@ -817,21 +818,101 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(db.list_servers(), [])
         self.assertEqual(db.list_subagents(), [])
 
-    def test_existing_database_keeps_one_time_builtin_agent_upgrade(self):
-        # Simulate a database made by the release where Email and Researcher
-        # were still hard-coded and had not yet been converted.
+    def test_existing_empty_database_does_not_seed_dynamic_resources(self):
+        # Existing databases follow the same user-owned registry policy as new
+        # installations; application startup must never invent resources.
         with db._connect() as conn:
             db._init_schema(conn)
 
         db.init()
-        self.assertIsNotNone(db.get_subagent_by_name("Email"))
-        self.assertIsNotNone(db.get_subagent_by_name("Researcher"))
-
-        initial_agents = [item["id"] for item in db.list_subagents()]
+        self.assertEqual(db.list_models(), [])
+        self.assertEqual(db.list_servers(), [])
+        self.assertEqual(db.list_subagents(), [])
         db.init()
-        self.assertEqual(
-            [item["id"] for item in db.list_subagents()], initial_agents
+        self.assertEqual(db.list_models(), [])
+        self.assertEqual(db.list_servers(), [])
+        self.assertEqual(db.list_subagents(), [])
+
+    def test_legacy_gmail_setup_marker_is_removed_without_deleting_server(self):
+        with db._connect() as conn:
+            db._init_schema(conn)
+            server_id = db._add_server(
+                conn,
+                "User mail server",
+                "user-selected-mail-mcp",
+                setup_type="gmail_oauth",
+            )
+
+        db.init()
+
+        server = db.get_server(server_id)
+        self.assertIsNotNone(server)
+        self.assertEqual(server["connection"], "user-selected-mail-mcp")
+        self.assertEqual(server["setup_type"], "")
+        db.init()
+        self.assertEqual(db.list_models(), [])
+        self.assertEqual([item["id"] for item in db.list_servers()], [server_id])
+        self.assertEqual(db.list_subagents(), [])
+
+    def test_private_mcp_files_are_masked_materialized_and_removable(self):
+        db.init()
+        server = db.add_server("Files", "run-files-server")
+        db.replace_server_files(
+            server["id"],
+            [
+                {
+                    "env_var": "SERVICE_CREDENTIALS",
+                    "filename": "account.json",
+                    "content": b'{"private":"value"}',
+                }
+            ],
         )
+
+        public = db.server_for_api(db.get_server(server["id"]))
+        self.assertEqual(
+            public["credential_files"],
+            [{"env_var": "SERVICE_CREDENTIALS", "filename": "account.json"}],
+        )
+        self.assertTrue(public["credentials_configured"])
+        path = Path(db.build_server_spec(server["id"])["env"]["SERVICE_CREDENTIALS"])
+        self.assertEqual(path.read_bytes(), b'{"private":"value"}')
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+        db.replace_server_files(server["id"], removals=["SERVICE_CREDENTIALS"])
+        self.assertEqual(db.list_server_files(server["id"]), [])
+        self.assertFalse(path.exists())
+
+    def test_oauth_state_is_private_and_cleared_when_connection_changes(self):
+        db.init()
+        server = db.add_server(
+            "OAuth server",
+            "https://example.test/mcp",
+            transport="streamable_http",
+            auth_scheme="oauth",
+        )
+        db.prepare_server_oauth(server["id"], "http://localhost/oauth/callback")
+
+        async def save_state():
+            storage = mcp_oauth.DatabaseOAuthStorage(server["id"])
+            from mcp.shared.auth import OAuthToken
+
+            await storage.set_tokens(
+                OAuthToken(access_token="private-token", expires_in=3600)
+            )
+            provider = mcp_oauth.provider_for_spec(db.build_server_spec(server["id"]))
+            await provider._initialize()
+            return provider.context.token_expiry_time
+
+        restored_expiry = asyncio.run(save_state())
+        self.assertGreater(restored_expiry, 0)
+        public = db.server_for_api(db.get_server(server["id"]))
+        self.assertTrue(public["oauth_connected"])
+        self.assertNotIn("oauth_tokens", public)
+        self.assertNotIn("oauth_token_expires_at", public)
+        self.assertNotIn("private-token", json.dumps(public))
+
+        db.update_server(server["id"], connection="https://other.test/mcp")
+        self.assertFalse(db.server_for_api(db.get_server(server["id"]))["oauth_connected"])
 
     def test_assigned_builtin_model_is_managed_through_models_registry(self):
         db.init()
@@ -1328,7 +1409,8 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertTrue(
             {
                 "description", "setup_type", "transport", "headers", "env",
-                "auth_scheme",
+                "auth_scheme", "setup_command", "oauth_redirect_uri",
+                "oauth_tokens", "oauth_token_expires_at", "oauth_client_info",
             }
             <= server_columns
         )
@@ -2176,6 +2258,10 @@ class TransportTests(unittest.TestCase):
         dynamic_prompt = _system_prompt("Use the echo tool.", profile)
         builtin_prompt = config.specialist_system_prompt("You are a tester.", profile)
 
+        self.assertIn("Use only relevant tools", dynamic_prompt)
+        self.assertIn(
+            "SPECIALIST INSTRUCTIONS\nUse the echo tool.", dynamic_prompt
+        )
         for prompt in (dynamic_prompt, builtin_prompt):
             self.assertIn(config.SUBAGENT_CAPABILITY_PROMPT.strip(), prompt)
             self.assertIn("I can't complete this request", prompt)
@@ -2807,27 +2893,6 @@ class AdminApiTests(TemporaryDatabaseTest):
         import server as web_server
 
         db.init()
-        with db._connect() as conn:
-            email_model_id = db._add_model(
-                conn, "Email test model", "email-test", "Ollama",
-                "http://localhost:11434/v1", "",
-            )
-            email_server_id = db._add_server(
-                conn,
-                "Gmail MCP",
-                "npx -y test-gmail-mcp",
-                description="Test Gmail server",
-                setup_type="gmail_oauth",
-            )
-            db._add_subagent(
-                conn, "Email", "Handles test email.", "",
-                email_model_id, email_server_id,
-                confirm_tools=["send_email", "delete_email"],
-                dedupe_tools=["send_email"],
-            )
-        web_server.GMAIL_AUTH_DIR = Path(self.temp_dir.name) / ".gmail-mcp"
-        web_server.GMAIL_OAUTH_KEYS = web_server.GMAIL_AUTH_DIR / "gcp-oauth.keys.json"
-        web_server.GMAIL_CREDENTIALS = web_server.GMAIL_AUTH_DIR / "credentials.json"
         fixture = Path(__file__).parent / "fixtures" / "echo_mcp_server.py"
 
         async def exercise_api():
@@ -2835,95 +2900,6 @@ class AdminApiTests(TemporaryDatabaseTest):
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://localhost"
             ) as client:
-                gmail = db.get_subagent_by_name("Email")
-                # Setup capability is saved metadata, not inferred from a known
-                # npm package string in the editable connection command.
-                db.update_server(
-                    gmail["mcp_server_id"],
-                    connection="npx -y user-selected-email-server",
-                )
-                gmail_status = await client.get(
-                    f"/api/mcp-servers/{gmail['mcp_server_id']}/setup"
-                )
-                self.assertEqual(gmail_status.status_code, 200)
-                self.assertEqual(gmail_status.json()["title"], "Gmail account")
-                self.assertEqual(
-                    gmail_status.json()["status"]["text"], "OAuth file required"
-                )
-                oauth_upload = await client.post(
-                    f"/api/mcp-servers/{gmail['mcp_server_id']}/setup/files/oauth_file",
-                    files={
-                        "file": (
-                            "oauth.json",
-                            json.dumps(
-                                {
-                                    "installed": {
-                                        "client_id": "test-client",
-                                        "client_secret": "test-secret",
-                                    }
-                                }
-                            ),
-                            "application/json",
-                        )
-                    },
-                )
-                self.assertEqual(oauth_upload.status_code, 200)
-                self.assertTrue(web_server.GMAIL_OAUTH_KEYS.exists())
-
-                class FakeAuthProcess:
-                    returncode = 0
-
-                    async def communicate(self):
-                        web_server.GMAIL_CREDENTIALS.write_text(
-                            json.dumps({"refresh_token": "test-refresh-token"})
-                        )
-                        return b"connected", b""
-
-                async def fake_auth_process(*args, **kwargs):
-                    return FakeAuthProcess()
-
-                with patch("asyncio.create_subprocess_exec", fake_auth_process):
-                    gmail_connect = await client.post(
-                        f"/api/mcp-servers/{gmail['mcp_server_id']}/setup/actions/connect"
-                    )
-                self.assertEqual(gmail_connect.status_code, 200)
-                self.assertEqual(
-                    gmail_connect.json()["setup"]["status"],
-                    {"text": "Ready", "kind": "ok"},
-                )
-                self.assertEqual(
-                    stat.S_IMODE(web_server.GMAIL_CREDENTIALS.stat().st_mode), 0o600
-                )
-
-                web_server.GMAIL_CREDENTIALS.write_text(
-                    json.dumps(
-                        {
-                            "refresh_token": "expired-test-token",
-                            "refresh_token_expires_in": 1,
-                        }
-                    )
-                )
-                expired_time = web_server.GMAIL_CREDENTIALS.stat().st_mtime - 10
-                os.utime(
-                    web_server.GMAIL_CREDENTIALS,
-                    (expired_time, expired_time),
-                )
-                expired_status = await client.get(
-                    f"/api/mcp-servers/{gmail['mcp_server_id']}/setup"
-                )
-                self.assertEqual(
-                    expired_status.json()["status"],
-                    {"text": "Authorization expired", "kind": "error"},
-                )
-
-                with patch("asyncio.create_subprocess_exec", fake_auth_process):
-                    gmail_reconnect = await client.post(
-                        f"/api/mcp-servers/{gmail['mcp_server_id']}/setup/actions/connect"
-                    )
-                self.assertEqual(gmail_reconnect.status_code, 200)
-                self.assertEqual(
-                    gmail_reconnect.json()["setup"]["status"]["text"], "Ready"
-                )
                 model_response = await client.post(
                     "/api/models",
                     json={
@@ -2955,7 +2931,8 @@ class AdminApiTests(TemporaryDatabaseTest):
                 generic_setup = await client.get(
                     f"/api/mcp-servers/{server_response.json()['id']}/setup"
                 )
-                self.assertEqual(generic_setup.status_code, 404)
+                self.assertEqual(generic_setup.status_code, 200)
+                self.assertFalse(generic_setup.json()["configured"])
                 self.assertEqual(
                     db.build_server_spec(server_response.json()["id"])["env"],
                     {"ECHO_TOKEN": "pasted-in-the-interface"},
@@ -3201,6 +3178,61 @@ class AdminApiTests(TemporaryDatabaseTest):
                     ],
                 )
                 web_server.agent.conversation.reset()
+
+        asyncio.run(exercise_api())
+
+    def test_generic_mcp_setup_actions_are_driven_by_saved_configuration(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                local = await client.post(
+                    "/api/mcp-servers",
+                    json={
+                        "name": "Configured local",
+                        "transport": "stdio",
+                        "connection": "local-server",
+                        "setup_command": f'{sys.executable} -c "print(123)"',
+                    },
+                )
+                self.assertEqual(local.status_code, 200)
+                setup = await client.get(
+                    f"/api/mcp-servers/{local.json()['id']}/setup"
+                )
+                self.assertTrue(setup.json()["configured"])
+                self.assertTrue(setup.json()["command"]["configured"])
+                ran = await client.post(
+                    f"/api/mcp-servers/{local.json()['id']}/setup/actions/run_command"
+                )
+                self.assertEqual(ran.status_code, 200)
+                self.assertEqual(ran.json()["message"], "123")
+
+                remote = await client.post(
+                    "/api/mcp-servers",
+                    json={
+                        "name": "Configured remote",
+                        "transport": "streamable_http",
+                        "connection": "https://example.test/mcp",
+                        "auth_scheme": "oauth",
+                    },
+                )
+                self.assertEqual(remote.status_code, 200)
+                remote_setup = await client.get(
+                    f"/api/mcp-servers/{remote.json()['id']}/setup"
+                )
+                self.assertTrue(remote_setup.json()["oauth"]["enabled"])
+                self.assertFalse(remote_setup.json()["oauth"]["connected"])
+                test = await client.post(
+                    f"/api/mcp-servers/{remote.json()['id']}/test"
+                )
+                self.assertEqual(test.status_code, 409)
+                self.assertIn("Connect OAuth", test.json()["error"])
 
         asyncio.run(exercise_api())
 

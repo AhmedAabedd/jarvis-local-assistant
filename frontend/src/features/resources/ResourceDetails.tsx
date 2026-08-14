@@ -57,7 +57,10 @@ export function ResourceDetails({
     const server = item as McpServer
     const credentials =
       server.transport === 'stdio'
-        ? Object.keys(objectValue(server.env))
+        ? [
+            ...Object.keys(objectValue(server.env)),
+            ...(server.credential_files || []).map((file) => file.env_var),
+          ]
         : Object.keys(objectValue(server.headers))
     return (
       <div className="stack">
@@ -72,6 +75,18 @@ export function ResourceDetails({
             </div>
             <Detail label="Transport" value={readable(server.transport)} />
             <Detail label="Connection" value={server.connection} mono />
+            {server.transport !== 'stdio' && (
+              <Detail
+                label="Authentication"
+                value={
+                  server.auth_scheme === 'oauth'
+                    ? server.oauth_connected
+                      ? 'OAuth connected'
+                      : 'OAuth authorization required'
+                    : readable(server.auth_scheme || 'none')
+                }
+              />
+            )}
             <Detail label="Description" value={server.description} full />
             <div className="detail detail--full">
               <dt>Configured credentials</dt>

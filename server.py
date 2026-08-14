@@ -26,7 +26,6 @@ import json
 import os
 import shlex
 import threading
-import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,7 +44,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from mounir.agent import Agent
-from mounir import config as cfg, db, llm, trace
+from mounir import config as cfg, db, llm, mcp_oauth, trace
 from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
 from mounir.heartbeat import HeartbeatService
@@ -73,26 +72,20 @@ ALLOWED_ORIGINS = {
     ).split(",")
     if origin.strip()
 }
-GMAIL_AUTH_DIR = Path.home() / ".gmail-mcp"
-GMAIL_OAUTH_KEYS = GMAIL_AUTH_DIR / "gcp-oauth.keys.json"
-GMAIL_CREDENTIALS = GMAIL_AUTH_DIR / "credentials.json"
 SUBAGENT_ICON_MAX_BYTES = 512 * 1024
 
 
-def _secure_gmail_auth_files() -> None:
-    """Keep Google OAuth material private even if an older setup wrote it loosely."""
-    try:
-        if GMAIL_AUTH_DIR.exists():
-            GMAIL_AUTH_DIR.chmod(0o700)
-        for path in (GMAIL_OAUTH_KEYS, GMAIL_CREDENTIALS):
-            if path.exists():
-                path.chmod(0o600)
-    except OSError:
-        # Status/connect endpoints will still report the underlying file error.
-        pass
+class _OAuthSetupRun:
+    def __init__(self):
+        self.authorization_url = ""
+        self.error = ""
+        self.status = "starting"
+        self.redirect_ready = asyncio.Event()
+        self.callback = asyncio.Queue(maxsize=1)
+        self.task: asyncio.Task | None = None
 
 
-_secure_gmail_auth_files()
+_oauth_setup_runs: dict[int, _OAuthSetupRun] = {}
 
 # Ensure the SQLite DB exists and the legacy JSON file is migrated.
 db.init()
@@ -314,6 +307,16 @@ async def _lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        oauth_tasks = [
+            run.task
+            for run in _oauth_setup_runs.values()
+            if run.task is not None and not run.task.done()
+        ]
+        for task in oauth_tasks:
+            task.cancel()
+        if oauth_tasks:
+            await asyncio.gather(*oauth_tasks, return_exceptions=True)
+        _oauth_setup_runs.clear()
         await asyncio.to_thread(telegram_service.stop)
         await heartbeat_service.stop()
 
@@ -994,9 +997,109 @@ async def list_servers():
     return [db.server_for_api(server) for server in db.list_servers()]
 
 
+def _server_file_changes(req: dict) -> tuple[list[dict], list[str]]:
+    uploads = []
+    raw_uploads = req.pop("credential_files", []) or []
+    removals = req.pop("remove_credential_files", []) or []
+    if not isinstance(raw_uploads, list) or not isinstance(removals, list):
+        raise ValueError("Credential file changes must be lists.")
+    for item in raw_uploads:
+        if not isinstance(item, dict):
+            raise ValueError("Credential file entry is invalid.")
+        encoded = str(item.get("content") or "")
+        if encoded.startswith("data:"):
+            encoded = encoded.partition(",")[2]
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Credential file content is invalid.") from exc
+        uploads.append(
+            {
+                "env_var": item.get("env_var"),
+                "filename": item.get("filename"),
+                "content": content,
+            }
+        )
+    return uploads, [str(value) for value in removals]
+
+
+async def _run_oauth_setup(server_id: int, run: _OAuthSetupRun) -> None:
+    async def redirect_handler(url: str) -> None:
+        run.authorization_url = url
+        run.status = "waiting_for_authorization"
+        run.redirect_ready.set()
+
+    async def callback_handler() -> tuple[str, str | None]:
+        return await asyncio.wait_for(run.callback.get(), timeout=300)
+
+    try:
+        spec = db.build_server_spec(server_id)
+        if spec is None:
+            raise ValueError("Server not found.")
+        spec["oauth_auth"] = mcp_oauth.provider_for_spec(
+            spec,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+        )
+        tools_found = await asyncio.wait_for(discover_tools(spec), timeout=330)
+        db.save_server_tools(server_id, tools_found)
+        run.status = "connected"
+    except Exception as exc:
+        from mounir.specialists.mcp_agent import _exc_detail
+
+        run.error = _exc_detail(exc)
+        run.status = "failed"
+        db.record_server_test_failure(server_id, run.error)
+    finally:
+        run.redirect_ready.set()
+
+
+async def _run_local_setup_command(server_id: int) -> dict:
+    spec = db.build_server_spec(server_id)
+    if spec is None:
+        raise ValueError("Server not found.")
+    command = str(spec.get("setup_command") or "").strip()
+    if not command:
+        raise ValueError("No setup command is configured.")
+    if spec.get("transport") != "stdio":
+        raise ValueError("Setup commands are available only for local MCP servers.")
+    argv = shlex.split(command)
+    if not argv:
+        raise ValueError("The setup command is empty.")
+    environment = os.environ.copy()
+    environment.update({str(key): str(value) for key, value in spec.get("env", {}).items()})
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except OSError as exc:
+        raise ValueError(f"Could not start the setup command: {exc}") from exc
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), timeout=300)
+    except TimeoutError:
+        process.kill()
+        await process.communicate()
+        raise ValueError("The setup command timed out after 5 minutes.")
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.kill()
+            await process.communicate()
+        raise
+    message = output.decode(errors="replace").strip()[-4000:]
+    if process.returncode:
+        raise ValueError(message or f"Setup command exited with code {process.returncode}.")
+    return {"ok": True, "message": message or "Setup completed successfully."}
+
+
 @app.post("/api/mcp-servers")
 async def create_server(req: dict):
+    created_id: int | None = None
     try:
+        req = dict(req)
+        uploads, removals = _server_file_changes(req)
         server = db.add_server(
             req.get("name", ""),
             req.get("connection", ""),
@@ -1005,16 +1108,28 @@ async def create_server(req: dict):
             env=req.get("env", "{}"),
             description=req.get("description", ""),
             auth_scheme=req.get("auth_scheme", ""),
+            setup_command=req.get("setup_command", ""),
         )
+        created_id = int(server["id"])
+        if uploads or removals:
+            db.replace_server_files(server["id"], uploads, removals)
+            server = db.get_server(server["id"])
         return db.server_for_api(server)
     except (TypeError, ValueError) as exc:
+        if created_id is not None:
+            db.delete_server_result(created_id)
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 @app.put("/api/mcp-servers/{server_id}")
 async def update_server(server_id: int, req: dict):
     try:
+        req = dict(req)
+        uploads, removals = _server_file_changes(req)
         s = db.update_server(server_id, **req)
+        if s and (uploads or removals):
+            db.replace_server_files(server_id, uploads, removals)
+            s = db.get_server(server_id)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if not s:
@@ -1035,6 +1150,11 @@ async def test_server(server_id: int):
     spec = db.build_server_spec(server_id)
     if spec is None:
         return JSONResponse({"error": "Server not found."}, status_code=404)
+    if spec.get("auth_scheme") == "oauth" and not mcp_oauth.oauth_state_is_valid(server_id):
+        return JSONResponse(
+            {"error": "Connect OAuth from the setup section before testing this server."},
+            status_code=409,
+        )
     try:
         tools_found = await asyncio.wait_for(discover_tools(spec), timeout=45)
     except TimeoutError:
@@ -1054,225 +1174,131 @@ async def test_server(server_id: int):
     return {"ok": True, **state}
 
 
-def _server_setup_type(server: dict | None) -> str:
-    """Return saved onboarding capability; never guess it from a command or URL."""
-    return str((server or {}).get("setup_type") or "").strip()
-
-
-def _gmail_auth_state() -> dict:
-    """Describe saved OAuth state without exposing any token or client value."""
-    oauth_keys = GMAIL_OAUTH_KEYS.exists()
-    credentials_saved = GMAIL_CREDENTIALS.exists()
-    expired = False
-    invalid = False
-    oauth_file_changed = False
-    refresh_expires_at = None
-    refresh_lifetime_days = None
-
-    if credentials_saved:
-        try:
-            credentials = json.loads(GMAIL_CREDENTIALS.read_text(encoding="utf-8"))
-            if not isinstance(credentials, dict) or not credentials.get("refresh_token"):
-                invalid = True
-            lifetime = credentials.get("refresh_token_expires_in")
-            if isinstance(lifetime, (int, float)) and lifetime > 0:
-                refresh_lifetime_days = round(float(lifetime) / 86_400)
-                refresh_expires_at = GMAIL_CREDENTIALS.stat().st_mtime + float(lifetime)
-                expired = time.time() >= refresh_expires_at
-            if oauth_keys:
-                oauth_file_changed = (
-                    GMAIL_OAUTH_KEYS.stat().st_mtime
-                    > GMAIL_CREDENTIALS.stat().st_mtime + 1
-                )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
-            invalid = True
-
-    connected = bool(
-        oauth_keys
-        and credentials_saved
-        and not expired
-        and not invalid
-        and not oauth_file_changed
-    )
-    return {
-        "oauth_keys": oauth_keys,
-        "credentials_saved": credentials_saved,
-        "connected": connected,
-        "expired": expired,
-        "invalid": invalid,
-        "oauth_file_changed": oauth_file_changed,
-        "refresh_expires_at": refresh_expires_at,
-        "refresh_lifetime_days": refresh_lifetime_days,
-    }
-
-
-def _gmail_setup_view() -> dict:
-    """Build a UI-neutral setup descriptor for the bundled OAuth adapter."""
-    state = _gmail_auth_state()
-    if state["expired"]:
-        status = {"text": "Authorization expired", "kind": "error"}
-        description = (
-            "This Google authorization expired after seven days. Reconnect it, "
-            "then set the OAuth app publishing status to In production to avoid "
-            "the Testing-mode limit."
-            if state["refresh_lifetime_days"] == 7
-            else "The saved Google authorization expired. Reconnect the account."
-        )
-    elif state["invalid"]:
-        status = {"text": "Authorization is invalid", "kind": "error"}
-        description = (
-            "The saved authorization is incomplete or damaged. Reconnect the "
-            "account to replace it."
-        )
-    elif state["oauth_file_changed"]:
-        status = {"text": "Reconnection required", "kind": ""}
-        description = (
-            "The OAuth file changed. Reconnect the account to authorize this client."
-        )
-    elif state["connected"]:
-        status = {"text": "Ready", "kind": "ok"}
-        description = (
-            "Authorization is saved locally. Reconnect if the provider expires "
-            "or revokes it."
-        )
-    elif state["oauth_keys"]:
-        status = {"text": "Ready to connect", "kind": ""}
-        description = "The OAuth client file is ready. Connect the account."
-    else:
-        status = {"text": "OAuth file required", "kind": ""}
-        description = (
-            "Choose the OAuth client JSON supplied by the provider, then connect "
-            "the account in your browser. Files stay on this computer."
-        )
-
-    return {
-        "title": "Gmail account",
-        "description": description,
-        "status": status,
-        "file_actions": [
-            {
-                "id": "oauth_file",
-                "label": (
-                    "Replace OAuth file"
-                    if state["oauth_keys"]
-                    else "Choose OAuth file"
-                ),
-                "accept": "application/json,.json",
-                "busy_label": "Uploading…",
-            }
-        ],
-        "actions": [
-            {
-                "id": "connect",
-                "label": (
-                    "Reconnect account"
-                    if state["credentials_saved"]
-                    else "Connect account"
-                ),
-                "busy_label": "Waiting for browser…",
-                "disabled": not state["oauth_keys"],
-                "style": "primary",
-            }
-        ],
-    }
-
-
 @app.get("/api/mcp-servers/{server_id}/setup")
 async def server_setup_status(server_id: int):
     server = db.get_server(server_id)
-    setup_type = _server_setup_type(server)
-    if setup_type == "gmail_oauth":
-        return _gmail_setup_view()
-    return JSONResponse(
-        {"error": "This server has no additional setup actions."}, status_code=404
-    )
+    if server is None:
+        return JSONResponse({"error": "Server not found."}, status_code=404)
+    run = _oauth_setup_runs.get(server_id)
+    oauth_enabled = server.get("auth_scheme") == "oauth"
+    oauth_connected = mcp_oauth.oauth_state_is_valid(server_id) if oauth_enabled else False
+    if run and run.status in {"starting", "waiting_for_authorization"}:
+        status = {"kind": "waiting", "text": "Waiting for authorization"}
+    elif run and run.status == "failed":
+        status = {"kind": "failed", "text": "Authorization failed"}
+    elif oauth_connected:
+        status = {"kind": "connected", "text": "OAuth connected"}
+    elif oauth_enabled:
+        status = {"kind": "ready", "text": "Authorization required"}
+    elif server.get("setup_command"):
+        status = {"kind": "ready", "text": "Setup command ready"}
+    else:
+        status = {"kind": "ready", "text": "Ready to test"}
+    return {
+        "configured": bool(
+            oauth_enabled
+            or server.get("setup_command")
+            or db.list_server_files(server_id)
+        ),
+        "status": status,
+        "oauth": {
+            "enabled": oauth_enabled,
+            "connected": oauth_connected,
+            "in_progress": bool(
+                run and run.status in {"starting", "waiting_for_authorization"}
+            ),
+        },
+        "command": {"configured": bool(server.get("setup_command"))},
+        "credential_files": db.list_server_files(server_id),
+        "error": run.error if run else "",
+    }
 
 
 @app.post("/api/mcp-servers/{server_id}/setup/files/{action_id}")
 async def run_server_setup_file_action(
     server_id: int, action_id: str, file: UploadFile = File(...)
 ):
-    server = db.get_server(server_id)
-    if _server_setup_type(server) != "gmail_oauth" or action_id != "oauth_file":
-        return JSONResponse({"error": "Setup file action not found."}, status_code=404)
-    raw = await file.read(65_537)
-    if len(raw) > 65_536:
-        return JSONResponse({"error": "OAuth key file is too large."}, status_code=400)
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-        oauth = payload.get("installed") or payload.get("web")
-        if (
-            not isinstance(oauth, dict)
-            or not oauth.get("client_id")
-            or not oauth.get("client_secret")
-        ):
-            raise ValueError
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, AttributeError):
-        return JSONResponse(
-            {"error": "Choose the OAuth client JSON downloaded from Google Cloud."},
-            status_code=400,
-        )
-    GMAIL_AUTH_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    GMAIL_OAUTH_KEYS.write_bytes(raw)
-    _secure_gmail_auth_files()
-    return {"ok": True, "setup": _gmail_setup_view()}
+    return JSONResponse(
+        {"error": "Credential files are managed from the server configuration."},
+        status_code=404,
+    )
 
 
 @app.post("/api/mcp-servers/{server_id}/setup/actions/{action_id}")
-async def run_server_setup_action(server_id: int, action_id: str):
-    spec = db.build_server_spec(server_id)
+async def run_server_setup_action(server_id: int, action_id: str, request: Request):
     server = db.get_server(server_id)
-    if (
-        _server_setup_type(server) != "gmail_oauth"
-        or action_id != "connect"
-        or spec is None
-    ):
-        return JSONResponse({"error": "Setup action not found."}, status_code=404)
-    if not GMAIL_OAUTH_KEYS.exists():
-        return JSONResponse(
-            {"error": "Upload the Google OAuth client JSON first."}, status_code=400
-        )
-    argv = shlex.split(spec["connection"])
-    if not argv:
-        return JSONResponse({"error": "The Gmail server command is empty."}, status_code=400)
-    env = os.environ.copy()
-    env.update(spec.get("env") or {})
-    _secure_gmail_auth_files()
+    if server is None:
+        return JSONResponse({"error": "Server not found."}, status_code=404)
     try:
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            "auth",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+        if action_id == "run_command":
+            return await _run_local_setup_command(server_id)
+        if action_id == "disconnect_oauth":
+            run = _oauth_setup_runs.pop(server_id, None)
+            if run and run.task and not run.task.done():
+                run.task.cancel()
+            db.clear_server_oauth(server_id)
+            return {"ok": True, "message": "OAuth disconnected."}
+        if action_id == "authorize_oauth":
+            if server.get("transport") == "stdio" or server.get("auth_scheme") != "oauth":
+                raise ValueError("OAuth is not enabled for this server.")
+            previous = _oauth_setup_runs.get(server_id)
+            if previous and previous.task and not previous.task.done():
+                return {
+                    "ok": True,
+                    "authorization_url": previous.authorization_url,
+                    "message": "Authorization is already in progress.",
+                }
+            redirect_uri = str(
+                request.url_for("server_oauth_callback", server_id=str(server_id))
+            )
+            db.clear_server_oauth_tokens(server_id)
+            db.prepare_server_oauth(server_id, redirect_uri)
+            run = _OAuthSetupRun()
+            _oauth_setup_runs[server_id] = run
+            run.task = asyncio.create_task(_run_oauth_setup(server_id, run))
+            await asyncio.wait_for(run.redirect_ready.wait(), timeout=45)
+            if run.error and not run.authorization_url:
+                raise ValueError(run.error)
+            return {
+                "ok": True,
+                "authorization_url": run.authorization_url,
+                "message": "Continue authorization in the new browser window.",
+            }
+        return JSONResponse({"error": "Setup action not found."}, status_code=404)
     except TimeoutError:
-        process.terminate()
-        await process.wait()
         return JSONResponse(
-            {"error": "Gmail connection timed out before authorization completed."},
+            {"error": "The MCP server did not start authorization in time."},
             status_code=504,
         )
-    except Exception as exc:
-        return JSONResponse(
-            {"error": f"Could not start Gmail authorization: {exc}"},
-            status_code=400,
-        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
-    if process.returncode != 0 or not GMAIL_CREDENTIALS.exists():
-        detail = (stderr or stdout).decode(errors="replace").strip()[-700:]
-        return JSONResponse(
-            {"error": detail or "Gmail authorization did not complete."}, status_code=400
+
+@app.get("/api/mcp-servers/{server_id}/oauth/callback", name="server_oauth_callback")
+async def server_oauth_callback(server_id: int, request: Request):
+    run = _oauth_setup_runs.get(server_id)
+    if run is None or run.task is None or run.task.done():
+        return HTMLResponse(
+            "<h2>Authorization session expired</h2><p>Return to Mounir and try again.</p>",
+            status_code=410,
         )
-    _secure_gmail_auth_files()
-    state = _gmail_auth_state()
-    if not state["connected"]:
-        return JSONResponse(
-            {"error": "Gmail saved credentials, but they are not usable."},
-            status_code=400,
-        )
-    return {"ok": True, "setup": _gmail_setup_view()}
+    code = request.query_params.get("code", "")
+    state = request.query_params.get("state")
+    error = request.query_params.get("error", "")
+    if error:
+        run.error = request.query_params.get("error_description") or error
+    if run.callback.empty():
+        await run.callback.put((code, state))
+    return HTMLResponse(
+        """
+        <!doctype html><html><head><title>Mounir authorization</title></head>
+        <body style="font-family:system-ui;background:#0d1411;color:#e7eee9;padding:40px">
+        <h2>Authorization received</h2>
+        <p>You can close this window and return to Mounir.</p>
+        <script>window.setTimeout(() => window.close(), 900)</script>
+        </body></html>
+        """
+    )
 
 
 @app.delete("/api/mcp-servers/{server_id}")

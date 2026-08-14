@@ -134,6 +134,10 @@ Mounir acts as an **MCP client and host**: it consumes tools published by MCP
 servers and presents them to specialized agents. Mounir itself is not currently
 an MCP server.
 
+The model, MCP server, and dynamic subagent registries intentionally start empty
+on every new installation. Mounir never inserts provider-specific dynamic presets;
+users create and connect only the resources that match their own environment.
+
 ### The no-code workflow
 
 1. Create or select a model in **Agent Studio → Models**.
@@ -160,16 +164,27 @@ routes calls through the correct MCP connection.
 | **Streamable HTTP** | Modern hosted or network MCP servers | MCP endpoint URL and authentication |
 | **SSE** | Older remote MCP servers | SSE endpoint URL and authentication |
 
-Remote authentication is presented as three understandable choices:
+Remote authentication is presented as four understandable choices:
 
 - **No authentication**
+- **OAuth** — discover the MCP authorization servers, use Authorization Code +
+  PKCE, and retain refreshable credentials privately
 - **API key** — send the key as a Bearer token or in a named API header
 - **Advanced headers** — add custom headers required by the server
 
 Local server credentials are environment values passed to the child process by
 Mounir. They are entered and stored through the interface; the user does not need
-to maintain shell `export` commands. Gmail also has a guided OAuth file replacement
-and reconnect flow for its dedicated MCP setup.
+to maintain shell `export` commands. A local connection may also store private
+credential files, map each file path to a user-chosen environment variable, and
+define an optional one-time setup command. Mounir runs only the exact command the
+user saves and explicitly starts; it never infers setup behavior from a package
+name, provider, or command.
+
+The saved server page separates one-time setup from connection testing. OAuth
+opens the authorization page discovered through the MCP standard. Local setup
+commands run with the same configured environment and credential-file paths that
+the MCP server receives. A successful connection test then discovers and caches
+the server's tools before it is linked to a subagent.
 
 ### Tool discovery and permissions
 
@@ -661,8 +676,8 @@ Mounir is ambitious, but its current contracts are explicit:
 
 - Dynamic MCP integration consumes **tools**; generic MCP prompts and resources are
   not yet exposed to agents.
-- Remote MCP supports configured headers and tokens, but not universal interactive
-  OAuth discovery. Gmail has a dedicated local OAuth flow.
+- OAuth depends on the remote MCP server publishing standards-compatible protected
+  resource and authorization metadata, and supporting dynamic client registration.
 - Dynamic models must support OpenAI-compatible chat completions and function/tool
   calling correctly.
 - Desktop controls depend on operating-system support. Default-browser opening and

@@ -26,6 +26,8 @@ export function readable(value: string) {
 
 export function remoteAuth(headers: Record<string, string>, scheme = '') {
   const entries = Object.entries(headers)
+  if (scheme === 'oauth')
+    return { mode: 'oauth', method: 'bearer', secret: '', header: 'X-API-Key' }
   if (scheme === 'bearer') {
     const match = entries[0]?.[1].match(/^Bearer\s+(.+)$/i)
     return {

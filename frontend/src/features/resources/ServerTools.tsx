@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw, Upload } from 'lucide-react'
+import { KeyRound, Play, RefreshCw, Unplug } from 'lucide-react'
 import { api } from '../../api/client'
 import type { McpServer } from '../../api/types'
 import { Button } from '../../components/ui/Button'
@@ -12,32 +12,146 @@ export function ServerTools({ server }: { server: McpServer }) {
   const client = useQueryClient()
   const key = ['server-tools', server.id]
   const tools = useQuery({ queryKey: key, queryFn: () => api.servers.tools(server.id) })
-  const test = useMutation({
-    mutationFn: () => api.servers.test(server.id),
-    onSuccess: (data) => client.setQueryData(key, data),
-  })
   const setup = useQuery({
     queryKey: ['server-setup', server.id],
     queryFn: () => api.servers.setup(server.id),
-    enabled: Boolean(server.setup_type),
-    retry: false,
+    refetchInterval: (query) => (query.state.data?.oauth.in_progress ? 1500 : false),
+  })
+  const refreshServerState = () => {
+    client.invalidateQueries({ queryKey: ['servers'] })
+    setup.refetch()
+  }
+  const test = useMutation({
+    mutationFn: () => api.servers.test(server.id),
+    onSuccess: (data) => {
+      client.setQueryData(key, data)
+      refreshServerState()
+    },
   })
   const action = useMutation({
     mutationFn: (id: string) => api.servers.setupAction(server.id, id),
-    onSuccess: () => setup.refetch(),
+    onSuccess: () => {
+      refreshServerState()
+      client.invalidateQueries({ queryKey: key })
+    },
   })
-  const upload = useMutation({
-    mutationFn: ({ id, file }: { id: string; file: File }) =>
-      api.servers.setupFile(server.id, id, file),
-    onSuccess: () => setup.refetch(),
-  })
+
+  const authorize = () => {
+    const popup = window.open('', 'mounir-mcp-oauth', 'width=720,height=760')
+    if (popup)
+      popup.document.body.innerHTML =
+        '<p style="font:14px system-ui;padding:24px">Preparing secure authorization…</p>'
+    action.mutate('authorize_oauth', {
+      onSuccess: (result) => {
+        if (result.authorization_url) {
+          if (popup) popup.location.href = result.authorization_url
+          else window.open(result.authorization_url, '_blank', 'noopener,noreferrer')
+        } else popup?.close()
+      },
+      onError: () => popup?.close(),
+    })
+  }
+
+  const discoveredTools = test.data?.tools || tools.data?.tools || []
+  const actionError = action.error instanceof Error ? action.error.message : setup.data?.error
+
   return (
     <div className="stack">
+      {setup.data?.configured && (
+        <section className="card">
+          <header className="card__header">
+            <div>
+              <h3>Setup & authorization</h3>
+              <p>Complete any one-time requirements before testing the MCP connection.</p>
+            </div>
+            <Status value={setup.data.status.kind} label={setup.data.status.text} />
+          </header>
+          <div className="card__body stack">
+            {setup.isLoading && <Loading />}
+            {setup.data?.oauth.enabled && (
+              <div className="setup-method-row">
+                <span className="setup-method-row__icon">
+                  <KeyRound size={16} />
+                </span>
+                <span>
+                  <strong>OAuth account</strong>
+                  <small>
+                    {setup.data.oauth.connected
+                      ? 'Authorization is saved and refreshed through the MCP standard.'
+                      : 'Authorize Mounir using the sign-in page published by this MCP server.'}
+                  </small>
+                </span>
+                <div className="setup-method-row__actions">
+                  {setup.data.oauth.connected && (
+                    <Button
+                      icon={<Unplug size={13} />}
+                      busy={action.isPending && action.variables === 'disconnect_oauth'}
+                      disabled={action.isPending}
+                      onClick={() => action.mutate('disconnect_oauth')}
+                    >
+                      Disconnect
+                    </Button>
+                  )}
+                  <Button
+                    variant="primary"
+                    icon={<KeyRound size={13} />}
+                    busy={action.isPending && action.variables === 'authorize_oauth'}
+                    disabled={action.isPending || setup.data.oauth.in_progress}
+                    onClick={authorize}
+                  >
+                    {setup.data.oauth.connected ? 'Reconnect' : 'Connect OAuth'}
+                  </Button>
+                </div>
+              </div>
+            )}
+            {setup.data?.command.configured && (
+              <div className="setup-method-row">
+                <span className="setup-method-row__icon">
+                  <Play size={16} />
+                </span>
+                <span>
+                  <strong>Setup command</strong>
+                  <small>Runs the exact command saved in this server configuration.</small>
+                </span>
+                <div className="setup-method-row__actions">
+                  <Button
+                    variant="primary"
+                    icon={<Play size={13} />}
+                    busy={action.isPending && action.variables === 'run_command'}
+                    disabled={action.isPending}
+                    onClick={() => action.mutate('run_command')}
+                  >
+                    Run setup
+                  </Button>
+                </div>
+              </div>
+            )}
+            {!!setup.data?.credential_files.length && (
+              <div className="setup-files-summary">
+                <strong>Private files</strong>
+                <div className="chips">
+                  {setup.data.credential_files.map((file) => (
+                    <span className="chip" key={file.env_var} title={file.filename}>
+                      {file.env_var}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            <Feedback message={actionError} />
+            <Feedback
+              kind="success"
+              message={action.data?.message && !actionError ? action.data.message : ''}
+            />
+          </div>
+        </section>
+      )}
+
       <section className="card">
         <header className="card__header">
           <div>
-            <h3>Discovered tools</h3>
-            <p>Cached capabilities published by this MCP server.</p>
+            <h3>Connection & tools</h3>
+            <p>Connect now to verify the configuration and discover available tools.</p>
           </div>
           <Button
             icon={<RefreshCw size={13} />}
@@ -52,22 +166,19 @@ export function ServerTools({ server }: { server: McpServer }) {
             <Loading />
           ) : (
             <>
-              <Status
-                value={
-                  test.data?.status || tools.data?.status || server.connection_status || 'untested'
-                }
-              />
-              <Feedback
-                message={
-                  (test.error || tools.error) instanceof Error
-                    ? (test.error || (tools.error as Error)).message
-                    : undefined
-                }
-              />
+              <div className="server-test-status">
+                <Feedback
+                  message={
+                    (test.error || tools.error) instanceof Error
+                      ? (test.error || (tools.error as Error)).message
+                      : undefined
+                  }
+                />
+              </div>
+              {!discoveredTools.length && <p className="empty-inline">No tools discovered yet.</p>}
               <div className="tool-list">
-                {(test.data?.tools || tools.data?.tools || []).map((tool) => (
-                  <div className="tool-option" key={tool.name}>
-                    <span>•</span>
+                {discoveredTools.map((tool) => (
+                  <div className="tool-option tool-option--readonly" key={tool.name}>
                     <span>
                       <strong>{readable(tool.name)}</strong>
                       <small>{tool.description || 'No description available.'}</small>
@@ -79,56 +190,6 @@ export function ServerTools({ server }: { server: McpServer }) {
           )}
         </div>
       </section>
-      {server.setup_type && (
-        <section className="card">
-          <header className="card__header">
-            <div>
-              <h3>{setup.data?.title || 'Additional setup'}</h3>
-              <p>{setup.data?.description || 'Loading setup information…'}</p>
-            </div>
-            {setup.data && <Status value={setup.data.status.kind} label={setup.data.status.text} />}
-          </header>
-          <div className="card__body stack">
-            {setup.isLoading && <Loading />}
-            <Feedback message={setup.error instanceof Error ? setup.error.message : undefined} />
-            <div className="page-actions">
-              {setup.data?.file_actions.map((item) => (
-                <label className="button button--secondary" key={item.id}>
-                  <Upload size={13} />
-                  {upload.isPending ? item.busy_label : item.label}
-                  <input
-                    className="sr-only"
-                    type="file"
-                    accept={item.accept}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0]
-                      if (file) upload.mutate({ id: item.id, file })
-                    }}
-                  />
-                </label>
-              ))}
-              {setup.data?.actions.map((item) => (
-                <Button
-                  key={item.id}
-                  variant={item.style === 'primary' ? 'primary' : 'secondary'}
-                  disabled={item.disabled}
-                  busy={action.isPending}
-                  onClick={() => action.mutate(item.id)}
-                >
-                  {item.label}
-                </Button>
-              ))}
-            </div>
-            <Feedback
-              message={
-                (action.error || upload.error) instanceof Error
-                  ? (action.error || (upload.error as Error)).message
-                  : undefined
-              }
-            />
-          </div>
-        </section>
-      )}
     </div>
   )
 }

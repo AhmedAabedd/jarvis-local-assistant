@@ -8,6 +8,7 @@ import type {
   Profile,
   ServerToolsState,
   SetupDescriptor,
+  SetupActionResult,
   Subagent,
   SubagentNode,
   TelegramSettings,
@@ -72,7 +73,10 @@ export const api = {
     test: (id: number) => request<ServerToolsState>(`/api/mcp-servers/${id}/test`, json('POST')),
     setup: (id: number) => request<SetupDescriptor>(`/api/mcp-servers/${id}/setup`),
     setupAction: (id: number, action: string) =>
-      request(`/api/mcp-servers/${id}/setup/actions/${encodeURIComponent(action)}`, json('POST')),
+      request<SetupActionResult>(
+        `/api/mcp-servers/${id}/setup/actions/${encodeURIComponent(action)}`,
+        json('POST'),
+      ),
     setupFile: (id: number, action: string, file: File) => {
       const body = new FormData()
       body.append('file', file)

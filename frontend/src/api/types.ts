@@ -33,13 +33,21 @@ export interface McpServer {
   headers: string | Record<string, string>
   env: string | Record<string, string>
   auth_scheme?: string
+  setup_command?: string
+  oauth_connected?: boolean
   headers_configured?: boolean
   env_configured?: boolean
   credentials_configured?: boolean
-  setup_type?: string
+  setup_configured?: boolean
+  credential_files?: McpCredentialFile[]
   connection_status?: string
   tool_count?: number
   last_error?: string
+}
+
+export interface McpCredentialFile {
+  env_var: string
+  filename: string
 }
 
 export interface Subagent {
@@ -267,17 +275,18 @@ export interface ServerToolsState {
 }
 
 export interface SetupDescriptor {
-  title: string
-  description: string
+  configured: boolean
   status: { text: string; kind: string }
-  file_actions: Array<{ id: string; label: string; accept: string; busy_label: string }>
-  actions: Array<{
-    id: string
-    label: string
-    busy_label: string
-    disabled: boolean
-    style: string
-  }>
+  oauth: { enabled: boolean; connected: boolean; in_progress: boolean }
+  command: { configured: boolean }
+  credential_files: McpCredentialFile[]
+  error?: string
+}
+
+export interface SetupActionResult {
+  ok: boolean
+  message?: string
+  authorization_url?: string
 }
 
 export interface ChatMessage {

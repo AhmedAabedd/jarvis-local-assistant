@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 
 from langchain_core.tools import StructuredTool
 
-from .. import config, graph_runtime, llm
+from .. import config, graph_runtime, llm, mcp_oauth
 
 MAX_TOOL_ROUNDS = 8
 MCP_TOOL_TIMEOUT_SECONDS = max(
@@ -173,6 +173,11 @@ async def _mcp_session(spec: dict):
 
     transport = (spec.get("transport") or "stdio").strip().lower()
     connection = (spec.get("connection") or "").strip()
+    oauth_auth = (
+        mcp_oauth.provider_for_spec(spec)
+        if spec.get("auth_scheme") == "oauth" and not spec.get("oauth_auth")
+        else spec.get("oauth_auth")
+    )
 
     if not connection:
         raise ValueError("MCP server connection is empty")
@@ -184,6 +189,7 @@ async def _mcp_session(spec: dict):
         timeout = httpx.Timeout(30.0, read=300.0)
         async with httpx.AsyncClient(
             headers=spec.get("headers") or None,
+            auth=oauth_auth,
             follow_redirects=True,
             timeout=timeout,
         ) as http_client:
@@ -204,6 +210,7 @@ async def _mcp_session(spec: dict):
         async with sse_client(
             connection,
             headers=spec.get("headers") or None,
+            auth=oauth_auth,
         ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
