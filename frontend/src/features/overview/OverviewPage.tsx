@@ -14,15 +14,15 @@ import { api } from '../../api/client'
 import type { BuiltinAgent, Subagent } from '../../api/types'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Loading } from '../../components/ui/Loading'
-import { useAgents, useOverview, keys } from '../../hooks/useStudioData'
+import { useAgents, useModels, useOverview, useServers, keys } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 import { AgentConfigDrawer } from './AgentConfigDrawer'
 import { agentNodeTypes, type FlowData } from './AgentFlowNode'
 import { AgentNodeDrawer } from './AgentNodeDrawer'
 import { ConnectAgentModal } from './ConnectAgentModal'
 
-type ConnectionParent = { nodeId: number | null; agentId: number | null; name: string }
-type PendingDisconnect = { nodeId: number; name: string }
+type ConnectionParent = { agentId: number | null; name: string }
+type PendingDelete = { nodeId: number; name: string }
 
 function inputEdge(source: 'telegram' | 'whatsapp', color: string): Edge {
   return {
@@ -41,6 +41,8 @@ export function OverviewPage() {
   const navigate = useNavigate()
   const overview = useOverview()
   const agents = useAgents()
+  const models = useModels()
+  const servers = useServers()
   const telegram = useQuery({ queryKey: keys.telegram, queryFn: api.telegram.get })
   const whatsapp = useQuery({ queryKey: keys.whatsapp, queryFn: api.whatsapp.get })
   const [selected, setSelected] = useState<BuiltinAgent | null>(null)
@@ -49,7 +51,7 @@ export function OverviewPage() {
   const [supervisorModelId, setSupervisorModelId] = useState(0)
   const [connectionParent, setConnectionParent] = useState<ConnectionParent | null>(null)
   const [openNodeId, setOpenNodeId] = useState<number | null>(null)
-  const [pendingDisconnect, setPendingDisconnect] = useState<PendingDisconnect | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null)
 
   const save = useMutation({
     mutationFn: async () => {
@@ -73,9 +75,8 @@ export function OverviewPage() {
       setSupervisorOpen(false)
     },
   })
-  const connectAgent = useMutation({
-    mutationFn: ({ agent, parentNodeId }: { agent: Subagent; parentNodeId: number | null }) =>
-      api.agents.connect(agent.id, parentNodeId),
+  const createAgent = useMutation({
+    mutationFn: (body: object) => api.agents.create(body),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: keys.agents }),
@@ -85,11 +86,11 @@ export function OverviewPage() {
       setConnectionParent(null)
     },
   })
-  const disconnectNode = useMutation({
+  const deleteNode = useMutation({
     mutationFn: (nodeId: number) => api.agentNodes.remove(nodeId),
     onSuccess: async () => {
       setOpenNodeId(null)
-      setPendingDisconnect(null)
+      setPendingDelete(null)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: keys.agents }),
         queryClient.invalidateQueries({ queryKey: keys.overview }),
@@ -98,7 +99,7 @@ export function OverviewPage() {
     },
   })
   useEffect(() => {
-    if (connectionParent) connectAgent.reset()
+    if (connectionParent) createAgent.reset()
   }, [connectionParent])
 
   const graph = useMemo(() => {
@@ -116,19 +117,17 @@ export function OverviewPage() {
       pathLabel: string
     }
     const occurrences: Occurrence[] = custom
-      .flatMap((item) =>
-        (item.placements || []).map((placement) => ({
-          item,
-          nodeId: placement.id,
-          id: `dynamic-node-${placement.id}`,
-          parentNodeId:
-            placement.parent_node_id === null
-              ? 'supervisor'
-              : `dynamic-node-${placement.parent_node_id}`,
-          depth: Math.max(0, placement.depth - 1),
-          pathLabel: placement.path_label,
-        })),
-      )
+      .map((item) => ({
+        item,
+        nodeId: item.node_id || item.id,
+        id: `dynamic-agent-${item.id}`,
+        parentNodeId:
+          item.parent_agent_id === null || item.parent_agent_id === undefined
+            ? 'supervisor'
+            : `dynamic-agent-${item.parent_agent_id}`,
+        depth: Math.max(0, (item.depth || 1) - 1),
+        pathLabel: item.path_label || item.name,
+      }))
       .sort(
         (left, right) => left.depth - right.depth || left.item.name.localeCompare(right.item.name),
       )
@@ -155,8 +154,7 @@ export function OverviewPage() {
             setSupervisorModelId(info.supervisor.model_id || 0)
             setSupervisorOpen(true)
           },
-          onConnect: () =>
-            setConnectionParent({ nodeId: null, agentId: null, name: info.supervisor.name }),
+          onAdd: () => setConnectionParent({ agentId: null, name: info.supervisor.name }),
         },
       },
     ]
@@ -244,10 +242,13 @@ export function OverviewPage() {
             setSupervisorOpen(false)
             setOpenNodeId(nodeId)
           },
-          onConnect: () => setConnectionParent({ nodeId, agentId: item.id, name: pathLabel }),
-          onDisconnect: () => {
-            disconnectNode.reset()
-            setPendingDisconnect({ nodeId, name: item.name })
+          onAdd:
+            (item.depth || 1) < 4
+              ? () => setConnectionParent({ agentId: item.id, name: pathLabel })
+              : undefined,
+          onDelete: () => {
+            deleteNode.reset()
+            setPendingDelete({ nodeId, name: item.name })
           },
         },
       })
@@ -266,7 +267,7 @@ export function OverviewPage() {
     telegram.data?.enabled,
     whatsapp.data?.enabled,
     navigate,
-    disconnectNode,
+    deleteNode,
   ])
 
   if (overview.isLoading || agents.isLoading)
@@ -302,9 +303,7 @@ export function OverviewPage() {
           <AgentNodeDrawer
             nodeId={openNodeId}
             selectorOpen={Boolean(connectionParent)}
-            onConnectSubagent={(nodeId, agentId, name) =>
-              setConnectionParent({ nodeId, agentId, name })
-            }
+            onAddSubagent={(agentId, name) => setConnectionParent({ agentId, name })}
             onOpenSubagent={(subagentId) => navigate(`/admin/agents?open=${subagentId}`)}
             onClose={() => setOpenNodeId(null)}
           />
@@ -312,30 +311,29 @@ export function OverviewPage() {
       </div>
       <ConnectAgentModal
         open={Boolean(connectionParent)}
-        parentNodeId={connectionParent?.nodeId ?? null}
         parentAgentId={connectionParent?.agentId ?? null}
         parentName={connectionParent?.name || 'Mounir'}
+        models={models.data || []}
+        servers={servers.data || []}
         agents={agents.data || []}
-        busy={connectAgent.isPending}
-        error={connectAgent.error instanceof Error ? connectAgent.error.message : ''}
-        onSelect={(agent) =>
-          connectAgent.mutate({ agent, parentNodeId: connectionParent?.nodeId ?? null })
-        }
+        busy={createAgent.isPending}
+        error={createAgent.error instanceof Error ? createAgent.error.message : ''}
+        onCreate={(body) => createAgent.mutate(body)}
         onClose={() => setConnectionParent(null)}
       />
       <ConfirmDialog
-        open={Boolean(pendingDisconnect)}
-        title="Disconnect subagent?"
-        message={`Disconnect “${pendingDisconnect?.name || ''}” and its nested subagents?`}
-        confirmLabel="Disconnect"
+        open={Boolean(pendingDelete)}
+        title="Delete subagent?"
+        message={`Permanently delete “${pendingDelete?.name || ''}” and its nested subagents?`}
+        confirmLabel="Delete"
         danger
-        busy={disconnectNode.isPending}
-        error={disconnectNode.error instanceof Error ? disconnectNode.error.message : ''}
-        onConfirm={() => pendingDisconnect && disconnectNode.mutate(pendingDisconnect.nodeId)}
+        busy={deleteNode.isPending}
+        error={deleteNode.error instanceof Error ? deleteNode.error.message : ''}
+        onConfirm={() => pendingDelete && deleteNode.mutate(pendingDelete.nodeId)}
         onCancel={() => {
-          if (disconnectNode.isPending) return
-          disconnectNode.reset()
-          setPendingDisconnect(null)
+          if (deleteNode.isPending) return
+          deleteNode.reset()
+          setPendingDelete(null)
         }}
       />
       <AgentConfigDrawer

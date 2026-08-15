@@ -1,9 +1,10 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Bot, ChevronLeft, Database, Edit3, Plus, Save, Server, Trash2 } from 'lucide-react'
+import { Bot, ChevronLeft, Database, Edit3, Plus, Save, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
 import type { McpServer, ModelRecord, Subagent } from '../../api/types'
+import { McpIcon } from '../../components/icons/McpIcon'
 import { Button } from '../../components/ui/Button'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
@@ -30,7 +31,7 @@ const meta = {
     title: 'MCP Servers',
     singular: 'MCP server',
     description: 'Manage services and tools connected through MCP',
-    icon: Server,
+    icon: McpIcon,
   },
   agents: {
     title: 'Subagents',
@@ -143,12 +144,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     return entries
       .map((entry) => ({
         ...entry,
-        depth: Math.max(
-          0,
-          Math.min(
-            ...((entry.item as Subagent).placements?.map((placement) => placement.depth) || [1]),
-          ) - 1,
-        ),
+        depth: Math.max(0, ((entry.item as Subagent).depth || 1) - 1),
       }))
       .sort((left, right) => left.depth - right.depth || left.index - right.index)
   }, [data, kind])

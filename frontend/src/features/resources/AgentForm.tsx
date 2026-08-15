@@ -1,11 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState, type FormEvent } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
-import type { AgentPlacement, McpServer, ModelRecord, Subagent } from '../../api/types'
+import type { McpServer, ModelRecord, Subagent } from '../../api/types'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Field } from '../../components/ui/Field'
 import { Feedback } from '../../components/ui/Feedback'
-import { AgentChoices } from './AgentChoices'
 import { stringList, toDataUrl } from './helpers'
 import { ToolChoices } from './ToolChoices'
 
@@ -33,28 +32,29 @@ export function AgentForm({
   const [deduped, setDeduped] = useState(new Set(stringList(item?.dedupe_tools)))
   const [icon, setIcon] = useState<string | undefined>()
   const [error, setError] = useState('')
-  const [parents, setParents] = useState<Set<number | null>>(() => {
-    const initial = new Set<number | null>(
-      (item?.placements || []).map((placement) => placement.parent_node_id),
+  const availableParents = useMemo(() => {
+    const children = new Map<number, number[]>()
+    agents.forEach((agent) => {
+      if (agent.parent_agent_id == null) return
+      children.set(agent.parent_agent_id, [
+        ...(children.get(agent.parent_agent_id) || []),
+        agent.id,
+      ])
+    })
+    const descendants = new Set<number>()
+    const visit = (agentId: number) => {
+      if (descendants.has(agentId)) return
+      descendants.add(agentId)
+      for (const childId of children.get(agentId) || []) visit(childId)
+    }
+    if (item) visit(item.id)
+    const subtreeHeight = (agentId: number): number =>
+      1 + Math.max(0, ...(children.get(agentId) || []).map(subtreeHeight))
+    const movingHeight = item ? subtreeHeight(item.id) : 1
+    return agents.filter(
+      (agent) => !descendants.has(agent.id) && (agent.depth || 1) + movingHeight <= 4,
     )
-    if (!item || !initial.size) initial.add(null)
-    return initial
-  })
-  const [placementChildren, setPlacementChildren] = useState(
-    new Map<number, Set<number>>(
-      (item?.placements || []).map((placement) => [
-        placement.id,
-        new Set(placement.child_agent_ids),
-      ]),
-    ),
-  )
-  const parentPlacements = agents.flatMap((agent) =>
-    (agent.placements || []).map((placement) => ({ agent, placement })),
-  )
-  const availableParents = parentPlacements.filter(
-    ({ agent, placement }) => agent.id !== item?.id && placement.depth < 4,
-  )
-  const availableChildren = agents.filter((agent) => agent.id !== item?.id)
+  }, [agents, item])
   const tools = useQuery({
     queryKey: ['server-tools', serverId],
     queryFn: () => api.servers.tools(serverId),
@@ -70,24 +70,13 @@ export function AgentForm({
     try {
       body.model_id = Number(body.model_id)
       body.mcp_server_id = Number(body.mcp_server_id)
-      if (!parents.size) throw new Error('Select at least one parent connection.')
-      body.parent_node_ids = [...parents]
+      body.parent_agent_id = body.parent_agent_id ? Number(body.parent_agent_id) : null
       delete body.confirmation_mode
       body.confirm_tools = mode === 'all' ? ['*'] : mode === 'selected' ? [...confirmed] : []
       if (mode === 'selected' && !confirmed.size)
         throw new Error('Select at least one action requiring confirmation.')
       body.confirm_tool_calls = mode !== 'none'
       body.dedupe_tools = [...deduped]
-      if (item)
-        body.placement_children = [...placementChildren]
-          .filter(([nodeId]) => {
-            const placement = item.placements?.find((candidate) => candidate.id === nodeId)
-            return placement ? parents.has(placement.parent_node_id) : false
-          })
-          .map(([node_id, childIds]) => ({
-            node_id,
-            child_agent_ids: [...childIds],
-          }))
       if (icon !== undefined) body.icon_data = icon
       await onSubmit(body)
     } catch (e) {
@@ -175,72 +164,20 @@ export function AgentForm({
           ))}
         </select>
       </Field>
-      <Field full label="Parent connections" hint="Choose where this subagent appears.">
-        <div className="agent-choice-list agent-parent-choice-list">
-          <label className="agent-choice">
-            <input
-              type="checkbox"
-              checked={parents.has(null)}
-              onChange={(event) => {
-                const next = new Set(parents)
-                event.target.checked ? next.add(null) : next.delete(null)
-                setParents(next)
-              }}
-            />
-            <span className="avatar">M</span>
-            <span className="agent-choice__copy">
-              <strong>Mounir</strong>
-              <small>Make this agent directly available to the orchestrator.</small>
-            </span>
-          </label>
-          {availableParents.map(({ agent, placement }) => (
-            <label className="agent-choice" key={placement.id}>
-              <input
-                type="checkbox"
-                checked={parents.has(placement.id)}
-                onChange={(event) => {
-                  const next = new Set(parents)
-                  event.target.checked ? next.add(placement.id) : next.delete(placement.id)
-                  setParents(next)
-                }}
-              />
-              <span className="avatar">
-                {agent.has_icon ? (
-                  <img src={`/api/subagents/${agent.id}/icon`} alt="" />
-                ) : (
-                  agent.name[0]
-                )}
-              </span>
-              <span className="agent-choice__copy">
-                <strong>{agent.name}</strong>
-                <small>{placement.path_label}</small>
-              </span>
-            </label>
+      <Field
+        full
+        label="Parent"
+        hint="Choose the single agent that can delegate work to this subagent."
+      >
+        <select name="parent_agent_id" defaultValue={item?.parent_agent_id || ''}>
+          <option value="">Mounir</option>
+          {availableParents.map((agent) => (
+            <option key={agent.id} value={agent.id}>
+              {agent.path_label || agent.name}
+            </option>
           ))}
-        </div>
+        </select>
       </Field>
-      {item &&
-        (item.placements || []).map((placement: AgentPlacement) => (
-          <section className="key-value-editor agent-children" key={placement.id}>
-            <div className="key-value-editor__title">
-              <span>
-                <strong>Children of {placement.path_label}</strong>
-                <small>Select the subagents connected here.</small>
-              </span>
-            </div>
-            <AgentChoices
-              agents={placement.depth >= 4 ? [] : availableChildren}
-              selected={placementChildren.get(placement.id) || new Set()}
-              onChange={(selected) => {
-                setPlacementChildren((current) => {
-                  const next = new Map(current)
-                  next.set(placement.id, selected)
-                  return next
-                })
-              }}
-            />
-          </section>
-        ))}
       <Field full label="Action confirmation">
         <select name="confirmation_mode" value={mode} onChange={(e) => setMode(e.target.value)}>
           <option value="all">Ask before every action</option>

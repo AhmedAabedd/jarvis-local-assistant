@@ -8,16 +8,16 @@ import {
   MessageCircle,
   Mic2,
   Radio,
-  Server,
   UserRound,
 } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router-dom'
+import { McpIcon } from '../../components/icons/McpIcon'
 import { useProfile } from '../../hooks/useStudioData'
 
 const primary = [
   { to: '/admin', end: true, label: 'Overview', icon: LayoutDashboard },
   { to: '/admin/models', label: 'Models', icon: Database, resetResourceList: true },
-  { to: '/admin/servers', label: 'MCP Servers', icon: Server, resetResourceList: true },
+  { to: '/admin/servers', label: 'MCP Servers', icon: McpIcon, resetResourceList: true },
   { to: '/admin/agents', label: 'Subagents', icon: Boxes, resetResourceList: true },
 ]
 const settings = [

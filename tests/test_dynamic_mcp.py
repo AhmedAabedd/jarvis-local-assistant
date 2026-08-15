@@ -1523,7 +1523,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(child["parent_name"], "Team lead")
         specs = {item["id"]: item for item in db.build_specs()}
         self.assertEqual(specs[grandchild["id"]]["parent_agent_id"], child["id"])
-        with self.assertRaisesRegex(ValueError, "placement's children"):
+        with self.assertRaisesRegex(ValueError, "own subtree"):
             db.update_subagent(parent["id"], parent_agent_id=grandchild["id"])
         with self.assertRaisesRegex(ValueError, "children first"):
             db.delete_subagent(parent["id"])
@@ -1635,7 +1635,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertIn("mcp_lead_agent", nodes)
         self.assertNotIn("mcp_nested_agent", nodes)
 
-    def test_parent_assigns_multiple_children_atomically(self):
+    def test_parent_moves_multiple_complete_subagents_atomically(self):
         db.init()
         model = db.add_model(
             "Bulk hierarchy model", "bulk/hierarchy", "Ollama",
@@ -1666,20 +1666,11 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(updated["child_count"], 2)
         self.assertEqual(db.get_subagent(first["id"])["parent_agent_id"], parent["id"])
         self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
-        self.assertEqual(
-            set(db.get_subagent(second["id"])["parent_agent_ids"]),
-            {parent["id"], other_parent["id"]},
-        )
-        self.assertTrue(db.get_subagent(first["id"])["connected_to_supervisor"])
-        self.assertEqual(db.get_subagent(other_parent["id"])["child_count"], 1)
+        self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
+        self.assertFalse(db.get_subagent(first["id"])["connected_to_supervisor"])
+        self.assertEqual(db.get_subagent(other_parent["id"])["child_count"], 0)
 
         db.update_subagent(parent["id"], child_agent_ids=[second["id"]])
-        self.assertIsNone(db.get_subagent(first["id"])["parent_agent_id"])
-        self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
-
-        with self.assertRaisesRegex(ValueError, "placement's children"):
-            db.update_subagent(parent["id"], parent_agent_id=first["id"])
-        self.assertIsNone(db.get_subagent(parent["id"])["parent_agent_id"])
         self.assertIsNone(db.get_subagent(first["id"])["parent_agent_id"])
         self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
 
@@ -1687,7 +1678,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             db.update_subagent(parent["id"], child_agent_ids=[999999])
         self.assertEqual(db.get_subagent(second["id"])["parent_agent_id"], parent["id"])
 
-    def test_subagent_can_keep_several_parent_connections(self):
+    def test_subagent_has_one_parent_and_moves_as_one_runtime_agent(self):
         db.init()
         model = db.add_model(
             "Flexible hierarchy model", "flexible/hierarchy", "Ollama",
@@ -1707,32 +1698,30 @@ class DatabaseTests(TemporaryDatabaseTest):
             model["id"], server["id"], confirm_tools=[],
         )
 
-        db.connect_subagent(gmail["id"], github["id"])
-        connected = db.connect_subagent(gmail["id"], projects["id"])
-        self.assertTrue(connected["connected_to_supervisor"])
-        self.assertEqual(
-            set(connected["parent_agent_ids"]), {github["id"], projects["id"]}
+        under_github = db.update_subagent(
+            gmail["id"], parent_agent_id=github["id"]
         )
-        self.assertEqual(
-            connected["parent_names"], ["Mounir", "GitHub", "Projects"]
-        )
+        self.assertEqual(under_github["parent_agent_id"], github["id"])
+        self.assertIsNotNone(under_github["node_id"])
 
-        db.update_subagent(github["id"], child_agent_ids=[])
-        remaining = db.get_subagent(gmail["id"])
-        self.assertTrue(remaining["connected_to_supervisor"])
-        self.assertEqual(remaining["parent_agent_ids"], [projects["id"]])
-        repeated = db.connect_subagent(projects["id"], gmail["id"])
-        self.assertEqual(len(repeated["placements"]), 2)
+        under_projects = db.update_subagent(
+            gmail["id"], parent_agent_id=projects["id"]
+        )
+        self.assertEqual(under_projects["parent_agent_id"], projects["id"])
+        self.assertEqual(db.get_subagent(github["id"])["child_count"], 0)
+        self.assertEqual(db.get_subagent(projects["id"])["child_count"], 1)
+        with self.assertRaisesRegex(ValueError, "only one parent"):
+            db.update_subagent(
+                gmail["id"], parent_agent_ids=[github["id"], projects["id"]]
+            )
 
         gmail_specs = [item for item in db.build_specs() if item["id"] == gmail["id"]]
-        self.assertTrue(any(item["connected_to_supervisor"] for item in gmail_specs))
-        self.assertTrue(
-            any(item["parent_agent_ids"] == [projects["id"]] for item in gmail_specs)
-        )
+        self.assertEqual(len(gmail_specs), 1)
+        self.assertEqual(gmail_specs[0]["parent_agent_id"], projects["id"])
         nodes = set(langgraph_agent.build_graph().get_graph().nodes)
-        self.assertIn("mcp_gmail", nodes)
+        self.assertNotIn("mcp_gmail", nodes)
 
-    def test_duplicate_agent_nodes_keep_independent_children(self):
+    def test_old_duplicate_placements_migrate_to_independent_subagents(self):
         db.init()
         model = db.add_model(
             "Placement model", "placement/model", "Ollama",
@@ -1746,146 +1735,132 @@ class DatabaseTests(TemporaryDatabaseTest):
         gmail = db.add_subagent(
             "Gmail", "Handles email.", "",
             model["id"], server["id"], confirm_tools=[],
+            enabled_tools=["read_email"],
         )
         researcher = db.add_subagent(
             "Researcher", "Handles research.", "",
             model["id"], server["id"], confirm_tools=[],
         )
-        gmail_node_id = gmail["placements"][0]["id"]
-        db.connect_subagent(
-            github["id"], parent_node_id=gmail_node_id
-        )
-        github_nodes = db.get_subagent(github["id"])["placements"]
-        root_github = next(node for node in github_nodes if node["parent_node_id"] is None)
-        nested_github = next(
-            node for node in github_nodes if node["parent_node_id"] == gmail_node_id
-        )
+        github_node_id = github["node_id"]
+        gmail_node_id = gmail["node_id"]
+        researcher_node_id = researcher["node_id"]
+        with db._connect() as conn:
+            conn.execute("DROP INDEX idx_subagent_nodes_one_per_agent")
+            conn.execute(
+                "DELETE FROM app_meta WHERE key = ?",
+                ("subagents_are_runtime_nodes_v2",),
+            )
+            duplicate = conn.execute(
+                """
+                INSERT INTO subagent_nodes (
+                    agent_id, parent_node_id, enabled_tools, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    gmail["id"], github_node_id,
+                    json.dumps(["send_email"]), db._now(),
+                ),
+            )
+            duplicate_node_id = int(duplicate.lastrowid)
+            conn.execute(
+                "UPDATE subagent_nodes SET parent_node_id = ? WHERE id = ?",
+                (duplicate_node_id, researcher_node_id),
+            )
+            conn.commit()
 
-        db.connect_subagent(
-            researcher["id"], parent_node_id=nested_github["id"]
-        )
-        github_nodes = db.get_subagent(github["id"])["placements"]
-        root_github = next(node for node in github_nodes if node["id"] == root_github["id"])
-        nested_github = next(node for node in github_nodes if node["id"] == nested_github["id"])
-        self.assertEqual(root_github["child_agent_ids"], [])
-        self.assertEqual(nested_github["child_agent_ids"], [researcher["id"]])
+        db.init()
 
-        specs = db.build_specs()
-        github_specs = [spec for spec in specs if spec["id"] == github["id"]]
-        self.assertEqual(len(github_specs), 2)
-        researcher_nodes = [spec for spec in specs if spec["id"] == researcher["id"]]
-        self.assertTrue(
-            any(spec["parent_node_id"] == nested_github["id"] for spec in researcher_nodes)
-        )
-        self.assertFalse(
-            any(spec["parent_node_id"] == root_github["id"] for spec in researcher_nodes)
-        )
-        supervisor_tree = mcp_agents.subagent_tree_prompt(specs)
-        self.assertNotIn("NESTED CAPABILITIES", supervisor_tree)
-        self.assertNotIn("GitHub — Handles repositories.", supervisor_tree)
-        self.assertNotIn("Researcher — Handles research.", supervisor_tree)
-        root_github_spec = next(
-            spec for spec in github_specs if spec["node_id"] == root_github["id"]
-        )
-        nested_github_spec = next(
-            spec for spec in github_specs if spec["node_id"] == nested_github["id"]
-        )
-        self.assertEqual(
-            mcp_agents.subagent_tree_prompt(specs, parent=root_github_spec), ""
-        )
+        agents = db.list_subagents()
+        migrated_gmail = [
+            agent for agent in agents if agent["name"].startswith("Gmail")
+        ]
+        self.assertEqual([agent["name"] for agent in migrated_gmail], ["Gmail", "Gmail 2"])
+        original = next(agent for agent in migrated_gmail if agent["id"] == gmail["id"])
+        clone = next(agent for agent in migrated_gmail if agent["id"] != gmail["id"])
+        self.assertEqual(original["enabled_tools"], ["read_email"])
+        self.assertEqual(clone["enabled_tools"], ["send_email"])
+        self.assertIsNone(original["parent_agent_id"])
+        self.assertEqual(clone["parent_agent_id"], github["id"])
+        self.assertEqual(db.get_subagent(researcher["id"])["parent_agent_id"], clone["id"])
+        self.assertEqual(clone["model_id"], gmail["model_id"])
+        self.assertEqual(clone["mcp_server_id"], gmail["mcp_server_id"])
+        self.assertIsNotNone(clone["node_id"])
+        self.assertEqual(len(db.build_specs()), 4)
+
         nested_tree = mcp_agents.subagent_tree_prompt(
-            specs, parent=nested_github_spec
+            db.build_specs(),
+            parent=next(spec for spec in db.build_specs() if spec["id"] == github["id"]),
         )
+        self.assertIn("- Gmail 2", nested_tree)
         self.assertIn("- Researcher", nested_tree)
-        self.assertNotIn("NESTED CAPABILITIES", nested_tree)
-        self.assertNotIn("Researcher — Handles research.", nested_tree)
 
-    def test_subagent_node_details_describe_only_one_placement(self):
+    def test_subagent_node_details_manage_one_complete_agent(self):
         db.init()
         model = db.add_model(
             "Node detail model", "node/detail", "Ollama",
             "http://localhost:11434/v1", "",
         )
         server = db.add_server("Node detail server", "node-detail-server")
-        github = db.add_subagent(
-            "GitHub details", "Handles repositories.", "",
-            model["id"], server["id"], confirm_tools=[],
-        )
         gmail = db.add_subagent(
             "Gmail details", "Handles email.", "",
             model["id"], server["id"], confirm_tools=[],
         )
+        github = db.add_subagent(
+            "GitHub details", "Handles repositories.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=gmail["id"],
+        )
         researcher = db.add_subagent(
             "Research details", "Handles research.", "",
             model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=github["id"],
         )
-        gmail_node_id = gmail["placements"][0]["id"]
-        db.connect_subagent(github["id"], parent_node_id=gmail_node_id)
-        github_nodes = db.get_subagent(github["id"])["placements"]
-        root_node = next(node for node in github_nodes if node["parent_node_id"] is None)
-        nested_node = next(
-            node for node in github_nodes if node["parent_node_id"] == gmail_node_id
-        )
-        db.connect_subagent(researcher["id"], parent_node_id=nested_node["id"])
+        gmail_node_id = gmail["node_id"]
+        github_node_id = github["node_id"]
 
-        root_details = db.get_subagent_node(root_node["id"])
-        nested_details = db.get_subagent_node(nested_node["id"])
+        gmail_details = db.get_subagent_node(gmail_node_id)
+        github_details = db.get_subagent_node(github_node_id)
 
-        self.assertIsNone(root_details["parent"])
-        self.assertEqual(root_details["children"], [])
-        self.assertEqual(nested_details["parent"]["id"], gmail_node_id)
-        self.assertEqual(nested_details["parent"]["name"], "Gmail details")
-        self.assertEqual(nested_details["subagent"]["id"], github["id"])
+        self.assertIsNone(gmail_details["parent"])
+        self.assertEqual(gmail_details["children"][0]["subagent_id"], github["id"])
+        self.assertEqual(github_details["parent"]["id"], gmail_node_id)
+        self.assertEqual(github_details["parent"]["name"], "Gmail details")
+        self.assertEqual(github_details["subagent"]["id"], github["id"])
         self.assertEqual(
-            nested_details["path_label"],
+            github_details["path_label"],
             "Mounir / Gmail details / GitHub details",
         )
         self.assertEqual(
-            [child["subagent_id"] for child in nested_details["children"]],
+            [child["subagent_id"] for child in github_details["children"]],
             [researcher["id"]],
         )
-        self.assertNotIn("placements", nested_details["subagent"])
-        self.assertIsNone(root_details["enabled_tools"])
-        self.assertIsNone(nested_details["enabled_tools"])
+        self.assertNotIn("placements", github_details["subagent"])
+        self.assertIsNone(github_details["enabled_tools"])
         self.assertIsNone(db.get_subagent_node(999999))
 
-        db.update_subagent_node(root_node["id"], enabled_tools=["read_repository"])
         db.update_subagent_node(
-            nested_node["id"], enabled_tools=["create_issue", "update_issue"]
+            github_node_id, enabled_tools=["create_issue", "update_issue"]
         )
-        root_details = db.get_subagent_node(root_node["id"])
-        nested_details = db.get_subagent_node(nested_node["id"])
-        self.assertEqual(root_details["enabled_tools"], ["read_repository"])
         self.assertEqual(
-            nested_details["enabled_tools"], ["create_issue", "update_issue"]
-        )
-        specs = {spec["node_id"]: spec for spec in db.build_specs()}
-        self.assertEqual(specs[root_node["id"]]["allowed_tools"], ["read_repository"])
-        self.assertEqual(
-            specs[nested_node["id"]]["allowed_tools"],
+            db.get_subagent_node(github_node_id)["enabled_tools"],
             ["create_issue", "update_issue"],
         )
-        db.update_subagent_node(root_node["id"], enabled_tools=None)
-        self.assertIsNone(db.get_subagent_node(root_node["id"])["enabled_tools"])
+        specs = {spec["node_id"]: spec for spec in db.build_specs()}
+        self.assertEqual(
+            specs[github["id"]]["allowed_tools"],
+            ["create_issue", "update_issue"],
+        )
+        db.update_subagent_node(github_node_id, enabled_tools=None)
+        self.assertIsNone(db.get_subagent_node(github_node_id)["enabled_tools"])
         with self.assertRaisesRegex(ValueError, "explicit tool names"):
-            db.update_subagent_node(root_node["id"], enabled_tools=["*"])
+            db.update_subagent_node(github_node_id, enabled_tools=["*"])
         self.assertIsNone(db.update_subagent_node(999999, enabled_tools=[]))
 
-        removed = db.remove_subagent_node(nested_node["id"])
+        removed = db.remove_subagent_node(github_node_id)
         self.assertEqual(removed["removed_nodes"], 2)
-        self.assertIsNone(db.get_subagent_node(nested_node["id"]))
-        self.assertIsNotNone(db.get_subagent_node(root_node["id"]))
-        self.assertEqual(
-            [node["id"] for node in db.get_subagent(github["id"])["placements"]],
-            [root_node["id"]],
-        )
-        self.assertEqual(len(db.get_subagent(researcher["id"])["placements"]), 1)
-        root_removed = db.remove_subagent_node(root_node["id"])
-        self.assertEqual(root_removed["removed_nodes"], 1)
-        self.assertIsNone(root_removed["parent_node_id"])
-        self.assertIsNone(db.get_subagent_node(root_node["id"]))
-        self.assertEqual(db.get_subagent(github["id"])["placements"], [])
-        self.assertIsNotNone(db.get_subagent(github["id"]))
+        self.assertIsNone(db.get_subagent(github["id"]))
+        self.assertIsNone(db.get_subagent(researcher["id"]))
+        self.assertIsNotNone(db.get_subagent(gmail["id"]))
         self.assertIsNone(db.remove_subagent_node(999999))
 
     def test_dynamic_subagent_activation_controls_runtime_and_mcp_connection(self):
@@ -3097,39 +3072,29 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(child["parent_agent_id"], parent["id"])
                 self.assertEqual(child["parent_name"], "API lead")
                 second_child_response = await client.post(
-                    "/api/subagents", json={**common, "name": "API second worker"}
+                    "/api/subagents",
+                    json={
+                        **common,
+                        "name": "API second worker",
+                        "parent_agent_id": parent["id"],
+                    },
                 )
                 self.assertEqual(second_child_response.status_code, 200)
                 second_child = second_child_response.json()
-
-                connected = await client.post(
-                    f"/api/subagents/{second_child['id']}/connections",
-                    json={"parent_node_id": parent["placements"][0]["id"]},
-                )
-                self.assertEqual(connected.status_code, 200)
-                self.assertTrue(connected.json()["connected_to_supervisor"])
-                self.assertEqual(
-                    connected.json()["parent_agent_ids"], [parent["id"]]
-                )
-                nested_node = next(
-                    node
-                    for node in connected.json()["placements"]
-                    if node["parent_node_id"] == parent["placements"][0]["id"]
-                )
                 node_response = await client.get(
-                    f"/api/subagent-nodes/{nested_node['id']}"
+                    f"/api/subagent-nodes/{second_child['node_id']}"
                 )
                 self.assertEqual(node_response.status_code, 200)
                 node_details = node_response.json()
-                self.assertEqual(node_details["id"], nested_node["id"])
+                self.assertEqual(node_details["id"], second_child["node_id"])
                 self.assertEqual(
-                    node_details["parent"]["id"], parent["placements"][0]["id"]
+                    node_details["parent"]["id"], parent["node_id"]
                 )
                 self.assertEqual(node_details["subagent"]["id"], second_child["id"])
                 self.assertNotIn("placements", node_details["subagent"])
                 self.assertIsNone(node_details["enabled_tools"])
                 restricted_node = await client.put(
-                    f"/api/subagent-nodes/{nested_node['id']}",
+                    f"/api/subagent-nodes/{second_child['node_id']}",
                     json={"enabled_tools": ["read_message"]},
                 )
                 self.assertEqual(restricted_node.status_code, 200)
@@ -3137,7 +3102,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                     restricted_node.json()["enabled_tools"], ["read_message"]
                 )
                 missing_field = await client.put(
-                    f"/api/subagent-nodes/{nested_node['id']}", json={}
+                    f"/api/subagent-nodes/{second_child['node_id']}", json={}
                 )
                 self.assertEqual(missing_field.status_code, 400)
                 missing_node = await client.get("/api/subagent-nodes/999999")
@@ -3146,6 +3111,16 @@ class AdminApiTests(TemporaryDatabaseTest):
                     "/api/subagent-nodes/999999", json={"enabled_tools": []}
                 )
                 self.assertEqual(missing_node_update.status_code, 404)
+
+                cycle = await client.put(
+                    f"/api/subagents/{parent['id']}",
+                    json={"parent_agent_id": child["id"]},
+                )
+                self.assertEqual(cycle.status_code, 400)
+                protected = await client.delete(f"/api/subagents/{parent['id']}")
+                self.assertEqual(protected.status_code, 409)
+                self.assertIn("children first", protected.json()["error"])
+
                 disposable_response = await client.post(
                     "/api/subagents", json={**common, "name": "API disposable"}
                 )
@@ -3159,62 +3134,35 @@ class AdminApiTests(TemporaryDatabaseTest):
                     },
                 )
                 disposable_child = disposable_child_response.json()
-                disconnected_root = await client.delete(
-                    f"/api/subagent-nodes/{disposable['placements'][0]['id']}"
+                deleted_branch = await client.delete(
+                    f"/api/subagent-nodes/{disposable['node_id']}"
                 )
-                self.assertEqual(disconnected_root.status_code, 200)
-                self.assertIsNone(disconnected_root.json()["parent_node_id"])
-                self.assertEqual(disconnected_root.json()["removed_nodes"], 2)
+                self.assertEqual(deleted_branch.status_code, 200)
+                self.assertIsNone(deleted_branch.json()["parent_node_id"])
+                self.assertEqual(deleted_branch.json()["removed_nodes"], 2)
                 remaining_definition_ids = {
                     item["id"] for item in (await client.get("/api/subagents")).json()
                 }
                 self.assertTrue(
-                    {disposable["id"], disposable_child["id"]}
-                    <= remaining_definition_ids
+                    {disposable["id"], disposable_child["id"]}.isdisjoint(
+                        remaining_definition_ids
+                    )
                 )
-                disconnected = await client.delete(
-                    f"/api/subagent-nodes/{nested_node['id']}"
+
+                moved_to_mounir = await client.put(
+                    f"/api/subagents/{second_child['id']}",
+                    json={"parent_agent_id": None},
                 )
-                self.assertEqual(disconnected.status_code, 200)
-                self.assertEqual(disconnected.json()["removed_nodes"], 1)
-                self.assertEqual(
-                    (await client.get(f"/api/subagent-nodes/{nested_node['id']}")).status_code,
-                    404,
+                self.assertEqual(moved_to_mounir.status_code, 200)
+                self.assertIsNone(moved_to_mounir.json()["parent_agent_id"])
+                self.assertTrue(moved_to_mounir.json()["connected_to_supervisor"])
+                deleted_agent = await client.delete(
+                    f"/api/subagent-nodes/{second_child['node_id']}"
                 )
+                self.assertEqual(deleted_agent.status_code, 200)
+                self.assertEqual(deleted_agent.json()["removed_nodes"], 1)
                 missing_node_delete = await client.delete("/api/subagent-nodes/999999")
                 self.assertEqual(missing_node_delete.status_code, 404)
-                reconnected = await client.post(
-                    f"/api/subagents/{second_child['id']}/connections",
-                    json={"parent_node_id": parent["placements"][0]["id"]},
-                )
-                self.assertEqual(reconnected.status_code, 200)
-
-                assigned = await client.put(
-                    f"/api/subagents/{parent['id']}",
-                    json={"child_agent_ids": [child["id"], second_child["id"]]},
-                )
-                self.assertEqual(assigned.status_code, 200)
-                self.assertEqual(assigned.json()["child_count"], 2)
-                listed = (await client.get("/api/subagents")).json()
-                listed_by_id = {agent["id"]: agent for agent in listed}
-                self.assertEqual(
-                    listed_by_id[second_child["id"]]["parent_agent_id"], parent["id"]
-                )
-                self.assertTrue(
-                    listed_by_id[second_child["id"]]["connected_to_supervisor"]
-                )
-                self.assertEqual(
-                    listed_by_id[second_child["id"]]["parent_agent_ids"], [parent["id"]]
-                )
-
-                cycle = await client.put(
-                    f"/api/subagents/{parent['id']}",
-                    json={"parent_agent_id": child["id"]},
-                )
-                self.assertEqual(cycle.status_code, 400)
-                protected = await client.delete(f"/api/subagents/{parent['id']}")
-                self.assertEqual(protected.status_code, 409)
-                self.assertIn("children first", protected.json()["error"])
 
                 detached = await client.put(
                     f"/api/subagents/{parent['id']}", json={"child_agent_ids": []}
@@ -3224,7 +3172,6 @@ class AdminApiTests(TemporaryDatabaseTest):
                 listed = (await client.get("/api/subagents")).json()
                 listed_by_id = {agent["id"]: agent for agent in listed}
                 self.assertIsNone(listed_by_id[child["id"]]["parent_agent_id"])
-                self.assertIsNone(listed_by_id[second_child["id"]]["parent_agent_id"])
                 self.assertEqual(
                     (await client.delete(f"/api/subagents/{parent['id']}")).status_code,
                     200,

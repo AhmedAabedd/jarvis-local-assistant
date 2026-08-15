@@ -12,7 +12,7 @@ import { ToolChoices } from '../resources/ToolChoices'
 interface Props {
   nodeId: number | null
   selectorOpen: boolean
-  onConnectSubagent: (nodeId: number, subagentId: number, name: string) => void
+  onAddSubagent: (subagentId: number, name: string) => void
   onOpenSubagent: (subagentId: number) => void
   onClose: () => void
 }
@@ -45,8 +45,8 @@ function RelationCard({
         <button
           className="node-relation__remove"
           type="button"
-          aria-label={`Disconnect ${node.name}`}
-          title="Disconnect subagent"
+          aria-label={`Delete ${node.name}`}
+          title="Delete subagent"
           onClick={onRemove}
         >
           <X size={13} />
@@ -59,7 +59,7 @@ function RelationCard({
 export function AgentNodeDrawer({
   nodeId,
   selectorOpen,
-  onConnectSubagent,
+  onAddSubagent,
   onOpenSubagent,
   onClose,
 }: Props) {
@@ -226,17 +226,17 @@ export function AgentNodeDrawer({
                         />
                       ))}
                     </div>
-                  ) : (
+                  ) : placement.depth < 4 ? (
                     <button
                       className="node-empty-connect"
                       type="button"
-                      onClick={() =>
-                        onConnectSubagent(placement.id, subagent.id, placement.path_label)
-                      }
+                      onClick={() => onAddSubagent(subagent.id, placement.path_label)}
                     >
                       <Plus size={12} />
-                      <span>Connect subagent</span>
+                      <span>Add subagent</span>
                     </button>
+                  ) : (
+                    <small className="node-empty-message">Maximum nesting depth reached.</small>
                   )}
                 </div>
               </section>
@@ -361,9 +361,9 @@ export function AgentNodeDrawer({
       </aside>
       <ConfirmDialog
         open={Boolean(pendingRemoval)}
-        title="Disconnect subagent?"
-        message={`Disconnect “${pendingRemoval?.name || ''}” and its nested subagents?`}
-        confirmLabel="Disconnect"
+        title="Delete subagent?"
+        message={`Permanently delete “${pendingRemoval?.name || ''}” and its nested subagents?`}
+        confirmLabel="Delete"
         danger
         busy={removeChild.isPending}
         error={removeChild.error instanceof Error ? removeChild.error.message : ''}

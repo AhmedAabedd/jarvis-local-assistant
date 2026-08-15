@@ -10,8 +10,8 @@ export type FlowData = {
   agentKey?: string
   channel?: 'telegram' | 'whatsapp'
   onOpen?: () => void
-  onConnect?: () => void
-  onDisconnect?: () => void
+  onAdd?: () => void
+  onDelete?: () => void
 }
 
 function TelegramIcon() {
@@ -91,29 +91,29 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
           </>
         )}
       </button>
-      {data.kind === 'dynamic' && data.onDisconnect && (
+      {data.kind === 'dynamic' && data.onDelete && (
         <button
           className="flow-node__disconnect nodrag nopan"
           type="button"
           onClick={(event) => {
             event.stopPropagation()
-            data.onDisconnect?.()
+            data.onDelete?.()
           }}
-          aria-label={`Disconnect ${data.label} and its nested subagents`}
-          title="Disconnect subagent"
+          aria-label={`Delete ${data.label} and its nested subagents`}
+          title="Delete subagent"
         >
           <X size={14} />
         </button>
       )}
-      {data.onConnect && (
+      {data.onAdd && (
         <button
           className="flow-node__connect nodrag nopan"
           onClick={(event) => {
             event.stopPropagation()
-            data.onConnect?.()
+            data.onAdd?.()
           }}
-          aria-label={`Connect a subagent to ${data.label}`}
-          title="Connect subagent"
+          aria-label={`Add a subagent under ${data.label}`}
+          title="Add subagent"
         >
           <Plus size={10} strokeWidth={2.5} />
         </button>

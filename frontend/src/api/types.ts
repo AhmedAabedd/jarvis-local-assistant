@@ -65,29 +65,17 @@ export interface Subagent {
   dedupe_tools: string[] | string
   enabled: boolean | number
   has_icon?: boolean
+  node_id?: Id
   parent_agent_id?: Id | null
+  parent_node_id?: Id | null
   parent_name?: string
-  parent_agent_ids?: Id[]
-  parent_node_ids?: Id[]
-  parent_names?: string[]
   connected_to_supervisor?: boolean
   child_agent_ids?: Id[]
   child_count?: number
-  placements?: AgentPlacement[]
-}
-
-export interface AgentPlacement {
-  id: Id
-  agent_id: Id
-  parent_node_id: Id | null
-  parent_agent_id: Id | null
-  parent_name: string
-  depth: number
+  depth?: number
   path_names: string[]
   path_label: string
   enabled_tools: string[] | null
-  child_node_ids: Id[]
-  child_agent_ids: Id[]
 }
 
 export interface SubagentNodeRelation {
