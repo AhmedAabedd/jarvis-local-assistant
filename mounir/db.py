@@ -4531,7 +4531,7 @@ def update_subagent_node(node_id: int, *, enabled_tools) -> dict | None:
 
 
 def remove_subagent_node(node_id: int) -> dict | None:
-    """Disconnect one non-root placement and its descendants, preserving definitions."""
+    """Disconnect one placement and its descendants, preserving definitions."""
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         node = conn.execute(
@@ -4541,10 +4541,6 @@ def remove_subagent_node(node_id: int) -> dict | None:
         if node is None:
             conn.rollback()
             return None
-        if node["parent_node_id"] is None:
-            conn.rollback()
-            raise ValueError("Only a child node can be disconnected from this view.")
-
         descendants: list[int] = []
         pending = [int(node_id)]
         visited: set[int] = set()
@@ -4569,7 +4565,11 @@ def remove_subagent_node(node_id: int) -> dict | None:
         return {
             "ok": True,
             "subagent_id": int(node["agent_id"]),
-            "parent_node_id": int(node["parent_node_id"]),
+            "parent_node_id": (
+                int(node["parent_node_id"])
+                if node["parent_node_id"] is not None
+                else None
+            ),
             "removed_nodes": len(descendants),
         }
 

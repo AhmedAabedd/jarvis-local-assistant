@@ -2158,6 +2158,41 @@ select:disabled {
 .flow-node--dynamic:hover {
   border-color: rgb(91 156 245 / 72%);
 }
+.flow-node--dynamic .flow-node__content {
+  padding-right: 36px;
+}
+.flow-node__disconnect {
+  position: absolute;
+  z-index: 4;
+  top: 7px;
+  right: 7px;
+  width: 23px;
+  height: 23px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted-2);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 150ms ease,
+    color 150ms ease;
+}
+.flow-node--dynamic:hover .flow-node__disconnect,
+.flow-node__disconnect:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.flow-node__disconnect:hover,
+.flow-node__disconnect:focus-visible {
+  color: var(--muted);
+  background: transparent;
+  outline: none;
+}
 .flow-node--builtin:hover {
   border-color: rgb(89 201 142 / 62%);
 }

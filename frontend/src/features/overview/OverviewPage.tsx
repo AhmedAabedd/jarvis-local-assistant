@@ -12,6 +12,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api/client'
 import type { BuiltinAgent, Subagent } from '../../api/types'
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Loading } from '../../components/ui/Loading'
 import { useAgents, useOverview, keys } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
@@ -21,6 +22,7 @@ import { AgentNodeDrawer } from './AgentNodeDrawer'
 import { ConnectAgentModal } from './ConnectAgentModal'
 
 type ConnectionParent = { nodeId: number | null; agentId: number | null; name: string }
+type PendingDisconnect = { nodeId: number; name: string }
 
 function inputEdge(source: 'telegram' | 'whatsapp', color: string): Edge {
   return {
@@ -47,6 +49,7 @@ export function OverviewPage() {
   const [supervisorModelId, setSupervisorModelId] = useState(0)
   const [connectionParent, setConnectionParent] = useState<ConnectionParent | null>(null)
   const [openNodeId, setOpenNodeId] = useState<number | null>(null)
+  const [pendingDisconnect, setPendingDisconnect] = useState<PendingDisconnect | null>(null)
 
   const save = useMutation({
     mutationFn: async () => {
@@ -80,6 +83,18 @@ export function OverviewPage() {
         queryClient.invalidateQueries({ queryKey: ['agent-node'] }),
       ])
       setConnectionParent(null)
+    },
+  })
+  const disconnectNode = useMutation({
+    mutationFn: (nodeId: number) => api.agentNodes.remove(nodeId),
+    onSuccess: async () => {
+      setOpenNodeId(null)
+      setPendingDisconnect(null)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.agents }),
+        queryClient.invalidateQueries({ queryKey: keys.overview }),
+        queryClient.invalidateQueries({ queryKey: ['agent-node'] }),
+      ])
     },
   })
   useEffect(() => {
@@ -230,6 +245,10 @@ export function OverviewPage() {
             setOpenNodeId(nodeId)
           },
           onConnect: () => setConnectionParent({ nodeId, agentId: item.id, name: pathLabel }),
+          onDisconnect: () => {
+            disconnectNode.reset()
+            setPendingDisconnect({ nodeId, name: item.name })
+          },
         },
       })
       edges.push({
@@ -241,7 +260,14 @@ export function OverviewPage() {
       })
     })
     return { nodes, edges }
-  }, [overview.data, agents.data, telegram.data?.enabled, whatsapp.data?.enabled, navigate])
+  }, [
+    overview.data,
+    agents.data,
+    telegram.data?.enabled,
+    whatsapp.data?.enabled,
+    navigate,
+    disconnectNode,
+  ])
 
   if (overview.isLoading || agents.isLoading)
     return (
@@ -296,6 +322,21 @@ export function OverviewPage() {
           connectAgent.mutate({ agent, parentNodeId: connectionParent?.nodeId ?? null })
         }
         onClose={() => setConnectionParent(null)}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingDisconnect)}
+        title="Disconnect subagent?"
+        message={`Disconnect “${pendingDisconnect?.name || ''}” and its nested subagents?`}
+        confirmLabel="Disconnect"
+        danger
+        busy={disconnectNode.isPending}
+        error={disconnectNode.error instanceof Error ? disconnectNode.error.message : ''}
+        onConfirm={() => pendingDisconnect && disconnectNode.mutate(pendingDisconnect.nodeId)}
+        onCancel={() => {
+          if (disconnectNode.isPending) return
+          disconnectNode.reset()
+          setPendingDisconnect(null)
+        }}
       />
       <AgentConfigDrawer
         open={Boolean(selected)}

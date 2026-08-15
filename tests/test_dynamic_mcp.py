@@ -1787,8 +1787,12 @@ class DatabaseTests(TemporaryDatabaseTest):
             [root_node["id"]],
         )
         self.assertEqual(len(db.get_subagent(researcher["id"])["placements"]), 1)
-        with self.assertRaisesRegex(ValueError, "Only a child node"):
-            db.remove_subagent_node(root_node["id"])
+        root_removed = db.remove_subagent_node(root_node["id"])
+        self.assertEqual(root_removed["removed_nodes"], 1)
+        self.assertIsNone(root_removed["parent_node_id"])
+        self.assertIsNone(db.get_subagent_node(root_node["id"]))
+        self.assertEqual(db.get_subagent(github["id"])["placements"], [])
+        self.assertIsNotNone(db.get_subagent(github["id"]))
         self.assertIsNone(db.remove_subagent_node(999999))
 
     def test_dynamic_subagent_activation_controls_runtime_and_mcp_connection(self):
@@ -3033,10 +3037,32 @@ class AdminApiTests(TemporaryDatabaseTest):
                     "/api/subagent-nodes/999999", json={"enabled_tools": []}
                 )
                 self.assertEqual(missing_node_update.status_code, 404)
-                protected_root = await client.delete(
-                    f"/api/subagent-nodes/{parent['placements'][0]['id']}"
+                disposable_response = await client.post(
+                    "/api/subagents", json={**common, "name": "API disposable"}
                 )
-                self.assertEqual(protected_root.status_code, 409)
+                disposable = disposable_response.json()
+                disposable_child_response = await client.post(
+                    "/api/subagents",
+                    json={
+                        **common,
+                        "name": "API disposable child",
+                        "parent_agent_id": disposable["id"],
+                    },
+                )
+                disposable_child = disposable_child_response.json()
+                disconnected_root = await client.delete(
+                    f"/api/subagent-nodes/{disposable['placements'][0]['id']}"
+                )
+                self.assertEqual(disconnected_root.status_code, 200)
+                self.assertIsNone(disconnected_root.json()["parent_node_id"])
+                self.assertEqual(disconnected_root.json()["removed_nodes"], 2)
+                remaining_definition_ids = {
+                    item["id"] for item in (await client.get("/api/subagents")).json()
+                }
+                self.assertTrue(
+                    {disposable["id"], disposable_child["id"]}
+                    <= remaining_definition_ids
+                )
                 disconnected = await client.delete(
                     f"/api/subagent-nodes/{nested_node['id']}"
                 )

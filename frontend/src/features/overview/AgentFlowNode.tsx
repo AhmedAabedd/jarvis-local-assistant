@@ -1,5 +1,5 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
-import { BookOpen, Bot, Image as ImageIcon, Plus, Settings } from 'lucide-react'
+import { BookOpen, Bot, Image as ImageIcon, Plus, Settings, X } from 'lucide-react'
 
 export type FlowData = {
   label: string
@@ -11,6 +11,7 @@ export type FlowData = {
   channel?: 'telegram' | 'whatsapp'
   onOpen?: () => void
   onConnect?: () => void
+  onDisconnect?: () => void
 }
 
 function TelegramIcon() {
@@ -90,6 +91,20 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
           </>
         )}
       </button>
+      {data.kind === 'dynamic' && data.onDisconnect && (
+        <button
+          className="flow-node__disconnect nodrag nopan"
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            data.onDisconnect?.()
+          }}
+          aria-label={`Disconnect ${data.label} and its nested subagents`}
+          title="Disconnect subagent"
+        >
+          <X size={14} />
+        </button>
+      )}
       {data.onConnect && (
         <button
           className="flow-node__connect nodrag nopan"
