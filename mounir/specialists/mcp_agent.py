@@ -334,6 +334,8 @@ async def _run_async(
                 )
 
             framework_tools.extend(make_tool(item) for item in advertised_tools)
+            from .. import mcp_agents
+
             current_id = int(spec["id"]) if spec.get("id") is not None else None
             current_node_id = (
                 int(spec["node_id"]) if spec.get("node_id") is not None else None
@@ -356,8 +358,6 @@ async def _run_async(
             )
 
             def make_delegate_tool(child: dict) -> StructuredTool:
-                from .. import mcp_agents
-
                 async def delegate(task: str):
                     child_id = int(child["id"])
                     child_node_id = int(child.get("node_id") or child_id)
@@ -445,9 +445,14 @@ async def _run_async(
                 {
                     "role": "system",
                     "content": _system_prompt(spec.get("prompt") or "", profile),
-                },
-                {"role": "user", "content": task},
+                }
             ]
+            tree_prompt = mcp_agents.subagent_tree_prompt(
+                all_specs or [], parent=spec
+            )
+            if tree_prompt:
+                messages.append({"role": "system", "content": tree_prompt})
+            messages.append({"role": "user", "content": task})
 
             async def call_model(history: list[dict], schemas: list[dict] | None):
                 return await asyncio.to_thread(

@@ -326,13 +326,25 @@ def _make_heartbeat_builtin_node(spec: dict):
 
 
 def _compile_graph(
-    model: str, use_tools: bool, scoped_targets: list[dict] | None = None
+    model: str,
+    use_tools: bool,
+    scoped_targets: list[dict] | None = None,
+    *,
+    loaded_dynamic: list[dict] | None = None,
 ):
     scoped = scoped_targets is not None
     dynamic = (
-        [dict(spec) for spec in scoped_targets or [] if spec.get("kind") == "mcp"]
-        if scoped
-        else mcp_agents.load()
+        [dict(spec) for spec in loaded_dynamic]
+        if loaded_dynamic is not None
+        else (
+            [
+                dict(spec)
+                for spec in scoped_targets or []
+                if spec.get("kind") == "mcp"
+            ]
+            if scoped
+            else mcp_agents.load()
+        )
     )
     scoped_builtins = {
         spec["builtin_key"]: dict(spec)
@@ -479,6 +491,30 @@ class Agent:
             self.conversation.system_prompt = cfg.build_system_prompt(db.get_profile())
         self.conversation.add_user(user_input)
         messages = self.conversation.to_messages()
+        dynamic_specs = None
+        if self.use_tools:
+            dynamic_specs = (
+                [
+                    dict(spec)
+                    for spec in self.scoped_targets or []
+                    if spec.get("kind") == "mcp"
+                ]
+                if self.scoped_targets is not None
+                else mcp_agents.load()
+            )
+            tree_prompt = mcp_agents.subagent_tree_prompt(dynamic_specs)
+            if tree_prompt:
+                insert_at = next(
+                    (
+                        index
+                        for index, message in enumerate(messages)
+                        if message.get("role") != "system"
+                    ),
+                    len(messages),
+                )
+                messages.insert(
+                    insert_at, {"role": "system", "content": tree_prompt}
+                )
         if voice:
             messages = [dict(message) for message in messages]
             for message in reversed(messages):
@@ -495,7 +531,12 @@ class Agent:
             "delegations": 0,
         }
         input_len = len(initial_messages)
-        graph = _compile_graph(self.model, self.use_tools, self.scoped_targets)
+        graph = _compile_graph(
+            self.model,
+            self.use_tools,
+            self.scoped_targets,
+            loaded_dynamic=dynamic_specs,
+        )
         result_state: TurnState | None = None
         streamed: list[str] = []
 

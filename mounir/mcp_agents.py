@@ -45,6 +45,110 @@ def node_name(name: str) -> str:
     return f"mcp_{_slug(name)}"
 
 
+def _tree_children(specs: list[dict], parent: dict | None) -> list[dict]:
+    """Return direct children using placement IDs when the graph provides them."""
+    placement_graph = any(
+        "node_id" in spec or "parent_node_id" in spec for spec in specs
+    )
+    if parent is None:
+        if placement_graph:
+            children = [spec for spec in specs if spec.get("parent_node_id") is None]
+        else:
+            children = [
+                spec
+                for spec in specs
+                if spec.get("connected_to_supervisor")
+                or spec.get("parent_agent_id") is None
+            ]
+    elif placement_graph and parent.get("node_id") is not None:
+        parent_node_id = int(parent["node_id"])
+        children = [
+            spec
+            for spec in specs
+            if spec.get("parent_node_id") is not None
+            and int(spec["parent_node_id"]) == parent_node_id
+        ]
+    else:
+        parent_agent_id = parent.get("id")
+        children = [
+            spec
+            for spec in specs
+            if spec.get("parent_agent_id") == parent_agent_id
+        ]
+    return sorted(
+        children,
+        key=lambda spec: (
+            str(spec.get("name") or "").casefold(),
+            int(spec.get("node_id") or spec.get("id") or 0),
+        ),
+    )
+
+
+def subagent_tree_prompt(
+    specs: list[dict], *, parent: dict | None = None
+) -> str:
+    """Describe the reachable delegation tree relative to one running agent.
+
+    The tree stays compact by showing names only. Descriptions for definitions
+    that are reachable only through nested agents are listed once, keyed
+    internally by agent ID. Placement IDs keep repeated nodes independent.
+    """
+    direct_children = _tree_children(specs, parent)
+    if not direct_children:
+        return ""
+
+    direct_agent_ids = {
+        int(spec["id"])
+        for spec in direct_children
+        if spec.get("id") is not None
+    }
+    tree_lines = [
+        "AVAILABLE SUBAGENTS",
+        (
+            "Top-level agents are directly callable; reach nested agents through "
+            "their parent. Direct descriptions are in the delegation tool schemas."
+        ),
+    ]
+    nested_capabilities: dict[int, tuple[str, str]] = {}
+
+    def identity(spec: dict) -> tuple[str, int]:
+        if spec.get("node_id") is not None:
+            return "node", int(spec["node_id"])
+        return "agent", int(spec.get("id") or 0)
+
+    def add_branch(spec: dict, depth: int, ancestors: set[tuple[str, int]]) -> None:
+        label = str(spec.get("name") or "Unnamed subagent").strip()
+        tree_lines.append(f"{'  ' * (depth - 1)}- {label}")
+
+        agent_id = spec.get("id")
+        if (
+            depth > 1
+            and agent_id is not None
+            and int(agent_id) not in direct_agent_ids
+            and int(agent_id) not in nested_capabilities
+        ):
+            description = " ".join(str(spec.get("description") or "").split())
+            if description:
+                nested_capabilities[int(agent_id)] = (label, description)
+
+        branch_id = identity(spec)
+        if branch_id in ancestors:
+            return
+        next_ancestors = {*ancestors, branch_id}
+        for child in _tree_children(specs, spec):
+            add_branch(child, depth + 1, next_ancestors)
+
+    for child in direct_children:
+        add_branch(child, 1, set())
+    if nested_capabilities:
+        tree_lines.extend(("", "NESTED CAPABILITIES"))
+        tree_lines.extend(
+            f"- {name} — {description}"
+            for name, description in nested_capabilities.values()
+        )
+    return "\n".join(tree_lines)
+
+
 # Names a dynamic agent may not take: the built-in graph nodes and their
 # delegate tools are already wired by hand.
 _RESERVED = {"supervisor", "media", "knowledge", "system"}

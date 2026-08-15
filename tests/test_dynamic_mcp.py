@@ -1540,6 +1540,80 @@ class DatabaseTests(TemporaryDatabaseTest):
                 parent_agent_id=level_four["id"],
             )
 
+    def test_subagent_tree_is_relative_and_describes_only_deeper_agents(self):
+        db.init()
+        model = db.add_model(
+            "Tree model", "tree/model", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        server = db.add_server("Tree server", "tree-server")
+        lead = db.add_subagent(
+            "Lead", "Coordinates all work.", "",
+            model["id"], server["id"], confirm_tools=[],
+        )
+        worker = db.add_subagent(
+            "Worker", "Handles repositories.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=lead["id"],
+        )
+        specialist = db.add_subagent(
+            "Specialist", "Deploys applications.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=worker["id"],
+        )
+        deep = db.add_subagent(
+            "Deep helper", "Inspects containers.", "",
+            model["id"], server["id"], confirm_tools=[],
+            parent_agent_id=specialist["id"],
+        )
+
+        specs = db.build_specs()
+        by_agent_id = {int(spec["id"]): spec for spec in specs}
+        supervisor_tree = mcp_agents.subagent_tree_prompt(specs)
+        self.assertIn("- Lead", supervisor_tree)
+        self.assertNotIn("Lead — Coordinates all work.", supervisor_tree)
+        self.assertIn("  - Worker", supervisor_tree)
+        self.assertIn("    - Specialist", supervisor_tree)
+        self.assertIn("      - Deep helper", supervisor_tree)
+        self.assertIn("NESTED CAPABILITIES", supervisor_tree)
+        self.assertEqual(
+            supervisor_tree.count("Worker — Handles repositories."), 1
+        )
+        self.assertEqual(
+            supervisor_tree.count("Specialist — Deploys applications."), 1
+        )
+        self.assertEqual(
+            supervisor_tree.count("Deep helper — Inspects containers."), 1
+        )
+
+        lead_tree = mcp_agents.subagent_tree_prompt(
+            specs, parent=by_agent_id[lead["id"]]
+        )
+        self.assertIn("- Worker", lead_tree)
+        self.assertNotIn("Worker — Handles repositories.", lead_tree)
+        self.assertIn("  - Specialist", lead_tree)
+        self.assertIn("- Specialist — Deploys applications.", lead_tree)
+        self.assertIn("- Deep helper — Inspects containers.", lead_tree)
+        self.assertNotIn("- Lead", lead_tree)
+
+        worker_tree = mcp_agents.subagent_tree_prompt(
+            specs, parent=by_agent_id[worker["id"]]
+        )
+        self.assertIn("- Specialist", worker_tree)
+        self.assertNotIn("Specialist — Deploys applications.", worker_tree)
+        self.assertIn("  - Deep helper", worker_tree)
+        self.assertEqual(
+            worker_tree.count("Deep helper — Inspects containers."), 1
+        )
+        self.assertNotIn("agent_id", worker_tree)
+        self.assertNotIn("node_id", worker_tree)
+        self.assertEqual(
+            mcp_agents.subagent_tree_prompt(
+                specs, parent=by_agent_id[deep["id"]]
+            ),
+            "",
+        )
+
     def test_supervisor_graph_exposes_only_top_level_dynamic_agents(self):
         db.init()
         model = db.add_model(
@@ -1706,6 +1780,25 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertFalse(
             any(spec["parent_node_id"] == root_github["id"] for spec in researcher_nodes)
         )
+        supervisor_tree = mcp_agents.subagent_tree_prompt(specs)
+        self.assertNotIn("NESTED CAPABILITIES", supervisor_tree)
+        self.assertNotIn("GitHub — Handles repositories.", supervisor_tree)
+        self.assertNotIn("Researcher — Handles research.", supervisor_tree)
+        root_github_spec = next(
+            spec for spec in github_specs if spec["node_id"] == root_github["id"]
+        )
+        nested_github_spec = next(
+            spec for spec in github_specs if spec["node_id"] == nested_github["id"]
+        )
+        self.assertEqual(
+            mcp_agents.subagent_tree_prompt(specs, parent=root_github_spec), ""
+        )
+        nested_tree = mcp_agents.subagent_tree_prompt(
+            specs, parent=nested_github_spec
+        )
+        self.assertIn("- Researcher", nested_tree)
+        self.assertNotIn("NESTED CAPABILITIES", nested_tree)
+        self.assertNotIn("Researcher — Handles research.", nested_tree)
 
     def test_subagent_node_details_describe_only_one_placement(self):
         db.init()
@@ -2488,9 +2581,11 @@ class TransportTests(unittest.TestCase):
             "parent_agent_id": 1,
         }
         observed_tools = {}
+        observed_messages = {}
 
         def fake_chat(messages, tools=None, model="", **_kwargs):
             observed_tools.setdefault(model, tools or [])
+            observed_messages.setdefault(model, messages)
             if model == "child-model":
                 return {"content": "Child completed the focused task.", "tool_calls": []}
             tool_result = next(
@@ -2534,6 +2629,20 @@ class TransportTests(unittest.TestCase):
             ["delegate_to_worker"],
         )
         self.assertEqual(observed_tools["child-model"], [])
+        parent_system = "\n".join(
+            message["content"]
+            for message in observed_messages["parent-model"]
+            if message["role"] == "system"
+        )
+        self.assertIn("AVAILABLE SUBAGENTS", parent_system)
+        self.assertIn("- Worker", parent_system)
+        self.assertNotIn("Worker — Completes focused tasks.", parent_system)
+        child_system = "\n".join(
+            message["content"]
+            for message in observed_messages["child-model"]
+            if message["role"] == "system"
+        )
+        self.assertNotIn("AVAILABLE SUBAGENTS", child_system)
 
     def test_restricted_mcp_run_hides_and_blocks_unselected_tools(self):
         called = []
@@ -3861,6 +3970,62 @@ class InterfaceRoutingTests(unittest.TestCase):
                 "heartbeat-stop",
             ],
         )
+
+    def test_supervisor_receives_the_dynamic_root_subagent_tree(self):
+        specs = [
+            {
+                "id": 1,
+                "name": "GitHub",
+                "description": "Handles repositories.",
+                "parent_agent_id": None,
+            },
+            {
+                "id": 2,
+                "name": "Deployment",
+                "description": "Deploys applications.",
+                "parent_agent_id": 1,
+            },
+        ]
+        observed = {}
+
+        class Graph:
+            def stream(self, state, **_stream_options):
+                from langchain_core.messages import AIMessage
+
+                observed["messages"] = state["messages"]
+                yield {"type": "custom", "data": "done"}
+                yield {
+                    "type": "values",
+                    "data": {
+                        **state,
+                        "messages": [
+                            *state["messages"],
+                            AIMessage(content="done"),
+                        ],
+                    },
+                }
+
+        agent = Agent(conversation=Conversation(system_prompt="test"))
+        with (
+            patch.object(mcp_agents, "load", return_value=specs),
+            patch.object(langgraph_agent, "_compile_graph", return_value=Graph()),
+        ):
+            self.assertEqual("".join(agent.respond("hello")), "done")
+
+        system_text = "\n".join(
+            message.content
+            for message in observed["messages"]
+            if message.type == "system"
+        )
+        self.assertIn("AVAILABLE SUBAGENTS", system_text)
+        self.assertIn("- GitHub", system_text)
+        self.assertNotIn("GitHub — Handles repositories.", system_text)
+        self.assertIn("  - Deployment", system_text)
+        self.assertEqual(
+            system_text.count("Deployment — Deploys applications."), 1
+        )
+        self.assertNotIn("agent_id", system_text)
+        self.assertNotIn("node_id", system_text)
 
     def test_confirmation_handler_reaches_the_agent_graph_stream(self):
         observed = []
