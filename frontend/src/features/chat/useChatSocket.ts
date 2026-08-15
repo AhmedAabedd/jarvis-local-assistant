@@ -37,6 +37,7 @@ export function useChatSocket(onHeartbeat: (text: string, title?: string) => voi
         if (disposed) return
         setConnection('offline')
         setStreaming(false)
+        setConfirmation(null)
         streamingRef.current = false
         reconnectTimer.current = window.setTimeout(connect, 1800)
       }
@@ -57,6 +58,7 @@ export function useChatSocket(onHeartbeat: (text: string, title?: string) => voi
           })
           streamingRef.current = true
         } else if (packet.type === 'done') {
+          setConfirmation(null)
           streamingRef.current = false
           setStreaming(false)
         } else if (packet.type === 'error') {
@@ -64,6 +66,7 @@ export function useChatSocket(onHeartbeat: (text: string, title?: string) => voi
             ...current,
             { role: 'assistant', content: `Something went wrong: ${packet.message}` },
           ])
+          setConfirmation(null)
           streamingRef.current = false
           setStreaming(false)
         } else if (packet.type === 'confirm') {

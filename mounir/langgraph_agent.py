@@ -24,7 +24,17 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 
-from . import builtin_agents, config as cfg, db, graph_runtime, llm, mcp_agents, tools, trace
+from . import (
+    action_decline,
+    builtin_agents,
+    config as cfg,
+    db,
+    graph_runtime,
+    llm,
+    mcp_agents,
+    tools,
+    trace,
+)
 from .memory import Conversation
 from .specialists.knowledge import run as run_knowledge
 from .specialists.media import run as run_media
@@ -158,11 +168,17 @@ def _after_tools(state: TurnState) -> str:
     return "supervisor"
 
 
-def _declined(_state: TurnState) -> dict:
-    notice = (
-        "Okay, I didn't run it — you declined the command. "
-        "Tell me how you'd like to proceed."
+def _declined(state: TurnState) -> dict:
+    outcome = next(
+        (
+            action_decline.from_artifact(getattr(message, "artifact", None))
+            for message in reversed(state["messages"])
+            if isinstance(message, ToolMessage)
+            and action_decline.from_artifact(getattr(message, "artifact", None))
+        ),
+        None,
     )
+    notice = action_decline.user_notice(outcome)
     _stream_text(notice)
     return {"messages": [AIMessage(content=notice)]}
 
@@ -196,19 +212,35 @@ def _specialist_result(
     if unavailable:
         report = unavailable
     elif task:
-        report = runner(task).strip()
+        raw_report = runner(task)
+        report = (
+            raw_report
+            if isinstance(raw_report, action_decline.Signal)
+            else raw_report.strip()
+        )
     else:
         report = f"No task was provided to the {node_name} agent."
-    trace.block("returned  → supervisor", report)
+    decline = (
+        action_decline.parse(report)
+        if isinstance(report, action_decline.Signal)
+        else None
+    )
+    visible_report = action_decline.MESSAGE if decline is not None else report
+    trace.block("returned  → supervisor", visible_report)
     trace.gap()
     return Command(
-        goto="supervisor",
+        goto="declined" if decline is not None else "supervisor",
         update={
             "messages": [
                 ToolMessage(
-                    content=report,
+                    content=visible_report,
                     name=tool_name,
                     tool_call_id=call_id,
+                    artifact=(
+                        action_decline.artifact(decline)
+                        if decline is not None
+                        else None
+                    ),
                 )
             ]
         },

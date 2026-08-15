@@ -197,6 +197,12 @@ Only approval-free tools can be selected for Heartbeat. Exact duplicate action
 prevention can also be enabled per subagent to stop an agent from submitting the
 same tool request twice during one task.
 
+If the user declines an MCP action, that tool is not called and the dynamic agent
+stops without another model request. The cancellation propagates through every
+nested parent agent to the supervisor, which returns a deterministic notice rather
+than asking a model to reinterpret the refusal. Approved actions completed before
+the refusal are reported honestly; later actions are skipped.
+
 Dynamic MCP calls have two independent limits:
 
 - **Tool timeout:** 60 seconds by default for one MCP tool call

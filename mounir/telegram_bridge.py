@@ -319,7 +319,10 @@ class TelegramBridge:
         with self._confirm_lock:
             self._confirm_event = event
             self._confirm_answer = False
-        self._send(chat_id, f'⚠ Needs your OK:\n{action}\n\nReply "yes" to approve.')
+        self._send(
+            chat_id,
+            f'⚠ Approval required:\n{action}\n\nReply "yes" to allow or "no" to deny.',
+        )
         answered = event.wait(self.confirm_timeout)
         with self._confirm_lock:
             answer = self._confirm_answer
@@ -329,6 +332,29 @@ class TelegramBridge:
             self._send(chat_id, "No answer — cancelled.")
             return False
         return answer
+
+    @staticmethod
+    def _confirmation_choice(text: str) -> bool | None:
+        value = str(text or "").strip().casefold().rstrip(".!?").strip()
+        if value in {"y", "yes"}:
+            return True
+        if value in {"n", "no"}:
+            return False
+        return None
+
+    def _handle_confirmation_reply(self, chat_id: int, text: str) -> bool:
+        """Consume a reply only when this chat has an action awaiting approval."""
+        choice = self._confirmation_choice(text)
+        with self._confirm_lock:
+            pending = self._confirm_event
+            if pending is not None and choice is not None:
+                self._confirm_answer = choice
+                pending.set()
+        if pending is None:
+            return False
+        if choice is None:
+            self._send(chat_id, 'Please reply "yes" to allow or "no" to deny.')
+        return True
 
     def _keep_typing(self, chat_id: int, done: threading.Event) -> None:
         bot = self._ensure_bot()
@@ -466,12 +492,8 @@ class TelegramBridge:
         if not text:
             return
 
-        with self._confirm_lock:
-            pending = self._confirm_event
-            if pending is not None:
-                self._confirm_answer = text.lower() in ("y", "yes")
-                pending.set()
-                return
+        if self._handle_confirmation_reply(chat_id, text):
+            return
 
         if command == "start":
             self._send(
@@ -552,6 +574,8 @@ class TelegramBridge:
             bot.reply_to(message, "I couldn't detect any speech in that audio.")
             return
         trace.kv("telegram audio", f"transcribed {len(text)} chars")
+        if self._handle_confirmation_reply(chat_id, text):
+            return
         self._answer(chat_id, text)
 
     def _handle_other(self, message) -> None:

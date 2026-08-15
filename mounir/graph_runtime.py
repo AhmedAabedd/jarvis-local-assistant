@@ -13,6 +13,7 @@ dispatchers, or subtly different copies of the same agent loop.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import operator
 from collections.abc import Awaitable, Callable, Sequence
@@ -31,7 +32,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 
-from . import trace
+from . import action_decline, trace
 
 ModelCall = Callable[[list[dict], list[dict] | None], dict]
 AsyncModelCall = Callable[[list[dict], list[dict] | None], Awaitable[dict]]
@@ -129,10 +130,17 @@ def trace_tool_messages(messages: Sequence[BaseMessage]) -> None:
     }
     for message in messages:
         if isinstance(message, ToolMessage):
+            result = (
+                action_decline.MESSAGE
+                if action_decline.from_artifact(
+                    getattr(message, "artifact", None)
+                )
+                else str(message.content)
+            )
             trace.tool(
                 message.name or "tool",
                 arguments.get(message.tool_call_id, {}),
-                str(message.content),
+                result,
             )
 
 
@@ -253,6 +261,8 @@ async def arun_tool_agent(
 
     available_tools = list(tools)
     schemas = tool_schemas(available_tools)
+    tool_lock = asyncio.Lock()
+    declined_signal: dict[str, dict | None] = {"value": None}
 
     async def call_model(state: ToolAgentState) -> dict | Command:
         try:
@@ -288,12 +298,65 @@ async def arun_tool_agent(
     def fixed_message(content: str) -> Callable[[ToolAgentState], dict]:
         return lambda _state: {"messages": [AIMessage(content=content)]}
 
+    def find_decline(state: ToolAgentState) -> dict | None:
+        for message in reversed(state["messages"]):
+            if isinstance(message, AIMessage):
+                break
+            if isinstance(message, ToolMessage):
+                outcome = action_decline.from_artifact(
+                    getattr(message, "artifact", None)
+                )
+                if outcome is not None:
+                    return outcome
+        return None
+
+    def after_tools(state: ToolAgentState) -> str:
+        if find_decline(state):
+            return "declined"
+        return (
+            "exhausted"
+            if state.get("model_rounds", 0) >= max_rounds
+            else "model"
+        )
+
+    def declined(state: ToolAgentState) -> dict:
+        outcome = find_decline(state) or declined_signal["value"]
+        return {
+            "messages": [AIMessage(content=action_decline.encode(outcome or {}))]
+        }
+
+    async def execute_sequentially(request, execute):
+        """Preserve tool order and skip every remaining call after a refusal."""
+        async with tool_lock:
+            if declined_signal["value"]:
+                return ToolMessage(
+                    content="Skipped — an earlier action was declined.",
+                    name=request.tool_call["name"],
+                    tool_call_id=request.tool_call["id"],
+                )
+            result = await execute(request)
+            if isinstance(result, ToolMessage):
+                outcome = action_decline.from_artifact(
+                    getattr(result, "artifact", None)
+                )
+                if outcome is not None:
+                    declined_signal["value"] = outcome
+            return result
+
     graph = StateGraph(ToolAgentState)
     graph.add_node("model", call_model)
-    graph.add_node("tools", ToolNode(available_tools, handle_tool_errors=True))
+    graph.add_node(
+        "tools",
+        ToolNode(
+            available_tools,
+            handle_tool_errors=True,
+            awrap_tool_call=execute_sequentially,
+        ),
+    )
     graph.add_node("failure", failure)
     graph.add_node("empty", fixed_message(empty_response))
     graph.add_node("exhausted", fixed_message(exhausted_response))
+    graph.add_node("declined", declined)
     graph.add_edge(START, "model")
     graph.add_conditional_edges(
         "model",
@@ -308,14 +371,13 @@ async def arun_tool_agent(
     )
     graph.add_conditional_edges(
         "tools",
-        lambda state: (
-            "exhausted" if state.get("model_rounds", 0) >= max_rounds else "model"
-        ),
-        {"model": "model", "exhausted": "exhausted"},
+        after_tools,
+        {"model": "model", "declined": "declined", "exhausted": "exhausted"},
     )
     graph.add_edge("failure", END)
     graph.add_edge("empty", END)
     graph.add_edge("exhausted", END)
+    graph.add_edge("declined", END)
 
     result = await graph.compile().ainvoke(
         {
@@ -335,4 +397,6 @@ async def arun_tool_agent(
         ),
         empty_response,
     )
+    if declined_signal["value"] is not None:
+        return action_decline.Signal(final.strip())
     return finalizer(final) if finalizer else final.strip()

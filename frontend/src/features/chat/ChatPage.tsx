@@ -2,9 +2,9 @@ import { Bell, Bot, Check, History, Inbox, Mic, Send, Settings2, X } from 'lucid
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import type { Notification } from '../../api/types'
-import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { useProfile } from '../../hooks/useStudioData'
 import { FluidVoiceOrb, type VoiceState } from './FluidVoiceOrb'
+import { ToolApprovalPanel } from './ToolApprovalPanel'
 import { useChatSocket } from './useChatSocket'
 
 function notificationText(item: Notification) {
@@ -68,7 +68,7 @@ export function ChatPage() {
   }, [assistantName])
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chat.messages, chat.streaming])
+  }, [chat.messages, chat.streaming, chat.confirmation])
   useEffect(() => {
     void loadNotifications()
   }, [loadNotifications])
@@ -230,6 +230,13 @@ export function ChatPage() {
           <div ref={bottom} />
         </div>
         <div className="composer-wrap">
+          {chat.confirmation && (
+            <ToolApprovalPanel
+              prompt={chat.confirmation.prompt}
+              onAllow={() => chat.answerConfirmation(true)}
+              onDeny={() => chat.answerConfirmation(false)}
+            />
+          )}
           <div className="composer">
             <textarea
               value={text}
@@ -368,14 +375,6 @@ export function ChatPage() {
           ))}
         </div>
       </aside>
-      <ConfirmDialog
-        open={Boolean(chat.confirmation)}
-        title="Allow this action?"
-        message={chat.confirmation?.prompt || ''}
-        confirmLabel="Allow"
-        onConfirm={() => chat.answerConfirmation(true)}
-        onCancel={() => chat.answerConfirmation(false)}
-      />
     </div>
   )
 }

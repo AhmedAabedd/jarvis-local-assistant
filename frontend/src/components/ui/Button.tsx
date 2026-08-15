@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
 
 type Variant = 'primary' | 'secondary' | 'danger' | 'ghost'
 interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -7,17 +7,13 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
   busy?: boolean
 }
 
-export function Button({
-  variant = 'secondary',
-  icon,
-  busy,
-  children,
-  className = '',
-  disabled,
-  ...props
-}: Props) {
+export const Button = forwardRef<HTMLButtonElement, Props>(function Button(
+  { variant = 'secondary', icon, busy, children, className = '', disabled, ...props },
+  ref,
+) {
   return (
     <button
+      ref={ref}
       className={`button button--${variant} ${className}`}
       disabled={disabled || busy}
       {...props}
@@ -26,4 +22,4 @@ export function Button({
       {children}
     </button>
   )
-}
+})

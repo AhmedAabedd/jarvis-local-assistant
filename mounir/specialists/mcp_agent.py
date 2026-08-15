@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 
 from langchain_core.tools import StructuredTool
 
-from .. import config, graph_runtime, llm, mcp_oauth
+from .. import action_decline, config, graph_runtime, llm, mcp_oauth
 
 MAX_TOOL_ROUNDS = 8
 MCP_TOOL_TIMEOUT_SECONDS = max(
@@ -147,7 +147,7 @@ async def _call(
         # this turn, even when web and Telegram are running together.
         allowed = await asyncio.to_thread(_tools.request_confirmation, summary)
         if not allowed:
-            return "User declined — action cancelled. Do not retry.", False
+            return action_decline.create(name), False
     try:
         result = await asyncio.wait_for(
             session.call_tool(name, args), timeout=tool_timeout_seconds
@@ -276,7 +276,7 @@ async def _run_async(
 ) -> str:
     confirm_tools = set(spec.get("confirm_tools") or [])
     dedupe_tools = set(spec.get("dedupe_tools") or [])
-    executed: list[str] = []
+    executed: list[dict] = []
     protected_attempts = protected_attempts if protected_attempts is not None else set()
     action_namespace = str(
         spec.get("mcp_server_id")
@@ -308,9 +308,21 @@ async def _run_async(
                         dedupe_tools,
                         MCP_TOOL_TIMEOUT_SECONDS,
                     )
+                    if isinstance(result, action_decline.Signal):
+                        outcome = action_decline.parse(result)
+                        return (
+                            action_decline.MESSAGE,
+                            action_decline.artifact(outcome or {}),
+                        )
                     if was_executed:
-                        executed.append(f"{advertised.name} -> {result[:200]}")
-                    return result
+                        executed.append(
+                            {
+                                "agent": spec["name"],
+                                "name": advertised.name,
+                                "result": result,
+                            }
+                        )
+                    return result, None
 
                 return StructuredTool.from_function(
                     coroutine=invoke,
@@ -318,6 +330,7 @@ async def _run_async(
                     description=advertised.description or f"Run {advertised.name}.",
                     args_schema=advertised.inputSchema
                     or {"type": "object", "properties": {}},
+                    response_format="content_and_artifact",
                 )
 
             framework_tools.extend(make_tool(item) for item in advertised_tools)
@@ -345,25 +358,38 @@ async def _run_async(
             def make_delegate_tool(child: dict) -> StructuredTool:
                 from .. import mcp_agents
 
-                async def delegate(task: str) -> str:
+                async def delegate(task: str):
                     child_id = int(child["id"])
                     child_node_id = int(child.get("node_id") or child_id)
                     if child_node_id in lineage:
-                        return "Delegation blocked because it would create an agent cycle."
+                        return (
+                            "Delegation blocked because it would create an agent cycle.",
+                            None,
+                        )
                     try:
                         from .. import db
 
                         if not db.is_subagent_enabled(child_id):
-                            return f"The {child['name']} agent is inactive and cannot be used."
+                            return (
+                                f"The {child['name']} agent is inactive and cannot be used.",
+                                None,
+                            )
                         if len(lineage) >= db.MAX_SUBAGENT_DEPTH:
                             return (
                                 "Delegation blocked because the maximum subagent depth "
-                                "was reached."
+                                "was reached.",
+                                None,
                             )
                     except Exception as exc:
-                        return f"Could not validate the {child['name']} agent: {exc}"
+                        return (
+                            f"Could not validate the {child['name']} agent: {exc}",
+                            None,
+                        )
                     if not (child.get("connection") or "").strip():
-                        return f"The {child['name']} agent has no MCP server connection."
+                        return (
+                            f"The {child['name']} agent has no MCP server connection.",
+                            None,
+                        )
                     try:
                         report = await asyncio.wait_for(
                             _run_async(
@@ -381,8 +407,20 @@ async def _run_async(
                             f"{child['name']} agent timed out after "
                             f"{MCP_AGENT_TIMEOUT_SECONDS:g} seconds."
                         )
-                    executed.append(f"delegated to {child['name']} -> {report[:200]}")
-                    return report
+                    if isinstance(report, action_decline.Signal):
+                        outcome = action_decline.parse(report)
+                        return (
+                            action_decline.MESSAGE,
+                            action_decline.artifact(outcome or {}),
+                        )
+                    executed.append(
+                        {
+                            "agent": spec["name"],
+                            "name": f"delegate_to_{child['name']}",
+                            "result": report,
+                        }
+                    )
+                    return report, None
 
                 return StructuredTool.from_function(
                     coroutine=delegate,
@@ -392,6 +430,7 @@ async def _run_async(
                         f"{child['description']} It completes the work with its own "
                         "tools and returns a short report."
                     ),
+                    response_format="content_and_artifact",
                 )
 
             framework_tools.extend(make_delegate_tool(child) for child in children)
@@ -426,12 +465,15 @@ async def _run_async(
                     return (
                         f"{spec['name']} agent was cut off by an LLM error while "
                         "reporting, but these actions DID run: "
-                        + "; ".join(executed)
+                        + "; ".join(
+                            f"{item['name']} -> {str(item['result'])[:200]}"
+                            for item in executed
+                        )
                         + ". Do NOT redo them."
                     )
                 return f"{spec['name']} agent failed: {_exc_detail(Exception(error))}"
 
-            return await graph_runtime.arun_tool_agent(
+            report = await graph_runtime.arun_tool_agent(
                 messages,
                 framework_tools,
                 call_model,
@@ -448,6 +490,13 @@ async def _run_async(
                     r"(?i)^\s*final report:?\s*", "", content.strip()
                 ),
             )
+            if isinstance(report, action_decline.Signal):
+                return action_decline.add_agent_context(
+                    report,
+                    agent=spec["name"],
+                    completed_actions=executed,
+                )
+            return report
     except Exception as exc:
         return (
             f"{spec['name']} agent failed to connect to its MCP server: "
@@ -502,7 +551,8 @@ def run(
                     "state may be unknown; do not retry the task automatically."
                 )
 
-        return asyncio.run(_bounded_run()).strip()
+        result = asyncio.run(_bounded_run())
+        return result if isinstance(result, action_decline.Signal) else result.strip()
     except Exception as exc:
         detail = _exc_detail(exc)
         # Log the full traceback so the real cause is inspectable, even if the
