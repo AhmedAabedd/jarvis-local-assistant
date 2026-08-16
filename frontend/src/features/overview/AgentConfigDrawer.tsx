@@ -76,8 +76,13 @@ export function AgentConfigDrawer({
           </span>
           <h2 id="agent-config-title">{name}</h2>
         </div>
-        <button className="icon-button" type="button" onClick={onClose} aria-label="Close">
-          <X size={16} />
+        <button
+          className="icon-button panel-close-button"
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+        >
+          <X size={14} />
         </button>
       </header>
 

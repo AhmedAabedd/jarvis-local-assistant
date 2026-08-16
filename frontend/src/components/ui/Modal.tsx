@@ -1,5 +1,5 @@
 import { X } from 'lucide-react'
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useId, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 interface Props {
@@ -10,9 +10,22 @@ interface Props {
   footer?: ReactNode
   onClose: () => void
   wide?: boolean
+  side?: boolean
+  className?: string
 }
 
-export function Modal({ open, title, description, children, footer, onClose, wide }: Props) {
+export function Modal({
+  open,
+  title,
+  description,
+  children,
+  footer,
+  onClose,
+  wide,
+  side,
+  className,
+}: Props) {
+  const titleId = useId()
   useEffect(() => {
     if (!open) return
     const closeOnEscape = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
@@ -20,31 +33,38 @@ export function Modal({ open, title, description, children, footer, onClose, wid
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [open, onClose])
   if (!open) return null
-  return createPortal(
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+  const panel = (
+    <section
+      className={`modal ${wide ? 'modal--wide' : ''} ${side ? 'modal--side' : ''} ${className || ''}`}
+      role="dialog"
+      aria-modal={side ? 'false' : 'true'}
+      aria-labelledby={titleId}
     >
-      <section
-        className={`modal ${wide ? 'modal--wide' : ''}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="modal-title"
+      <header className="modal__header">
+        <div>
+          <h2 id={titleId}>{title}</h2>
+          {description && <p>{description}</p>}
+        </div>
+        <button className="icon-button panel-close-button" onClick={onClose} aria-label="Close">
+          <X size={14} />
+        </button>
+      </header>
+      <div className="modal__body">{children}</div>
+      {footer && <footer className="modal__footer">{footer}</footer>}
+    </section>
+  )
+  return createPortal(
+    side ? (
+      panel
+    ) : (
+      <div
+        className="modal-backdrop"
+        role="presentation"
+        onMouseDown={(e) => e.target === e.currentTarget && onClose()}
       >
-        <header className="modal__header">
-          <div>
-            <h2 id="modal-title">{title}</h2>
-            {description && <p>{description}</p>}
-          </div>
-          <button className="icon-button" onClick={onClose} aria-label="Close">
-            <X size={19} />
-          </button>
-        </header>
-        <div className="modal__body">{children}</div>
-        {footer && <footer className="modal__footer">{footer}</footer>}
-      </section>
-    </div>,
+        {panel}
+      </div>
+    ),
     document.body,
   )
 }

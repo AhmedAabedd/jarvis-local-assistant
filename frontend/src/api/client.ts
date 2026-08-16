@@ -11,6 +11,7 @@ import type {
   SetupActionResult,
   Subagent,
   SubagentNode,
+  SubagentPlacement,
   TelegramSettings,
   TtsVoiceCatalog,
   VoiceSettings,
@@ -94,6 +95,9 @@ export const api = {
     remove: (id: number) => request(`/api/subagents/${id}`, json('DELETE')),
   },
   agentNodes: {
+    list: () => request<SubagentPlacement[]>('/api/subagent-nodes'),
+    create: (body: { subagent_id: number; parent_node_id: number | null }) =>
+      request<SubagentNode>('/api/subagent-nodes', json('POST', body)),
     get: (id: number) => request<SubagentNode>(`/api/subagent-nodes/${id}`),
     update: (id: number, body: { enabled_tools: string[] | null }) =>
       request<SubagentNode>(`/api/subagent-nodes/${id}`, json('PUT', body)),

@@ -99,8 +99,8 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
             event.stopPropagation()
             data.onDelete?.()
           }}
-          aria-label={`Delete ${data.label} and its nested subagents`}
-          title="Delete subagent"
+          aria-label={`Disconnect ${data.label} and its nested subagents`}
+          title="Disconnect subagent"
         >
           <X size={14} />
         </button>

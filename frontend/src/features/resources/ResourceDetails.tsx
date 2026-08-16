@@ -123,7 +123,11 @@ export function ResourceDetails({
           <span>
             <strong>{enabled ? 'Active' : 'Inactive'}</strong>
             <small>
-              {enabled ? 'Available for parent delegation' : 'Removed from runtime delegation'}
+              {enabled
+                ? agent.placement_count
+                  ? `Available in ${agent.placement_count} workflow placement(s)`
+                  : 'Saved and ready to connect to the workflow'
+                : 'Removed from runtime delegation'}
             </small>
           </span>
           <label className="switch">
@@ -143,8 +147,7 @@ export function ResourceDetails({
             value={model ? `${model.name} — ${model.model}` : agent.model_name}
           />
           <Detail label="MCP server" value={server?.name || agent.mcp_server_name} />
-          <Detail label="Parent" value={agent.parent_name || 'Mounir'} />
-          <Detail label="Graph path" value={agent.path_label || agent.name} />
+          <Detail label="Workflow placements" value={agent.placement_count || 'Not connected'} />
           <Detail label="Description" value={agent.description} full />
           <Detail
             label="System prompt"

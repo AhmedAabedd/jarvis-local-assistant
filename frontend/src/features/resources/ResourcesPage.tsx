@@ -1,6 +1,19 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Bot, ChevronLeft, Database, Edit3, Plus, Save, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import {
+  Bot,
+  Cable,
+  ChevronLeft,
+  Cpu,
+  Edit3,
+  Layers3,
+  Plus,
+  Save,
+  Search,
+  Trash2,
+  Workflow,
+  Wrench,
+} from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
 import type { McpServer, ModelRecord, Subagent } from '../../api/types'
@@ -25,20 +38,23 @@ const meta = {
     title: 'Models',
     singular: 'model',
     description: 'Manage local and cloud models used by your agents',
-    icon: Database,
   },
   servers: {
     title: 'MCP Servers',
     singular: 'MCP server',
     description: 'Manage services and tools connected through MCP',
-    icon: McpIcon,
   },
   agents: {
     title: 'Subagents',
     singular: 'subagent',
     description: 'Manage specialists the supervisor can delegate work to',
-    icon: Bot,
   },
+}
+
+function transportLabel(transport: McpServer['transport']) {
+  if (transport === 'stdio') return 'Local process'
+  if (transport === 'streamable_http') return 'Streamable HTTP'
+  return 'Server-sent events'
 }
 
 export function ResourcesPage({ kind }: { kind: Kind }) {
@@ -53,8 +69,11 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const [selected, setSelected] = useState<Item | null>(null)
   const [editing, setEditing] = useState<Item | null | undefined>(undefined)
   const [deleting, setDeleting] = useState(false)
+  const [search, setSearch] = useState('')
   const formId = `${kind}-form`
   const info = meta[kind]
+  const selectedAgentPlacements =
+    kind === 'agents' ? ((selected as Subagent | null)?.placement_count ?? 0) : 0
 
   useEffect(() => {
     if ((location.state as { resetResourceList?: boolean } | null)?.resetResourceList) {
@@ -63,6 +82,8 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       setDeleting(false)
     }
   }, [location.key, location.state])
+
+  useEffect(() => setSearch(''), [kind])
 
   useEffect(() => {
     const id = Number(params.get('open'))
@@ -75,6 +96,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     Promise.all([
       client.invalidateQueries({ queryKey: keys[kind] }),
       client.invalidateQueries({ queryKey: keys.overview }),
+      client.invalidateQueries({ queryKey: keys.agentNodes }),
     ])
 
   const save = useMutation({
@@ -117,37 +139,74 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         if (kind === 'models')
           return {
             title: model.name,
-            subtitle: model.model,
-            meta: model.provider,
-            status:
-              model.api_key_configured || model.api_key ? 'Credential saved' : 'No credential',
+            subtitle: '',
+            facts: [
+              { value: model.provider, title: `Provider: ${model.provider}`, icon: Layers3 },
+              { value: model.model, title: `Model: ${model.model}`, icon: Cpu },
+            ],
+            status: undefined,
           }
         if (kind === 'servers')
           return {
             title: server.name,
-            subtitle: server.description || server.connection,
-            meta: server.transport?.replaceAll('_', ' '),
+            subtitle: server.description,
+            facts: [
+              {
+                value: transportLabel(server.transport),
+                title: `Transport: ${transportLabel(server.transport)}`,
+                icon: Cable,
+              },
+              {
+                value:
+                  server.tool_count === undefined ? 'Not loaded' : `${server.tool_count} available`,
+                title:
+                  server.tool_count === undefined
+                    ? 'Tools: Not loaded'
+                    : `Tools: ${server.tool_count} available`,
+                icon: Wrench,
+              },
+            ],
             status: server.connection_status || 'untested',
           }
         return {
           title: agent.name,
           subtitle: agent.description,
-          meta: agent.mcp_server_name || 'MCP specialist',
-          status: agent.enabled ? 'Active' : 'Inactive',
+          facts: [
+            {
+              value: agent.mcp_server_name || 'Not configured',
+              title: `MCP: ${agent.mcp_server_name || 'Not configured'}`,
+              icon: McpIcon,
+            },
+            {
+              value: `${agent.placement_count || 0} placement${agent.placement_count === 1 ? '' : 's'}`,
+              title: `${agent.placement_count || 0} workflow placement${agent.placement_count === 1 ? '' : 's'}`,
+              icon: Workflow,
+            },
+          ],
+          status: undefined,
         }
       }),
     [data, kind],
   )
   const listed = useMemo(() => {
-    const entries = data.map((item, index) => ({ item, index, depth: 0 }))
-    if (kind !== 'agents') return entries
-    return entries
-      .map((entry) => ({
-        ...entry,
-        depth: Math.max(0, ((entry.item as Subagent).depth || 1) - 1),
-      }))
-      .sort((left, right) => left.depth - right.depth || left.index - right.index)
-  }, [data, kind])
+    const term = search.trim().toLocaleLowerCase()
+    return data
+      .map((item, index) => ({ item, row: rows[index] }))
+      .filter(
+        ({ row }) =>
+          !term ||
+          [
+            row.title,
+            row.subtitle,
+            ...row.facts.flatMap((fact) => [fact.value, fact.title]),
+            row.status,
+          ].some((value) =>
+            String(value || '')
+              .toLocaleLowerCase()
+              .includes(term),
+          ),
+      )
+  }, [data, rows, search])
 
   const openList = () => {
     setEditing(undefined)
@@ -164,7 +223,9 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     if (!selected) setParams({})
   }
   const submit = async (body: object) => {
-    await save.mutateAsync(body)
+    await save.mutateAsync(
+      kind === 'agents' && !editing ? { ...body, connect_to_workflow: false } : body,
+    )
   }
 
   const inForm = editing !== undefined
@@ -197,24 +258,33 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       </Button>
     </>
   ) : selected ? (
-    <>
-      <Button icon={<ChevronLeft size={14} />} onClick={openList}>
-        Back to {info.title.toLowerCase()}
-      </Button>
+    <div className="resource-header-actions">
       <Button
-        variant="danger"
-        icon={<Trash2 size={14} />}
+        className="resource-header-action"
+        icon={<ChevronLeft size={15} />}
+        onClick={openList}
+        aria-label={`Back to ${info.title.toLowerCase()}`}
+        title={`Back to ${info.title.toLowerCase()}`}
+      />
+      <Button
+        className="resource-header-action"
+        icon={<Trash2 size={15} />}
         onClick={() => {
           remove.reset()
           setDeleting(true)
         }}
-      >
-        Delete
-      </Button>
-      <Button variant="primary" icon={<Edit3 size={14} />} onClick={() => setEditing(selected)}>
-        Edit
-      </Button>
-    </>
+        aria-label={`Delete ${info.singular}`}
+        title={`Delete ${info.singular}`}
+      />
+      <Button
+        className="resource-header-action"
+        variant="primary"
+        icon={<Edit3 size={15} />}
+        onClick={() => setEditing(selected)}
+        aria-label={`Edit ${info.singular}`}
+        title={`Edit ${info.singular}`}
+      />
+    </div>
   ) : (
     <Button variant="primary" icon={<Plus size={15} />} onClick={openCreate}>
       Add {info.singular}
@@ -248,7 +318,6 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                   item={editing as Subagent | undefined}
                   models={models.data || []}
                   servers={servers.data || []}
-                  agents={agents.data || []}
                   formId={formId}
                   onSubmit={submit}
                 />
@@ -273,48 +342,78 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         ) : !data.length ? (
           <div className="card empty-state">No {info.title.toLowerCase()} saved yet.</div>
         ) : (
-          <div className="resource-list">
-            {listed.map(({ item, index, depth }) => {
-              const row = rows[index]
-              const Icon = info.icon
-              const isAgent = kind === 'agents'
-              return (
-                <button
-                  className={`resource-row ${isAgent ? 'resource-row--agent' : ''}`}
-                  key={item.id}
-                  style={{ '--agent-depth': depth } as CSSProperties}
-                  data-depth={depth || undefined}
-                  onClick={() => {
-                    setEditing(undefined)
-                    setSelected(item)
-                    setParams({ open: String(item.id) })
-                  }}
-                >
-                  <div className="resource-row__identity">
-                    <span className="avatar">
-                      {isAgent && (item as Subagent).has_icon ? (
-                        <img src={`/api/subagents/${item.id}/icon`} alt="" />
-                      ) : (
-                        <Icon size={17} />
-                      )}
-                    </span>
-                    <span>
-                      <strong>{row.title}</strong>
-                      <small>{row.subtitle}</small>
-                    </span>
-                  </div>
-                  <span className="resource-row__meta">{row.meta}</span>
-                  <Status value={row.status} />
-                </button>
-              )
-            })}
+          <div className="resource-browser">
+            <label className="resource-search">
+              <Search size={13} />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder={`Search ${info.title.toLowerCase()}…`}
+                aria-label={`Search ${info.title.toLowerCase()}`}
+              />
+            </label>
+            {listed.length ? (
+              <div className="resource-list">
+                {listed.map(({ item, row }) => {
+                  const isAgent = kind === 'agents'
+                  return (
+                    <button
+                      className={`resource-row resource-row--${kind} ${row.status ? '' : 'resource-row--without-status'}`}
+                      type="button"
+                      key={item.id}
+                      onClick={() => {
+                        setEditing(undefined)
+                        setSelected(item)
+                        setParams({ open: String(item.id) })
+                      }}
+                    >
+                      <div className="resource-row__identity">
+                        {isAgent && (
+                          <span className="avatar">
+                            {(item as Subagent).has_icon ? (
+                              <img src={`/api/subagents/${item.id}/icon`} alt="" />
+                            ) : (
+                              <Bot size={17} />
+                            )}
+                          </span>
+                        )}
+                        <span>
+                          <strong>{row.title}</strong>
+                          {row.subtitle && <small>{row.subtitle}</small>}
+                        </span>
+                      </div>
+                      {row.status && <Status value={row.status} />}
+                      <span className="resource-row__facts">
+                        {row.facts.map((fact) => {
+                          const FactIcon = fact.icon
+                          return (
+                            <span key={fact.title} title={fact.title} aria-label={fact.title}>
+                              <FactIcon size={12} aria-hidden="true" /> {fact.value}
+                            </span>
+                          )
+                        })}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="card empty-state resource-search-empty">
+                No {info.title.toLowerCase()} match “{search.trim()}”.
+              </div>
+            )}
           </div>
         )}
       </div>
       <ConfirmDialog
         open={deleting}
         title={`Delete ${info.singular}?`}
-        message={`This permanently removes “${selected?.name || ''}”. Records in use cannot be deleted.`}
+        message={
+          kind === 'agents'
+            ? `Permanently delete “${selected?.name || ''}”? Its ${selectedAgentPlacements} workflow placement${selectedAgentPlacements === 1 ? '' : 's'}, including nested branches, will be disconnected. Other saved subagents will remain available.`
+            : `This permanently removes “${selected?.name || ''}”. Records in use cannot be deleted.`
+        }
         confirmLabel="Delete"
         danger
         busy={remove.isPending}

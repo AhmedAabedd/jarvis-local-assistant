@@ -11,17 +11,24 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api/client'
-import type { BuiltinAgent, Subagent } from '../../api/types'
+import type { BuiltinAgent, SubagentPlacement } from '../../api/types'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Loading } from '../../components/ui/Loading'
-import { useAgents, useModels, useOverview, useServers, keys } from '../../hooks/useStudioData'
+import {
+  useAgentNodes,
+  useAgents,
+  useModels,
+  useOverview,
+  useServers,
+  keys,
+} from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 import { AgentConfigDrawer } from './AgentConfigDrawer'
 import { agentNodeTypes, type FlowData } from './AgentFlowNode'
 import { AgentNodeDrawer } from './AgentNodeDrawer'
 import { ConnectAgentModal } from './ConnectAgentModal'
 
-type ConnectionParent = { agentId: number | null; name: string }
+type ConnectionParent = { nodeId: number | null; name: string }
 type PendingDelete = { nodeId: number; name: string }
 
 function inputEdge(source: 'telegram' | 'whatsapp', color: string): Edge {
@@ -41,6 +48,7 @@ export function OverviewPage() {
   const navigate = useNavigate()
   const overview = useOverview()
   const agents = useAgents()
+  const agentNodes = useAgentNodes()
   const models = useModels()
   const servers = useServers()
   const telegram = useQuery({ queryKey: keys.telegram, queryFn: api.telegram.get })
@@ -76,10 +84,28 @@ export function OverviewPage() {
     },
   })
   const createAgent = useMutation({
-    mutationFn: (body: object) => api.agents.create(body),
+    mutationFn: (body: object) =>
+      api.agents.create({ ...body, parent_node_id: connectionParent?.nodeId ?? null }),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: keys.agents }),
+        queryClient.invalidateQueries({ queryKey: keys.agentNodes }),
+        queryClient.invalidateQueries({ queryKey: keys.overview }),
+        queryClient.invalidateQueries({ queryKey: ['agent-node'] }),
+      ])
+      setConnectionParent(null)
+    },
+  })
+  const connectAgent = useMutation({
+    mutationFn: (subagentId: number) =>
+      api.agentNodes.create({
+        subagent_id: subagentId,
+        parent_node_id: connectionParent?.nodeId ?? null,
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.agents }),
+        queryClient.invalidateQueries({ queryKey: keys.agentNodes }),
         queryClient.invalidateQueries({ queryKey: keys.overview }),
         queryClient.invalidateQueries({ queryKey: ['agent-node'] }),
       ])
@@ -93,23 +119,27 @@ export function OverviewPage() {
       setPendingDelete(null)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: keys.agents }),
+        queryClient.invalidateQueries({ queryKey: keys.agentNodes }),
         queryClient.invalidateQueries({ queryKey: keys.overview }),
         queryClient.invalidateQueries({ queryKey: ['agent-node'] }),
       ])
     },
   })
   useEffect(() => {
-    if (connectionParent) createAgent.reset()
+    if (connectionParent) {
+      createAgent.reset()
+      connectAgent.reset()
+    }
   }, [connectionParent])
 
   const graph = useMemo(() => {
     const info = overview.data
-    const custom = agents.data || []
+    const custom = agentNodes.data || []
     if (!info) return { nodes: [], edges: [] }
     const nodeWidth = 158
     const nodeGap = 14
     type Occurrence = {
-      item: Subagent
+      item: SubagentPlacement
       nodeId: number
       id: string
       parentNodeId: string
@@ -119,12 +149,10 @@ export function OverviewPage() {
     const occurrences: Occurrence[] = custom
       .map((item) => ({
         item,
-        nodeId: item.node_id || item.id,
-        id: `dynamic-agent-${item.id}`,
+        nodeId: item.node_id,
+        id: `dynamic-agent-${item.node_id}`,
         parentNodeId:
-          item.parent_agent_id === null || item.parent_agent_id === undefined
-            ? 'supervisor'
-            : `dynamic-agent-${item.parent_agent_id}`,
+          item.parent_node_id === null ? 'supervisor' : `dynamic-agent-${item.parent_node_id}`,
         depth: Math.max(0, (item.depth || 1) - 1),
         pathLabel: item.path_label || item.name,
       }))
@@ -149,12 +177,16 @@ export function OverviewPage() {
           kind: 'supervisor',
           model: info.supervisor.model,
           onOpen: () => {
+            setConnectionParent(null)
             setOpenNodeId(null)
             setSelected(null)
             setSupervisorModelId(info.supervisor.model_id || 0)
             setSupervisorOpen(true)
           },
-          onAdd: () => setConnectionParent({ agentId: null, name: info.supervisor.name }),
+          onAdd: () => {
+            setOpenNodeId(null)
+            setConnectionParent({ nodeId: null, name: info.supervisor.name })
+          },
         },
       },
     ]
@@ -211,6 +243,7 @@ export function OverviewPage() {
           enabled: item.enabled,
           model: item.model,
           onOpen: () => {
+            setConnectionParent(null)
             setOpenNodeId(null)
             setSupervisorOpen(false)
             setSelected(item)
@@ -238,13 +271,17 @@ export function OverviewPage() {
           model: item.model || item.model_name,
           icon: item.has_icon ? `/api/subagents/${item.id}/icon` : undefined,
           onOpen: () => {
+            setConnectionParent(null)
             setSelected(null)
             setSupervisorOpen(false)
             setOpenNodeId(nodeId)
           },
           onAdd:
             (item.depth || 1) < 4
-              ? () => setConnectionParent({ agentId: item.id, name: pathLabel })
+              ? () => {
+                  setOpenNodeId(null)
+                  setConnectionParent({ nodeId, name: pathLabel })
+                }
               : undefined,
           onDelete: () => {
             deleteNode.reset()
@@ -263,14 +300,14 @@ export function OverviewPage() {
     return { nodes, edges }
   }, [
     overview.data,
-    agents.data,
+    agentNodes.data,
     telegram.data?.enabled,
     whatsapp.data?.enabled,
     navigate,
     deleteNode,
   ])
 
-  if (overview.isLoading || agents.isLoading)
+  if (overview.isLoading || agents.isLoading || agentNodes.isLoading)
     return (
       <>
         <PageHeader
@@ -303,7 +340,10 @@ export function OverviewPage() {
           <AgentNodeDrawer
             nodeId={openNodeId}
             selectorOpen={Boolean(connectionParent)}
-            onAddSubagent={(agentId, name) => setConnectionParent({ agentId, name })}
+            onAddSubagent={(nodeId, name) => {
+              setOpenNodeId(null)
+              setConnectionParent({ nodeId, name })
+            }}
             onOpenSubagent={(subagentId) => navigate(`/admin/agents?open=${subagentId}`)}
             onClose={() => setOpenNodeId(null)}
           />
@@ -311,21 +351,29 @@ export function OverviewPage() {
       </div>
       <ConnectAgentModal
         open={Boolean(connectionParent)}
-        parentAgentId={connectionParent?.agentId ?? null}
+        parentNodeId={connectionParent?.nodeId ?? null}
         parentName={connectionParent?.name || 'Mounir'}
         models={models.data || []}
         servers={servers.data || []}
         agents={agents.data || []}
-        busy={createAgent.isPending}
-        error={createAgent.error instanceof Error ? createAgent.error.message : ''}
+        placements={agentNodes.data || []}
+        busy={createAgent.isPending || connectAgent.isPending}
+        error={
+          createAgent.error instanceof Error
+            ? createAgent.error.message
+            : connectAgent.error instanceof Error
+              ? connectAgent.error.message
+              : ''
+        }
+        onConnect={(subagentId) => connectAgent.mutate(subagentId)}
         onCreate={(body) => createAgent.mutate(body)}
         onClose={() => setConnectionParent(null)}
       />
       <ConfirmDialog
         open={Boolean(pendingDelete)}
-        title="Delete subagent?"
-        message={`Permanently delete “${pendingDelete?.name || ''}” and its nested subagents?`}
-        confirmLabel="Delete"
+        title="Disconnect subagent?"
+        message={`Disconnect “${pendingDelete?.name || ''}” and its nested subagents from this workflow? Their saved configurations will remain available.`}
+        confirmLabel="Disconnect"
         danger
         busy={deleteNode.isPending}
         error={deleteNode.error instanceof Error ? deleteNode.error.message : ''}

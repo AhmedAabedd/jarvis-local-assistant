@@ -320,12 +320,12 @@ export function ChatPage() {
             <p>{unreadNotifications.length} unread</p>
           </div>
           <button
-            className="notification-panel__close"
+            className="notification-panel__close panel-close-button"
             type="button"
             aria-label="Close notifications"
             onClick={() => setNotificationsOpen(false)}
           >
-            <X size={17} />
+            <X size={14} />
           </button>
         </div>
         <div className="notification-panel__toolbar">

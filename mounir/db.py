@@ -4,9 +4,9 @@ Core tables include:
 
 - ``models``       reusable LLM presets (name, provider, base_url, api_key)
 - ``mcp_servers``  reusable MCP server connections (transport + command/URL)
-- ``subagents``    complete runtime agents (identity, parent, prompt, model, MCP)
+- ``subagents``    reusable specialist configurations (prompt, model, MCP, tools)
 - ``subagent_connections`` legacy compatibility projection
-- ``subagent_nodes`` one-to-one compatibility rows for older installations
+- ``subagent_nodes`` workflow placements referencing reusable subagents
 - ``mcp_server_tools`` cached MCP capability metadata
 - ``heartbeat_*`` heartbeat permissions, schedule, state, and bounded run log
 - ``telegram_settings`` private Telegram bot configuration and pairing state
@@ -95,163 +95,29 @@ def _connect():
                 pass
 
 
-def _collapse_shared_subagent_placements(conn: sqlite3.Connection) -> None:
-    """Convert reusable definitions with many placements into independent agents.
+def _enable_reusable_subagent_placements(conn: sqlite3.Connection) -> None:
+    """Allow one saved subagent to appear in multiple workflow branches.
 
-    Older releases allowed one ``subagents`` row to appear in several graph
-    positions. Each saved placement now becomes its own complete subagent while
-    preserving its parent, tool allowlist, model, MCP server, prompt, and icon.
-    The old node table remains as a one-to-one compatibility projection so
-    existing node URLs continue to work during upgrades.
+    A short-lived architecture made ``subagent_nodes.agent_id`` globally
+    unique. Removing that index is enough to restore reusable placements; the
+    parent-scoped indexes still prevent the same delegation tool from appearing
+    twice under one parent.
     """
-    marker = "subagents_are_runtime_nodes_v2"
-    if conn.execute(
-        "SELECT 1 FROM app_meta WHERE key = ?", (marker,)
-    ).fetchone() is not None:
-        return
-    tables = {
-        row["name"]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-    }
-    if "subagent_nodes" not in tables:
-        conn.execute(
-            "INSERT INTO app_meta (key, value) VALUES (?, ?)", (marker, _now())
-        )
-        return
-
-    nodes = [
-        dict(row)
-        for row in conn.execute(
-            """
-            SELECT id, agent_id, parent_node_id, enabled_tools, created_at
-            FROM subagent_nodes ORDER BY created_at, id
-            """
-        )
-    ]
-    agents = {
-        int(row["id"]): dict(row)
-        for row in conn.execute("SELECT * FROM subagents ORDER BY id")
-    }
-    by_agent: dict[int, list[dict]] = {}
-    for node in nodes:
-        by_agent.setdefault(int(node["agent_id"]), []).append(node)
-
-    def slug(value: str) -> str:
-        return re.sub(
-            r"_+", "_", re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
-        ).strip("_")
-
-    used_names = {str(agent["name"]).casefold() for agent in agents.values()}
-    used_slugs = {slug(str(agent["name"])) for agent in agents.values()}
-
-    def clone_name(base: str) -> str:
-        suffix = 2
-        while True:
-            candidate = f"{base} {suffix}"
-            if (
-                candidate.casefold() not in used_names
-                and slug(candidate) not in used_slugs
-            ):
-                used_names.add(candidate.casefold())
-                used_slugs.add(slug(candidate))
-                return candidate
-            suffix += 1
-
-    node_to_agent: dict[int, int] = {}
-    for source_id, placements in by_agent.items():
-        source = agents.get(source_id)
-        if source is None:
-            continue
-        ordered = sorted(
-            placements,
-            key=lambda node: (
-                node["parent_node_id"] is not None,
-                node.get("created_at") or "",
-                int(node["id"]),
-            ),
-        )
-        node_to_agent[int(ordered[0]["id"])] = source_id
-        for placement in ordered[1:]:
-            cur = conn.execute(
-                """
-                INSERT INTO subagents (
-                    name, description, system_prompt, icon_data, icon_mime,
-                    model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
-                    dedupe_tools, enabled, parent_agent_id, enabled_tools, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-                """,
-                (
-                    clone_name(str(source["name"])),
-                    source.get("description") or "",
-                    source.get("system_prompt") or "",
-                    source.get("icon_data") or b"",
-                    source.get("icon_mime") or "",
-                    source["model_id"],
-                    source["mcp_server_id"],
-                    source.get("confirm_tool_calls", 1),
-                    source.get("confirm_tools") or '["*"]',
-                    source.get("dedupe_tools") or "[]",
-                    source.get("enabled", 1),
-                    placement.get("enabled_tools"),
-                    placement.get("created_at") or source.get("created_at") or _now(),
-                ),
-            )
-            cloned_id = int(cur.lastrowid)
-            node_to_agent[int(placement["id"])] = cloned_id
-            conn.execute(
-                "UPDATE subagent_nodes SET agent_id = ? WHERE id = ?",
-                (cloned_id, int(placement["id"])),
-            )
-
-    # Definitions disconnected under the old model become direct agents.
-    for agent_id in list(agents):
-        if agent_id in by_agent:
-            continue
-        cur = conn.execute(
-            """
-            INSERT INTO subagent_nodes (agent_id, parent_node_id, enabled_tools, created_at)
-            VALUES (?, NULL, NULL, ?)
-            """,
-            (agent_id, agents[agent_id].get("created_at") or _now()),
-        )
-        node_id = int(cur.lastrowid)
-        node_to_agent[node_id] = agent_id
-        nodes.append(
-            {
-                "id": node_id,
-                "agent_id": agent_id,
-                "parent_node_id": None,
-                "enabled_tools": None,
-                "created_at": agents[agent_id].get("created_at") or _now(),
-            }
-        )
-
-    for node in nodes:
-        node_id = int(node["id"])
-        agent_id = node_to_agent.get(node_id, int(node["agent_id"]))
-        parent_id = (
-            node_to_agent.get(int(node["parent_node_id"]))
-            if node.get("parent_node_id") is not None
-            else None
-        )
-        conn.execute(
-            """
-            UPDATE subagents
-            SET parent_agent_id = ?, enabled_tools = ?
-            WHERE id = ?
-            """,
-            (parent_id, node.get("enabled_tools"), agent_id),
-        )
-
-    _sync_legacy_connections(conn)
+    conn.execute("DROP INDEX IF EXISTS idx_subagent_nodes_one_per_agent")
     conn.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_nodes_one_per_agent
-        ON subagent_nodes (agent_id)
+        UPDATE subagent_nodes
+        SET enabled_tools = (
+            SELECT enabled_tools FROM subagents
+            WHERE subagents.id = subagent_nodes.agent_id
+        )
         """
     )
     conn.execute(
-        "INSERT INTO app_meta (key, value) VALUES (?, ?)", (marker, _now())
+        """
+        INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, ?)
+        """,
+        ("reusable_subagent_placements_v1", _now()),
     )
 
 
@@ -951,7 +817,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "INSERT INTO app_meta (key, value) VALUES (?, ?)",
             (node_migration_key, _now()),
         )
-    _collapse_shared_subagent_placements(conn)
+    _enable_reusable_subagent_placements(conn)
     conn.execute(
         """
         UPDATE heartbeat_settings SET instructions = ?
@@ -4157,31 +4023,43 @@ def _create_subagent_node(
         raise ValueError("Select an existing subagent.")
     if parent_node_id is not None:
         parent = conn.execute(
-            "SELECT agent_id FROM subagent_nodes WHERE id = ?", (parent_node_id,)
+            "SELECT agent_id, parent_node_id FROM subagent_nodes WHERE id = ?",
+            (parent_node_id,),
         ).fetchone()
         if parent is None:
             raise ValueError("Select an existing parent node.")
-        if int(parent["agent_id"]) == int(agent_id):
-            raise ValueError("A node cannot use itself as its direct child.")
+        current = parent
+        visited: set[int] = set()
+        while current is not None:
+            if int(current["agent_id"]) == int(agent_id):
+                raise ValueError(
+                    "This subagent is already present in the selected branch."
+                )
+            ancestor_id = current["parent_node_id"]
+            if ancestor_id is None:
+                break
+            if int(ancestor_id) in visited:
+                raise ValueError("The saved subagent hierarchy contains a cycle.")
+            visited.add(int(ancestor_id))
+            current = conn.execute(
+                "SELECT agent_id, parent_node_id FROM subagent_nodes WHERE id = ?",
+                (int(ancestor_id),),
+            ).fetchone()
         if _node_depth(conn, parent_node_id) >= MAX_SUBAGENT_DEPTH:
             raise ValueError(
                 f"Subagents can be nested at most {MAX_SUBAGENT_DEPTH} levels below Mounir."
             )
     existing = conn.execute(
-        "SELECT id, parent_node_id FROM subagent_nodes WHERE agent_id = ?",
-        (agent_id,),
+        """
+        SELECT id FROM subagent_nodes
+        WHERE agent_id = ? AND (
+            (parent_node_id IS NULL AND ? IS NULL) OR parent_node_id = ?
+        )
+        """,
+        (agent_id, parent_node_id, parent_node_id),
     ).fetchone()
     if existing:
-        same_parent = (
-            existing["parent_node_id"] is None and parent_node_id is None
-        ) or (
-            existing["parent_node_id"] is not None
-            and parent_node_id is not None
-            and int(existing["parent_node_id"]) == int(parent_node_id)
-        )
-        if same_parent:
-            return int(existing["id"])
-        raise ValueError("This subagent already has a parent.")
+        raise ValueError("This subagent is already connected under this parent.")
     cur = conn.execute(
         """
         INSERT INTO subagent_nodes (
@@ -4191,6 +4069,20 @@ def _create_subagent_node(
         (agent_id, parent_node_id, agent["enabled_tools"], _now()),
     )
     return int(cur.lastrowid)
+
+
+def add_subagent_node(agent_id: int, parent_node_id: int | None = None) -> dict:
+    """Place an existing reusable subagent in one workflow branch."""
+    normalized_parent = None if parent_node_id in (None, "") else int(parent_node_id)
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            node_id = _create_subagent_node(conn, int(agent_id), normalized_parent)
+            _sync_legacy_connections(conn)
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+    return get_subagent_node(node_id)
 
 
 def _node_subtree_height(conn: sqlite3.Connection, node_id: int) -> int:
@@ -4225,13 +4117,18 @@ def _move_subagent_node(
     subagent_id: int,
     parent_node_id: int | None,
 ) -> int:
-    """Move one complete subagent and its subtree beneath one parent."""
-    node = conn.execute(
-        "SELECT id FROM subagent_nodes WHERE agent_id = ?", (subagent_id,)
-    ).fetchone()
-    if node is None:
+    """Move the only placement of a legacy single-placement subagent."""
+    placements = conn.execute(
+        "SELECT id FROM subagent_nodes WHERE agent_id = ? ORDER BY id LIMIT 2",
+        (subagent_id,),
+    ).fetchall()
+    if not placements:
         raise ValueError("Select an existing subagent.")
-    node_id = int(node["id"])
+    if len(placements) > 1:
+        raise ValueError(
+            "This subagent has multiple workflow placements; move a specific node instead."
+        )
+    node_id = int(placements[0]["id"])
     parent_agent_id = None
     if parent_node_id is not None:
         parent = conn.execute(
@@ -4262,16 +4159,20 @@ def _move_subagent_node(
 
 
 def _canonical_parent_node(conn: sqlite3.Connection, agent_id: int) -> int:
-    row = conn.execute(
+    rows = conn.execute(
         """
         SELECT id FROM subagent_nodes WHERE agent_id = ?
-        ORDER BY parent_node_id IS NOT NULL, created_at, id LIMIT 1
+        ORDER BY parent_node_id IS NOT NULL, created_at, id LIMIT 2
         """,
         (agent_id,),
-    ).fetchone()
-    if row is None:
+    ).fetchall()
+    if not rows:
         raise ValueError("Select an existing parent subagent.")
-    return int(row["id"])
+    if len(rows) > 1:
+        raise ValueError(
+            "This parent has multiple workflow placements; select a specific parent node."
+        )
+    return int(rows[0]["id"])
 
 
 def _sync_legacy_connections(conn: sqlite3.Connection) -> None:
@@ -4317,6 +4218,8 @@ def _add_subagent(
     dedupe_tools=None,
     enabled: bool = True,
     enabled_tools=None,
+    parent_node_id: int | None = None,
+    connect_to_workflow: bool = True,
 ) -> int:
     try:
         selected_model_id = int(model_id)
@@ -4348,11 +4251,24 @@ def _add_subagent(
         and selected_parent_id not in existing_agent_ids
     ):
         raise ValueError("Select an existing subagent as the parent.")
-    selected_parent_node_id = (
-        None
-        if selected_parent_id is None
-        else _canonical_parent_node(conn, selected_parent_id)
-    )
+    if parent_node_id not in (None, ""):
+        try:
+            selected_parent_node_id = int(parent_node_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Select an existing parent node.") from exc
+        parent = conn.execute(
+            "SELECT agent_id FROM subagent_nodes WHERE id = ?",
+            (selected_parent_node_id,),
+        ).fetchone()
+        if parent is None:
+            raise ValueError("Select an existing parent node.")
+        selected_parent_id = int(parent["agent_id"])
+    else:
+        selected_parent_node_id = (
+            None
+            if selected_parent_id is None
+            else _canonical_parent_node(conn, selected_parent_id)
+        )
     enabled_tools_json = (
         None
         if enabled_tools is None
@@ -4387,7 +4303,8 @@ def _add_subagent(
     except sqlite3.IntegrityError as exc:
         raise _friendly_integrity_error(exc) from exc
     agent_id = int(cur.lastrowid)
-    _create_subagent_node(conn, agent_id, selected_parent_node_id)
+    if _bool(connect_to_workflow, "connect_to_workflow"):
+        _create_subagent_node(conn, agent_id, selected_parent_node_id)
     _sync_legacy_connections(conn)
     conn.commit()
     return agent_id
@@ -4407,12 +4324,15 @@ def add_subagent(
     dedupe_tools=None,
     enabled: bool = True,
     enabled_tools=None,
+    parent_node_id: int | None = None,
+    connect_to_workflow: bool = True,
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
             confirm_tool_calls, parent_agent_id, confirm_tools, icon_data, icon_mime,
-            dedupe_tools, enabled, enabled_tools,
+            dedupe_tools, enabled, enabled_tools, parent_node_id,
+            connect_to_workflow,
         )
         return get_subagent(aid)
 
@@ -4475,21 +4395,23 @@ def _enrich_subagent_connections(
 
     for row in rows:
         agent_id = int(row["id"])
-        node = next(
+        placements = sorted(
             (item for item in nodes if int(item["agent_id"]) == agent_id),
-            None,
+            key=lambda item: (item["created_at"] or "", int(item["id"])),
         )
+        row["placement_count"] = len(placements)
+        node = placements[0] if placements else None
         if node is None:
             row["node_id"] = None
             row["parent_node_id"] = None
             row["parent_agent_id"] = None
             row["parent_name"] = "Mounir"
-            row["connected_to_supervisor"] = True
+            row["connected_to_supervisor"] = False
             row["child_agent_ids"] = []
             row["child_count"] = 0
-            row["depth"] = 1
-            row["path_names"] = ["Mounir", row["name"]]
-            row["path_label"] = f"Mounir / {row['name']}"
+            row["depth"] = 0
+            row["path_names"] = []
+            row["path_label"] = "Not connected"
             row["enabled_tools"] = (
                 json.loads(_json_string_list(row["enabled_tools"], "enabled tools"))
                 if row.get("enabled_tools") is not None
@@ -4528,8 +4450,8 @@ def _enrich_subagent_connections(
         row["path_names"] = path_names
         row["path_label"] = " / ".join(path_names)
         row["enabled_tools"] = (
-            json.loads(_json_string_list(node["enabled_tools"], "enabled tools"))
-            if node["enabled_tools"] is not None
+            json.loads(_json_string_list(row["enabled_tools"], "enabled tools"))
+            if row.get("enabled_tools") is not None
             else None
         )
     return rows
@@ -4557,12 +4479,79 @@ def get_subagent_by_name(name: str) -> dict | None:
         return result[0] if result else None
 
 
+def list_subagent_nodes() -> list[dict]:
+    """Return every workflow placement with its reusable subagent summary."""
+    with _connect() as conn:
+        nodes = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT n.id, n.agent_id, n.parent_node_id, n.created_at,
+                       s.name, s.description, s.enabled, s.enabled_tools,
+                       s.model_id, s.mcp_server_id,
+                       CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
+                       m.name AS model_name, m.model,
+                       srv.name AS mcp_server_name
+                FROM subagent_nodes n
+                JOIN subagents s ON s.id = n.agent_id
+                JOIN models m ON m.id = s.model_id
+                JOIN mcp_servers srv ON srv.id = s.mcp_server_id
+                ORDER BY n.created_at, n.id
+                """
+            )
+        ]
+    by_id = {int(node["id"]): node for node in nodes}
+    names = {int(node["agent_id"]): node["name"] for node in nodes}
+    result = []
+    for node in nodes:
+        parent = (
+            by_id.get(int(node["parent_node_id"]))
+            if node["parent_node_id"] is not None
+            else None
+        )
+        path_names = _subagent_node_path(node, by_id, names)
+        result.append(
+            {
+                "id": int(node["id"]),
+                "node_id": int(node["id"]),
+                "subagent_id": int(node["agent_id"]),
+                "parent_node_id": (
+                    int(node["parent_node_id"])
+                    if node["parent_node_id"] is not None
+                    else None
+                ),
+                "parent_agent_id": int(parent["agent_id"]) if parent else None,
+                "name": node["name"],
+                "description": node["description"],
+                "enabled": bool(node["enabled"]),
+                "enabled_tools": (
+                    json.loads(
+                        _json_string_list(node["enabled_tools"], "enabled tools")
+                    )
+                    if node["enabled_tools"] is not None
+                    else None
+                ),
+                "model_id": int(node["model_id"]),
+                "model_name": node["model_name"],
+                "model": node["model"],
+                "mcp_server_id": int(node["mcp_server_id"]),
+                "mcp_server_name": node["mcp_server_name"],
+                "has_icon": bool(node["has_icon"]),
+                "depth": len(path_names) - 1,
+                "path_names": path_names,
+                "path_label": " / ".join(path_names),
+                "created_at": node["created_at"],
+            }
+        )
+    return result
+
+
 def get_subagent_node(node_id: int) -> dict | None:
     """Return one placement and its direct relations, separate from its subagent."""
     with _connect() as conn:
         node = conn.execute(
             """
-            SELECT n.id, n.agent_id, n.parent_node_id, n.enabled_tools, n.created_at,
+            SELECT n.id, n.agent_id, n.parent_node_id, s.enabled_tools, n.created_at,
                    s.name, s.description, s.model_id, s.mcp_server_id, s.enabled,
                    CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
                    m.name AS model_name, m.model,
@@ -4669,7 +4658,7 @@ def get_subagent_node(node_id: int) -> dict | None:
 
 
 def update_subagent_node(node_id: int, *, enabled_tools) -> dict | None:
-    """Save the complete subagent's exact MCP tool allowlist."""
+    """Update shared tool access through any placement of the subagent."""
     if enabled_tools is None:
         normalized = None
     else:
@@ -4688,8 +4677,8 @@ def update_subagent_node(node_id: int, *, enabled_tools) -> dict | None:
             conn.rollback()
             return None
         conn.execute(
-            "UPDATE subagent_nodes SET enabled_tools = ? WHERE id = ?",
-            (normalized, node_id),
+            "UPDATE subagent_nodes SET enabled_tools = ? WHERE agent_id = ?",
+            (normalized, int(node["agent_id"])),
         )
         conn.execute(
             "UPDATE subagents SET enabled_tools = ? WHERE id = ?",
@@ -4700,7 +4689,7 @@ def update_subagent_node(node_id: int, *, enabled_tools) -> dict | None:
 
 
 def remove_subagent_node(node_id: int) -> dict | None:
-    """Delete one complete subagent and all descendants from the graph."""
+    """Disconnect one placement branch without deleting saved subagents."""
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         node = conn.execute(
@@ -4735,11 +4724,6 @@ def remove_subagent_node(node_id: int) -> dict | None:
         for descendant_node_id, descendant_agent_id in reversed(descendants):
             conn.execute(
                 "DELETE FROM subagent_nodes WHERE id = ?", (descendant_node_id,)
-            )
-            conn.execute("DELETE FROM subagents WHERE id = ?", (descendant_agent_id,))
-            conn.execute(
-                "DELETE FROM heartbeat_agent_preferences WHERE agent_key = ?",
-                (f"mcp:{descendant_agent_id}",),
             )
         _sync_legacy_connections(conn)
         conn.commit()
@@ -4808,7 +4792,7 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     } & kwargs.keys()
     if obsolete_relationship_fields:
         raise ValueError(
-            "A subagent can have only one parent; use parent_agent_id."
+            "Workflow connections are placement-specific; manage a subagent node instead."
         )
     parent_selection_supplied = "parent_agent_id" in kwargs
     selected_parent_id = (
@@ -4932,25 +4916,28 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
 
 def delete_subagent(subagent_id: int) -> bool:
     with _connect() as conn:
-        children = [
-            row["name"]
+        conn.execute("BEGIN IMMEDIATE")
+        exists = conn.execute(
+            "SELECT 1 FROM subagents WHERE id = ?", (subagent_id,)
+        ).fetchone()
+        if exists is None:
+            conn.rollback()
+            return False
+        placements = [
+            int(row["id"])
             for row in conn.execute(
-                """
-                SELECT DISTINCT child.name
-                FROM subagent_nodes parent
-                JOIN subagent_nodes child_node ON child_node.parent_node_id = parent.id
-                JOIN subagents child ON child.id = child_node.agent_id
-                WHERE parent.agent_id = ?
-                ORDER BY child.name
-                """,
-                (subagent_id,),
+                "SELECT id FROM subagent_nodes WHERE agent_id = ?", (subagent_id,)
             )
         ]
-        if children:
-            names = ", ".join(children)
-            raise ValueError(
-                f"Move or delete this subagent's children first: {names}."
-            )
+        disconnected: set[int] = set()
+        for node_id in placements:
+            disconnected.update(_node_descendants(conn, node_id))
+        for node_id in sorted(disconnected, reverse=True):
+            conn.execute("DELETE FROM subagent_nodes WHERE id = ?", (node_id,))
+        # Clear the legacy single-parent projection before deleting the shared
+        # definition; nested agents remain saved even though their placements
+        # in the removed branches were disconnected.
+        _sync_legacy_connections(conn)
         cur = conn.execute("DELETE FROM subagents WHERE id = ?", (subagent_id,))
         if cur.rowcount:
             _sync_legacy_connections(conn)
@@ -5018,17 +5005,28 @@ def build_server_spec(server_id: int) -> dict | None:
 
 
 def build_specs() -> list[dict]:
-    """Return one resolved runtime spec for every complete subagent."""
+    """Return one runtime spec per connected workflow placement."""
     specs = []
-    for s in list_subagents():
+    agents = {int(agent["id"]): agent for agent in list_subagents()}
+    placements = list_subagent_nodes()
+    children: dict[int, list[int]] = {}
+    for placement in placements:
+        if placement["parent_node_id"] is not None:
+            children.setdefault(int(placement["parent_node_id"]), []).append(
+                int(placement["subagent_id"])
+            )
+    for placement in placements:
+        s = agents.get(int(placement["subagent_id"]))
+        if s is None:
+            continue
         if not s.get("enabled"):
             continue
         server_env = _resolved_json_object(s.get("env") or "{}")
         server_env.update(_materialized_server_file_env(int(s["mcp_server_id"])))
         specs.append({
             "id": s["id"],
-            "node_id": s["id"],
-            "parent_node_id": s.get("parent_agent_id"),
+            "node_id": placement["node_id"],
+            "parent_node_id": placement.get("parent_node_id"),
             "mcp_server_id": s["mcp_server_id"],
             "name": s["name"],
             "description": s.get("description")
@@ -5043,10 +5041,14 @@ def build_specs() -> list[dict]:
             "auth_scheme": s.get("auth_scheme") or "",
             "oauth_redirect_uri": s.get("oauth_redirect_uri") or "",
 
-            "parent_agent_id": s.get("parent_agent_id"),
-            "parent_name": s.get("parent_name") or "Mounir",
-            "connected_to_supervisor": s.get("parent_agent_id") is None,
-            "child_agent_ids": list(s.get("child_agent_ids") or []),
+            "parent_agent_id": placement.get("parent_agent_id"),
+            "parent_name": (
+                placement["path_names"][-2]
+                if len(placement.get("path_names") or []) > 1
+                else "Mounir"
+            ),
+            "connected_to_supervisor": placement.get("parent_node_id") is None,
+            "child_agent_ids": children.get(int(placement["node_id"]), []),
             "allowed_tools": s.get("enabled_tools"),
 
             "model": (s.get("model") or "").strip() or s["model_name"],

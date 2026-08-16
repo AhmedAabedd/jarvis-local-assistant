@@ -12,7 +12,7 @@ import { ToolChoices } from '../resources/ToolChoices'
 interface Props {
   nodeId: number | null
   selectorOpen: boolean
-  onAddSubagent: (subagentId: number, name: string) => void
+  onAddSubagent: (nodeId: number, name: string) => void
   onOpenSubagent: (subagentId: number) => void
   onClose: () => void
 }
@@ -45,8 +45,8 @@ function RelationCard({
         <button
           className="node-relation__remove"
           type="button"
-          aria-label={`Delete ${node.name}`}
-          title="Delete subagent"
+          aria-label={`Disconnect ${node.name}`}
+          title="Disconnect subagent"
           onClick={onRemove}
         >
           <X size={13} />
@@ -118,6 +118,7 @@ export function AgentNodeDrawer({
     onSuccess: (saved) => {
       queryClient.setQueryData(['agent-node', nodeId], saved)
       queryClient.invalidateQueries({ queryKey: ['agents'] })
+      queryClient.invalidateQueries({ queryKey: ['agent-nodes'] })
       setEditingTools(false)
     },
   })
@@ -132,6 +133,7 @@ export function AgentNodeDrawer({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['agent-node', nodeId] }),
         queryClient.invalidateQueries({ queryKey: ['agents'] }),
+        queryClient.invalidateQueries({ queryKey: ['agent-nodes'] }),
         queryClient.invalidateQueries({ queryKey: ['overview'] }),
       ])
     },
@@ -169,8 +171,13 @@ export function AgentNodeDrawer({
               Open subagent <ChevronRight size={13} aria-hidden="true" />
             </a>
           )}
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close">
-            <X size={16} />
+          <button
+            className="icon-button panel-close-button"
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            <X size={14} />
           </button>
         </header>
         <div className="node-drawer__body">
@@ -230,7 +237,7 @@ export function AgentNodeDrawer({
                     <button
                       className="node-empty-connect"
                       type="button"
-                      onClick={() => onAddSubagent(subagent.id, placement.path_label)}
+                      onClick={() => onAddSubagent(placement.id, placement.path_label)}
                     >
                       <Plus size={12} />
                       <span>Add subagent</span>
@@ -361,9 +368,9 @@ export function AgentNodeDrawer({
       </aside>
       <ConfirmDialog
         open={Boolean(pendingRemoval)}
-        title="Delete subagent?"
-        message={`Permanently delete “${pendingRemoval?.name || ''}” and its nested subagents?`}
-        confirmLabel="Delete"
+        title="Disconnect subagent?"
+        message={`Disconnect “${pendingRemoval?.name || ''}” and its nested subagents from this workflow? Their saved configurations will remain available.`}
+        confirmLabel="Disconnect"
         danger
         busy={removeChild.isPending}
         error={removeChild.error instanceof Error ? removeChild.error.message : ''}

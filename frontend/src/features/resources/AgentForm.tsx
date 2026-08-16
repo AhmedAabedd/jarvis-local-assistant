@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useMemo, useState, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
 import type { McpServer, ModelRecord, Subagent } from '../../api/types'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
@@ -12,14 +12,12 @@ export function AgentForm({
   item,
   models,
   servers,
-  agents,
   formId,
   onSubmit,
 }: {
   item?: Subagent
   models: ModelRecord[]
   servers: McpServer[]
-  agents: Subagent[]
   formId: string
   onSubmit: (body: object) => Promise<void>
 }) {
@@ -32,29 +30,6 @@ export function AgentForm({
   const [deduped, setDeduped] = useState(new Set(stringList(item?.dedupe_tools)))
   const [icon, setIcon] = useState<string | undefined>()
   const [error, setError] = useState('')
-  const availableParents = useMemo(() => {
-    const children = new Map<number, number[]>()
-    agents.forEach((agent) => {
-      if (agent.parent_agent_id == null) return
-      children.set(agent.parent_agent_id, [
-        ...(children.get(agent.parent_agent_id) || []),
-        agent.id,
-      ])
-    })
-    const descendants = new Set<number>()
-    const visit = (agentId: number) => {
-      if (descendants.has(agentId)) return
-      descendants.add(agentId)
-      for (const childId of children.get(agentId) || []) visit(childId)
-    }
-    if (item) visit(item.id)
-    const subtreeHeight = (agentId: number): number =>
-      1 + Math.max(0, ...(children.get(agentId) || []).map(subtreeHeight))
-    const movingHeight = item ? subtreeHeight(item.id) : 1
-    return agents.filter(
-      (agent) => !descendants.has(agent.id) && (agent.depth || 1) + movingHeight <= 4,
-    )
-  }, [agents, item])
   const tools = useQuery({
     queryKey: ['server-tools', serverId],
     queryFn: () => api.servers.tools(serverId),
@@ -70,7 +45,6 @@ export function AgentForm({
     try {
       body.model_id = Number(body.model_id)
       body.mcp_server_id = Number(body.mcp_server_id)
-      body.parent_agent_id = body.parent_agent_id ? Number(body.parent_agent_id) : null
       delete body.confirmation_mode
       body.confirm_tools = mode === 'all' ? ['*'] : mode === 'selected' ? [...confirmed] : []
       if (mode === 'selected' && !confirmed.size)
@@ -160,20 +134,6 @@ export function AgentForm({
           {servers.map((server) => (
             <option key={server.id} value={server.id}>
               {server.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field
-        full
-        label="Parent"
-        hint="Choose the single agent that can delegate work to this subagent."
-      >
-        <select name="parent_agent_id" defaultValue={item?.parent_agent_id || ''}>
-          <option value="">Mounir</option>
-          {availableParents.map((agent) => (
-            <option key={agent.id} value={agent.id}>
-              {agent.path_label || agent.name}
             </option>
           ))}
         </select>

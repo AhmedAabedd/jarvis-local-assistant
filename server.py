@@ -1313,6 +1313,21 @@ async def list_subagents():
     return [db.subagent_for_api(agent) for agent in db.list_subagents()]
 
 
+@app.get("/api/subagent-nodes")
+async def list_subagent_nodes():
+    return db.list_subagent_nodes()
+
+
+@app.post("/api/subagent-nodes")
+async def create_subagent_node(req: dict):
+    try:
+        return db.add_subagent_node(
+            req.get("subagent_id"), req.get("parent_node_id")
+        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 @app.get("/api/subagent-nodes/{node_id}")
 async def get_subagent_node(node_id: int):
     node = db.get_subagent_node(node_id)
@@ -1409,6 +1424,8 @@ async def create_subagent(req: dict):
             dedupe_tools=req.get("dedupe_tools"),
             enabled=req.get("enabled", True),
             enabled_tools=req.get("enabled_tools"),
+            parent_node_id=req.get("parent_node_id"),
+            connect_to_workflow=req.get("connect_to_workflow", True),
             **icon,
         )
         return db.subagent_for_api(subagent)

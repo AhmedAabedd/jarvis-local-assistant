@@ -1525,9 +1525,6 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(specs[grandchild["id"]]["parent_agent_id"], child["id"])
         with self.assertRaisesRegex(ValueError, "own subtree"):
             db.update_subagent(parent["id"], parent_agent_id=grandchild["id"])
-        with self.assertRaisesRegex(ValueError, "children first"):
-            db.delete_subagent(parent["id"])
-
         level_four = db.add_subagent(
             "Deep specialist", "Handles the deepest allowed work.", "",
             model["id"], server["id"], confirm_tools=[],
@@ -1539,6 +1536,10 @@ class DatabaseTests(TemporaryDatabaseTest):
                 model["id"], server["id"], confirm_tools=[],
                 parent_agent_id=level_four["id"],
             )
+        self.assertTrue(db.delete_subagent(parent["id"]))
+        self.assertIsNone(db.get_subagent(parent["id"]))
+        self.assertIsNotNone(db.get_subagent(child["id"]))
+        self.assertEqual(db.get_subagent(child["id"])["placement_count"], 0)
 
     def test_subagent_tree_is_relative_and_describes_only_deeper_agents(self):
         db.init()
@@ -1710,7 +1711,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(under_projects["parent_agent_id"], projects["id"])
         self.assertEqual(db.get_subagent(github["id"])["child_count"], 0)
         self.assertEqual(db.get_subagent(projects["id"])["child_count"], 1)
-        with self.assertRaisesRegex(ValueError, "only one parent"):
+        with self.assertRaisesRegex(ValueError, "placement-specific"):
             db.update_subagent(
                 gmail["id"], parent_agent_ids=[github["id"], projects["id"]]
             )
@@ -1721,7 +1722,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         nodes = set(langgraph_agent.build_graph().get_graph().nodes)
         self.assertNotIn("mcp_gmail", nodes)
 
-    def test_old_duplicate_placements_migrate_to_independent_subagents(self):
+    def test_reusable_subagents_support_independent_workflow_placements(self):
         db.init()
         model = db.add_model(
             "Placement model", "placement/model", "Ollama",
@@ -1737,62 +1738,59 @@ class DatabaseTests(TemporaryDatabaseTest):
             model["id"], server["id"], confirm_tools=[],
             enabled_tools=["read_email"],
         )
-        researcher = db.add_subagent(
-            "Researcher", "Handles research.", "",
+        projects = db.add_subagent(
+            "Projects", "Coordinates projects.", "",
             model["id"], server["id"], confirm_tools=[],
         )
         github_node_id = github["node_id"]
         gmail_node_id = gmail["node_id"]
-        researcher_node_id = researcher["node_id"]
-        with db._connect() as conn:
-            conn.execute("DROP INDEX idx_subagent_nodes_one_per_agent")
-            conn.execute(
-                "DELETE FROM app_meta WHERE key = ?",
-                ("subagents_are_runtime_nodes_v2",),
-            )
-            duplicate = conn.execute(
-                """
-                INSERT INTO subagent_nodes (
-                    agent_id, parent_node_id, enabled_tools, created_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (
-                    gmail["id"], github_node_id,
-                    json.dumps(["send_email"]), db._now(),
-                ),
-            )
-            duplicate_node_id = int(duplicate.lastrowid)
-            conn.execute(
-                "UPDATE subagent_nodes SET parent_node_id = ? WHERE id = ?",
-                (duplicate_node_id, researcher_node_id),
-            )
-            conn.commit()
+        projects_node_id = projects["node_id"]
+        under_github = db.add_subagent_node(gmail["id"], github_node_id)
+        under_projects = db.add_subagent_node(gmail["id"], projects_node_id)
 
-        db.init()
-
-        agents = db.list_subagents()
-        migrated_gmail = [
-            agent for agent in agents if agent["name"].startswith("Gmail")
-        ]
-        self.assertEqual([agent["name"] for agent in migrated_gmail], ["Gmail", "Gmail 2"])
-        original = next(agent for agent in migrated_gmail if agent["id"] == gmail["id"])
-        clone = next(agent for agent in migrated_gmail if agent["id"] != gmail["id"])
-        self.assertEqual(original["enabled_tools"], ["read_email"])
-        self.assertEqual(clone["enabled_tools"], ["send_email"])
-        self.assertIsNone(original["parent_agent_id"])
-        self.assertEqual(clone["parent_agent_id"], github["id"])
-        self.assertEqual(db.get_subagent(researcher["id"])["parent_agent_id"], clone["id"])
-        self.assertEqual(clone["model_id"], gmail["model_id"])
-        self.assertEqual(clone["mcp_server_id"], gmail["mcp_server_id"])
-        self.assertIsNotNone(clone["node_id"])
-        self.assertEqual(len(db.build_specs()), 4)
-
-        nested_tree = mcp_agents.subagent_tree_prompt(
-            db.build_specs(),
-            parent=next(spec for spec in db.build_specs() if spec["id"] == github["id"]),
+        self.assertEqual(under_github["subagent_id"], gmail["id"])
+        self.assertEqual(under_projects["subagent_id"], gmail["id"])
+        self.assertNotEqual(under_github["id"], under_projects["id"])
+        self.assertEqual(db.get_subagent(gmail["id"])["placement_count"], 3)
+        self.assertEqual(
+            len([spec for spec in db.build_specs() if spec["id"] == gmail["id"]]),
+            3,
         )
-        self.assertIn("- Gmail 2", nested_tree)
-        self.assertIn("- Researcher", nested_tree)
+        with self.assertRaisesRegex(ValueError, "already connected"):
+            db.add_subagent_node(gmail["id"], github_node_id)
+        with self.assertRaisesRegex(ValueError, "selected branch"):
+            db.add_subagent_node(github["id"], under_github["id"])
+
+        db.update_subagent_node(under_github["id"], enabled_tools=["send_email"])
+        self.assertEqual(db.get_subagent(gmail["id"])["enabled_tools"], ["send_email"])
+        self.assertEqual(db.get_subagent_node(gmail_node_id)["enabled_tools"], ["send_email"])
+        self.assertEqual(
+            db.get_subagent_node(under_projects["id"])["enabled_tools"],
+            ["send_email"],
+        )
+
+        saved_only = db.add_subagent(
+            "Library only", "Saved without a workflow placement.", "",
+            model["id"], server["id"], confirm_tools=[],
+            connect_to_workflow=False,
+        )
+        self.assertEqual(saved_only["placement_count"], 0)
+        self.assertFalse(
+            any(spec["id"] == saved_only["id"] for spec in db.build_specs())
+        )
+        connected = db.add_subagent_node(saved_only["id"], None)
+        self.assertEqual(connected["subagent_id"], saved_only["id"])
+
+        self.assertTrue(db.delete_subagent(gmail["id"]))
+        self.assertIsNone(db.get_subagent(gmail["id"]))
+        self.assertFalse(
+            any(
+                node["subagent_id"] == gmail["id"]
+                for node in db.list_subagent_nodes()
+            )
+        )
+        self.assertIsNotNone(db.get_subagent(github["id"]))
+        self.assertIsNotNone(db.get_subagent(projects["id"]))
 
     def test_subagent_node_details_manage_one_complete_agent(self):
         db.init()
@@ -1847,7 +1845,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
         specs = {spec["node_id"]: spec for spec in db.build_specs()}
         self.assertEqual(
-            specs[github["id"]]["allowed_tools"],
+            specs[github_node_id]["allowed_tools"],
             ["create_issue", "update_issue"],
         )
         db.update_subagent_node(github_node_id, enabled_tools=None)
@@ -1858,8 +1856,10 @@ class DatabaseTests(TemporaryDatabaseTest):
 
         removed = db.remove_subagent_node(github_node_id)
         self.assertEqual(removed["removed_nodes"], 2)
-        self.assertIsNone(db.get_subagent(github["id"]))
-        self.assertIsNone(db.get_subagent(researcher["id"]))
+        self.assertIsNotNone(db.get_subagent(github["id"]))
+        self.assertIsNotNone(db.get_subagent(researcher["id"]))
+        self.assertEqual(db.get_subagent(github["id"])["placement_count"], 0)
+        self.assertEqual(db.get_subagent(researcher["id"])["placement_count"], 0)
         self.assertIsNotNone(db.get_subagent(gmail["id"]))
         self.assertIsNone(db.remove_subagent_node(999999))
 
@@ -3117,9 +3117,28 @@ class AdminApiTests(TemporaryDatabaseTest):
                     json={"parent_agent_id": child["id"]},
                 )
                 self.assertEqual(cycle.status_code, 400)
-                protected = await client.delete(f"/api/subagents/{parent['id']}")
-                self.assertEqual(protected.status_code, 409)
-                self.assertIn("children first", protected.json()["error"])
+                reused = await client.post(
+                    "/api/subagent-nodes",
+                    json={
+                        "subagent_id": child["id"],
+                        "parent_node_id": second_child["node_id"],
+                    },
+                )
+                self.assertEqual(reused.status_code, 200)
+                self.assertEqual(reused.json()["subagent_id"], child["id"])
+                duplicate = await client.post(
+                    "/api/subagent-nodes",
+                    json={
+                        "subagent_id": child["id"],
+                        "parent_node_id": second_child["node_id"],
+                    },
+                )
+                self.assertEqual(duplicate.status_code, 400)
+                listed_nodes = (await client.get("/api/subagent-nodes")).json()
+                self.assertGreaterEqual(
+                    len([node for node in listed_nodes if node["subagent_id"] == child["id"]]),
+                    2,
+                )
 
                 disposable_response = await client.post(
                     "/api/subagents", json={**common, "name": "API disposable"}
@@ -3144,7 +3163,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                     item["id"] for item in (await client.get("/api/subagents")).json()
                 }
                 self.assertTrue(
-                    {disposable["id"], disposable_child["id"]}.isdisjoint(
+                    {disposable["id"], disposable_child["id"]}.issubset(
                         remaining_definition_ids
                     )
                 )
@@ -3160,7 +3179,7 @@ class AdminApiTests(TemporaryDatabaseTest):
                     f"/api/subagent-nodes/{second_child['node_id']}"
                 )
                 self.assertEqual(deleted_agent.status_code, 200)
-                self.assertEqual(deleted_agent.json()["removed_nodes"], 1)
+                self.assertEqual(deleted_agent.json()["removed_nodes"], 2)
                 missing_node_delete = await client.delete("/api/subagent-nodes/999999")
                 self.assertEqual(missing_node_delete.status_code, 404)
 

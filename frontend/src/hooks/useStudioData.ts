@@ -7,6 +7,7 @@ export const keys = {
   models: ['models'] as const,
   servers: ['servers'] as const,
   agents: ['agents'] as const,
+  agentNodes: ['agent-nodes'] as const,
   voice: ['voice'] as const,
   telegram: ['telegram'] as const,
   whatsapp: ['whatsapp'] as const,
@@ -27,4 +28,7 @@ export function useServers() {
 }
 export function useAgents() {
   return useQuery({ queryKey: keys.agents, queryFn: api.agents.list })
+}
+export function useAgentNodes() {
+  return useQuery({ queryKey: keys.agentNodes, queryFn: api.agentNodes.list })
 }

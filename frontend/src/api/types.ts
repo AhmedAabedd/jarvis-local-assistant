@@ -72,10 +72,33 @@ export interface Subagent {
   connected_to_supervisor?: boolean
   child_agent_ids?: Id[]
   child_count?: number
+  placement_count?: number
   depth?: number
   path_names: string[]
   path_label: string
   enabled_tools: string[] | null
+}
+
+export interface SubagentPlacement {
+  id: Id
+  node_id: Id
+  subagent_id: Id
+  parent_node_id: Id | null
+  parent_agent_id: Id | null
+  name: string
+  description: string
+  enabled: boolean
+  enabled_tools: string[] | null
+  model_id: Id
+  model_name: string
+  model: string
+  mcp_server_id: Id
+  mcp_server_name: string
+  has_icon: boolean
+  depth: number
+  path_names: string[]
+  path_label: string
+  created_at: string
 }
 
 export interface SubagentNodeRelation {
