@@ -2735,6 +2735,8 @@ button.resource-header-action {
 }
 .subagent-start__list {
   display: grid;
+  align-content: start;
+  grid-auto-rows: max-content;
   gap: 8px;
   max-height: 310px;
   overflow: auto;
@@ -2788,6 +2790,60 @@ button.resource-header-action {
 }
 .subagent-preview__grid .detail--full dd {
   white-space: pre-wrap;
+}
+.subagent-edit-form {
+  display: grid;
+}
+.subagent-form-tabs {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  margin: -3px 0 24px;
+}
+.subagent-form-tabs button {
+  position: relative;
+  min-height: 27px;
+  flex: 0 0 auto;
+  padding: 0 2px 6px;
+  color: var(--muted);
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: color 150ms ease;
+}
+.subagent-form-tabs button::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: transparent;
+  transition: background 150ms ease;
+}
+.subagent-form-tabs button:hover {
+  color: var(--text);
+}
+.subagent-form-tabs button.is-active {
+  color: var(--accent);
+}
+.subagent-form-tabs button.is-active::after {
+  background: var(--accent-strong);
+}
+.subagent-edit-form > .feedback {
+  margin-top: 18px;
+}
+.subagent-form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-soft);
 }
 .subagent-wizard__steps {
   display: grid;

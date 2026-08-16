@@ -122,13 +122,7 @@ export function ResourceDetails({
         <div className="setting-row">
           <span>
             <strong>{enabled ? 'Active' : 'Inactive'}</strong>
-            <small>
-              {enabled
-                ? agent.placement_count
-                  ? `Available in ${agent.placement_count} workflow placement(s)`
-                  : 'Saved and ready to connect to the workflow'
-                : 'Removed from runtime delegation'}
-            </small>
+            <small>Controls whether this subagent can receive delegated tasks.</small>
           </span>
           <label className="switch">
             <input

@@ -269,7 +269,7 @@ export function OverviewPage() {
           kind: 'dynamic',
           enabled: Boolean(item.enabled),
           model: item.model || item.model_name,
-          icon: item.has_icon ? `/api/subagents/${item.id}/icon` : undefined,
+          icon: item.has_icon ? `/api/subagents/${item.subagent_id}/icon` : undefined,
           onOpen: () => {
             setConnectionParent(null)
             setSelected(null)

@@ -247,15 +247,17 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       <Button icon={<ChevronLeft size={14} />} onClick={cancelForm}>
         Cancel
       </Button>
-      <Button
-        variant="primary"
-        icon={<Save size={14} />}
-        type="submit"
-        form={formId}
-        busy={save.isPending}
-      >
-        {editing ? 'Save changes' : 'Create'}
-      </Button>
+      {(kind !== 'agents' || editing !== null) && (
+        <Button
+          variant="primary"
+          icon={<Save size={14} />}
+          type="submit"
+          form={formId}
+          busy={save.isPending}
+        >
+          {editing ? 'Save changes' : 'Create'}
+        </Button>
+      )}
     </>
   ) : selected ? (
     <div className="resource-header-actions">
@@ -319,6 +321,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                   models={models.data || []}
                   servers={servers.data || []}
                   formId={formId}
+                  busy={save.isPending}
                   onSubmit={submit}
                 />
               )}
