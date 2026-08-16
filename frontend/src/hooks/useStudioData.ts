@@ -8,6 +8,8 @@ export const keys = {
   servers: ['servers'] as const,
   agents: ['agents'] as const,
   agentNodes: ['agent-nodes'] as const,
+  workflows: ['workflows'] as const,
+  workflowNodes: ['workflow-nodes'] as const,
   voice: ['voice'] as const,
   telegram: ['telegram'] as const,
   whatsapp: ['whatsapp'] as const,
@@ -29,6 +31,18 @@ export function useServers() {
 export function useAgents() {
   return useQuery({ queryKey: keys.agents, queryFn: api.agents.list })
 }
-export function useAgentNodes() {
-  return useQuery({ queryKey: keys.agentNodes, queryFn: api.agentNodes.list })
+export function useAgentNodes(workflowId?: number) {
+  return useQuery({
+    queryKey: [...keys.agentNodes, workflowId ?? 'global'],
+    queryFn: () => api.agentNodes.list(workflowId),
+  })
+}
+export function useWorkflows() {
+  return useQuery({ queryKey: keys.workflows, queryFn: api.workflows.list })
+}
+export function useWorkflowNodes(ownerWorkflowId?: number) {
+  return useQuery({
+    queryKey: [...keys.workflowNodes, ownerWorkflowId ?? 'global'],
+    queryFn: () => api.workflowNodes.list(ownerWorkflowId),
+  })
 }

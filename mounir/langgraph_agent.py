@@ -34,6 +34,7 @@ from . import (
     mcp_agents,
     tools,
     trace,
+    workflow_runtime,
 )
 from .memory import Conversation
 from .specialists.knowledge import run as run_knowledge
@@ -310,6 +311,27 @@ def _make_mcp_node(
     return node
 
 
+def _make_workflow_node(
+    placement: dict,
+    protected_attempts: set[str],
+):
+    tool_name = workflow_runtime.delegate_tool_name(placement)
+
+    def node(state: TurnState) -> Command:
+        return _specialist_result(
+            state,
+            tool_name,
+            placement["name"],
+            lambda task: workflow_runtime.run(
+                int(placement["child_workflow_id"]),
+                task,
+                protected_attempts,
+            ),
+        )
+
+    return node
+
+
 def _make_heartbeat_builtin_node(spec: dict):
     key = spec["builtin_key"]
     tool_name = f"delegate_to_{key}"
@@ -372,11 +394,19 @@ def _compile_graph(
             )
         ]
     )
+    workflow_placements = (
+        [] if scoped else workflow_runtime.attached_workflows(None, None)
+    )
     dynamic_tools = []
     for spec in root_specs:
         name = mcp_agents.delegate_tool_name(spec["name"])
         delegates[name] = mcp_agents.node_name(spec["name"])
         dynamic_tools.append(mcp_agents.delegate_tool(spec))
+    workflow_tools = []
+    for placement in workflow_placements:
+        name = workflow_runtime.delegate_tool_name(placement)
+        delegates[name] = workflow_runtime.node_name(placement)
+        workflow_tools.append(workflow_runtime.routing_tool(placement))
 
     builtin_tools = [
         item
@@ -384,7 +414,12 @@ def _compile_graph(
         if item.name in delegates
     ]
     general_tools = [] if scoped else list(tools.GENERAL_TOOLS)
-    advertised_tools = [*general_tools, *builtin_tools, *dynamic_tools]
+    advertised_tools = [
+        *general_tools,
+        *builtin_tools,
+        *dynamic_tools,
+        *workflow_tools,
+    ]
 
     declined_batch = threading.Event()
     general_tool_lock = threading.Lock()
@@ -441,6 +476,11 @@ def _compile_graph(
         graph.add_node(
             mcp_agents.node_name(spec["name"]),
             _make_mcp_node(spec, dynamic, protected_attempts),
+        )
+    for placement in workflow_placements:
+        graph.add_node(
+            workflow_runtime.node_name(placement),
+            _make_workflow_node(placement, protected_attempts),
         )
 
     graph.add_edge(START, "supervisor")

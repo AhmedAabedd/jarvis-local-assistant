@@ -1,7 +1,24 @@
-import { Check, ChevronLeft, ChevronRight, Copy, Eye, Plus, RefreshCw, Search } from 'lucide-react'
+import {
+  Bot,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Eye,
+  Plus,
+  RefreshCw,
+  Search,
+  Workflow as WorkflowIcon,
+} from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
-import type { McpServer, ModelRecord, Subagent, SubagentPlacement } from '../../api/types'
+import type {
+  McpServer,
+  ModelRecord,
+  Subagent,
+  SubagentPlacement,
+  Workflow,
+} from '../../api/types'
 import { api } from '../../api/client'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Button } from '../../components/ui/Button'
@@ -204,10 +221,13 @@ export function ConnectAgentModal({
   servers,
   agents,
   placements,
+  workflows = [],
+  currentWorkflowId,
   busy,
   error,
   onCreate,
   onConnect,
+  onConnectWorkflow,
   onClose,
 }: {
   open: boolean
@@ -217,13 +237,17 @@ export function ConnectAgentModal({
   servers: McpServer[]
   agents: Subagent[]
   placements: SubagentPlacement[]
+  workflows?: Workflow[]
+  currentWorkflowId?: number
   busy?: boolean
   error?: string
   onCreate: (body: object) => void
   onConnect: (subagentId: number) => void
+  onConnectWorkflow?: (workflowId: number) => void
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
+  const [resourceKind, setResourceKind] = useState<'subagent' | 'workflow' | null>(null)
   const [libraryOpen, setLibraryOpen] = useState(true)
   const [choosing, setChoosing] = useState(true)
   const [copyListOpen, setCopyListOpen] = useState(false)
@@ -268,6 +292,16 @@ export function ConnectAgentModal({
         agent.description.toLocaleLowerCase().includes(normalized),
     )
   }, [agents, query])
+  const visibleWorkflows = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase()
+    return workflows.filter(
+      (workflow) =>
+        workflow.id !== currentWorkflowId &&
+        (!normalized ||
+          workflow.name.toLocaleLowerCase().includes(normalized) ||
+          workflow.description.toLocaleLowerCase().includes(normalized)),
+    )
+  }, [currentWorkflowId, query, workflows])
   const unavailableReasons = useMemo(() => {
     const unavailable = new Map<number, string>()
     placements.forEach((placement) => {
@@ -291,6 +325,7 @@ export function ConnectAgentModal({
 
   useEffect(() => {
     if (!open) return
+    setResourceKind(null)
     setLibraryOpen(true)
     setChoosing(true)
     setCopyListOpen(false)
@@ -478,7 +513,72 @@ export function ConnectAgentModal({
   return (
     <>
       <Modal
-        open={open && !previewAgent}
+        open={open && resourceKind === null}
+        side
+        title="Add node"
+        description={`Choose what to connect under ${parentName}.`}
+        onClose={onClose}
+      >
+        <div className="node-kind-list">
+          <button type="button" onClick={() => setResourceKind('subagent')}>
+            <span className="node-kind-list__icon"><Bot size={18} /></span>
+            <span><strong>Subagent</strong><small>Add a saved specialist or create a new one.</small></span>
+            <ChevronRight size={16} />
+          </button>
+          <button type="button" onClick={() => setResourceKind('workflow')}>
+            <span className="node-kind-list__icon node-kind-list__icon--workflow">
+              <WorkflowIcon size={18} />
+            </span>
+            <span><strong>Workflow</strong><small>Reuse one of your saved workflows.</small></span>
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      </Modal>
+      <Modal
+        open={open && resourceKind === 'workflow'}
+        side
+        title="Add workflow"
+        description={`Select a workflow to add under ${parentName}.`}
+        onClose={() => { setQuery(''); setResourceKind(null) }}
+      >
+        <div className="subagent-start subagent-library">
+          <label className="subagent-start__search">
+            <Search size={14} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search workflows…"
+              autoFocus
+            />
+          </label>
+          <div className="subagent-start__list">
+            {visibleWorkflows.length ? visibleWorkflows.map((workflow) => (
+              <button
+                className="workflow-picker-row"
+                type="button"
+                key={workflow.id}
+                disabled={busy}
+                onClick={() => onConnectWorkflow?.(workflow.id)}
+              >
+                <span className="node-kind-list__icon node-kind-list__icon--workflow">
+                  <WorkflowIcon size={17} />
+                </span>
+                <span>
+                  <strong>{workflow.name}</strong>
+                  <small>{workflow.description || `${workflow.execution_mode} workflow`}</small>
+                </span>
+              </button>
+            )) : (
+              <div className="empty-state subagent-start__empty">
+                {query ? 'No matching workflows.' : 'No workflows available.'}
+              </div>
+            )}
+          </div>
+          <Feedback message={error} />
+        </div>
+      </Modal>
+      <Modal
+        open={open && resourceKind === 'subagent' && !previewAgent}
         wide
         side={libraryOpen}
         title={
@@ -503,7 +603,11 @@ export function ConnectAgentModal({
                 ? `Review and customize the new subagent before adding it under ${parentName}.`
                 : `Configure the new subagent before adding it under ${parentName}.`
         }
-        onClose={libraryOpen ? onClose : returnToLibrary}
+        onClose={
+          libraryOpen
+            ? () => { setQuery(''); setResourceKind(null) }
+            : returnToLibrary
+        }
         footer={footer}
         className={!libraryOpen && choosing && !copyListOpen ? 'modal--subagent-choice' : undefined}
       >

@@ -20,6 +20,8 @@ import {
   useModels,
   useOverview,
   useServers,
+  useWorkflowNodes,
+  useWorkflows,
   keys,
 } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
@@ -30,6 +32,7 @@ import { ConnectAgentModal } from './ConnectAgentModal'
 
 type ConnectionParent = { nodeId: number | null; name: string }
 type PendingDelete = { nodeId: number; name: string }
+type PendingWorkflowDelete = { nodeId: number; name: string }
 
 function inputEdge(source: 'telegram' | 'whatsapp', color: string): Edge {
   return {
@@ -51,6 +54,8 @@ export function OverviewPage() {
   const agentNodes = useAgentNodes()
   const models = useModels()
   const servers = useServers()
+  const workflows = useWorkflows()
+  const workflowNodes = useWorkflowNodes()
   const telegram = useQuery({ queryKey: keys.telegram, queryFn: api.telegram.get })
   const whatsapp = useQuery({ queryKey: keys.whatsapp, queryFn: api.whatsapp.get })
   const [selected, setSelected] = useState<BuiltinAgent | null>(null)
@@ -60,6 +65,8 @@ export function OverviewPage() {
   const [connectionParent, setConnectionParent] = useState<ConnectionParent | null>(null)
   const [openNodeId, setOpenNodeId] = useState<number | null>(null)
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null)
+  const [pendingWorkflowDelete, setPendingWorkflowDelete] =
+    useState<PendingWorkflowDelete | null>(null)
 
   const save = useMutation({
     mutationFn: async () => {
@@ -112,6 +119,20 @@ export function OverviewPage() {
       setConnectionParent(null)
     },
   })
+  const connectWorkflow = useMutation({
+    mutationFn: (workflowId: number) =>
+      api.workflowNodes.create({
+        child_workflow_id: workflowId,
+        parent_node_id: connectionParent?.nodeId ?? null,
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.workflowNodes }),
+        queryClient.invalidateQueries({ queryKey: keys.workflows }),
+      ])
+      setConnectionParent(null)
+    },
+  })
   const deleteNode = useMutation({
     mutationFn: (nodeId: number) => api.agentNodes.remove(nodeId),
     onSuccess: async () => {
@@ -125,16 +146,28 @@ export function OverviewPage() {
       ])
     },
   })
+  const deleteWorkflowNode = useMutation({
+    mutationFn: (nodeId: number) => api.workflowNodes.remove(nodeId),
+    onSuccess: async () => {
+      setPendingWorkflowDelete(null)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.workflowNodes }),
+        queryClient.invalidateQueries({ queryKey: keys.workflows }),
+      ])
+    },
+  })
   useEffect(() => {
     if (connectionParent) {
       createAgent.reset()
       connectAgent.reset()
+      connectWorkflow.reset()
     }
   }, [connectionParent])
 
   const graph = useMemo(() => {
     const info = overview.data
     const custom = agentNodes.data || []
+    const reusableWorkflows = workflowNodes.data || []
     if (!info) return { nodes: [], edges: [] }
     const nodeWidth = 158
     const nodeGap = 14
@@ -161,6 +194,11 @@ export function OverviewPage() {
       )
     const layerCount = new Map<number, number>([[0, info.builtins.length]])
     occurrences.forEach(({ depth }) => {
+      layerCount.set(depth, (layerCount.get(depth) || 0) + 1)
+    })
+    reusableWorkflows.forEach((item) => {
+      const parent = custom.find((node) => node.node_id === item.parent_node_id)
+      const depth = parent ? Math.max(0, parent.depth || 1) : 0
       layerCount.set(depth, (layerCount.get(depth) || 0) + 1)
     })
     const widestLayer = Math.max(1, ...layerCount.values())
@@ -297,17 +335,52 @@ export function OverviewPage() {
         style: { stroke: item.enabled ? '#79b8ff' : '#ff7d79' },
       })
     })
+    reusableWorkflows.forEach((item) => {
+      const parent = custom.find((node) => node.node_id === item.parent_node_id)
+      const depth = parent ? Math.max(0, parent.depth || 1) : 0
+      const id = `workflow-${item.id}`
+      const parentId = item.parent_node_id === null
+        ? 'supervisor'
+        : `dynamic-agent-${item.parent_node_id}`
+      nodes.push({
+        id,
+        type: 'agent',
+        position: nextPosition(depth),
+        data: {
+          label: item.name,
+          kind: 'workflow',
+          model: item.execution_mode,
+          onOpen: () => navigate(`/admin/workflows?open=${item.child_workflow_id}&tab=overview`),
+          onDelete: () => {
+            deleteWorkflowNode.reset()
+            setPendingWorkflowDelete({ nodeId: item.id, name: item.name })
+          },
+        },
+      })
+      edges.push({
+        id: `${parentId}-${id}`,
+        source: parentId,
+        target: id,
+        animated: true,
+        style: { stroke: '#a78bfa' },
+      })
+    })
     return { nodes, edges }
   }, [
     overview.data,
     agentNodes.data,
+    workflowNodes.data,
     telegram.data?.enabled,
     whatsapp.data?.enabled,
     navigate,
     deleteNode,
+    deleteWorkflowNode,
   ])
 
-  if (overview.isLoading || agents.isLoading || agentNodes.isLoading)
+  if (
+    overview.isLoading || agents.isLoading || agentNodes.isLoading ||
+    workflows.isLoading || workflowNodes.isLoading
+  )
     return (
       <>
         <PageHeader
@@ -357,15 +430,19 @@ export function OverviewPage() {
         servers={servers.data || []}
         agents={agents.data || []}
         placements={agentNodes.data || []}
-        busy={createAgent.isPending || connectAgent.isPending}
+        workflows={workflows.data || []}
+        busy={createAgent.isPending || connectAgent.isPending || connectWorkflow.isPending}
         error={
           createAgent.error instanceof Error
             ? createAgent.error.message
             : connectAgent.error instanceof Error
               ? connectAgent.error.message
-              : ''
+              : connectWorkflow.error instanceof Error
+                ? connectWorkflow.error.message
+                : ''
         }
         onConnect={(subagentId) => connectAgent.mutate(subagentId)}
+        onConnectWorkflow={(workflowId) => connectWorkflow.mutate(workflowId)}
         onCreate={(body) => createAgent.mutate(body)}
         onClose={() => setConnectionParent(null)}
       />
@@ -382,6 +459,21 @@ export function OverviewPage() {
           if (deleteNode.isPending) return
           deleteNode.reset()
           setPendingDelete(null)
+        }}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingWorkflowDelete)}
+        title="Disconnect workflow?"
+        message={`Disconnect “${pendingWorkflowDelete?.name || ''}” from this overview? The saved workflow will remain available.`}
+        confirmLabel="Disconnect"
+        danger
+        busy={deleteWorkflowNode.isPending}
+        error={deleteWorkflowNode.error instanceof Error ? deleteWorkflowNode.error.message : ''}
+        onConfirm={() => pendingWorkflowDelete && deleteWorkflowNode.mutate(pendingWorkflowDelete.nodeId)}
+        onCancel={() => {
+          if (deleteWorkflowNode.isPending) return
+          deleteWorkflowNode.reset()
+          setPendingWorkflowDelete(null)
         }}
       />
       <AgentConfigDrawer

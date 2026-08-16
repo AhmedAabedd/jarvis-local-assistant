@@ -1,5 +1,13 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
-import { BookOpen, Bot, Image as ImageIcon, Plus, Settings, X } from 'lucide-react'
+import {
+  BookOpen,
+  Bot,
+  Image as ImageIcon,
+  Plus,
+  Settings,
+  Workflow,
+  X,
+} from 'lucide-react'
 
 export type FlowData = {
   label: string
@@ -9,6 +17,7 @@ export type FlowData = {
   icon?: string
   agentKey?: string
   channel?: 'telegram' | 'whatsapp'
+  flowDirection?: 'horizontal' | 'vertical'
   onOpen?: () => void
   onAdd?: () => void
   onDelete?: () => void
@@ -40,9 +49,13 @@ function ModelIcon() {
 
 export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
   const channelClass = data.channel ? `flow-node--${data.channel}` : ''
+  const horizontal = data.flowDirection === 'horizontal'
+  const endpoint = data.kind === 'workflow-start' || data.kind === 'workflow-end'
   const Icon =
     data.kind === 'supervisor'
       ? Bot
+      : data.kind === 'workflow'
+        ? Workflow
       : data.agentKey === 'media'
         ? ImageIcon
         : data.agentKey === 'knowledge'
@@ -55,10 +68,10 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
     <div
       className={`flow-node flow-node--${data.kind} ${channelClass} ${data.enabled === false ? 'flow-node--inactive' : ''}`}
     >
-      {data.kind !== 'channel' && (
+      {data.kind !== 'channel' && data.kind !== 'workflow-start' && data.kind !== 'orchestrator' && (
         <Handle
           type="target"
-          position={data.kind === 'supervisor' ? Position.Left : Position.Top}
+          position={horizontal || data.kind === 'workflow-end' || data.kind === 'supervisor' ? Position.Left : Position.Top}
         />
       )}
       <button
@@ -73,10 +86,12 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
           <img className="flow-node__channel-icon" src="/images/whatsapp.svg" alt="" />
         ) : (
           <>
-            <div className="flow-node__head">
-              <span className={`avatar ${data.icon ? 'has-image' : ''}`}>
-                {data.icon ? <img src={data.icon} alt="" /> : <Icon size={16} />}
-              </span>
+            <div className={`flow-node__head ${endpoint ? 'flow-node__head--endpoint' : ''}`}>
+              {!endpoint && (
+                <span className={`avatar ${data.icon ? 'has-image' : ''}`}>
+                  {data.icon ? <img src={data.icon} alt="" /> : <Icon size={16} />}
+                </span>
+              )}
               <span className="flow-node__identity">
                 {data.kind === 'supervisor' && <span className="flow-node__kind">Supervisor</span>}
                 <span className="flow-node__name">{data.label}</span>
@@ -91,7 +106,10 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
           </>
         )}
       </button>
-      {data.kind === 'dynamic' && data.onDelete && (
+      {(
+        data.kind === 'dynamic' ||
+        data.kind === 'workflow'
+      ) && data.onDelete && (
         <button
           className="flow-node__disconnect nodrag nopan"
           type="button"
@@ -99,8 +117,8 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
             event.stopPropagation()
             data.onDelete?.()
           }}
-          aria-label={`Disconnect ${data.label} and its nested subagents`}
-          title="Disconnect subagent"
+          aria-label={`Disconnect ${data.label}`}
+          title="Disconnect node"
         >
           <X size={14} />
         </button>
@@ -112,16 +130,23 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
             event.stopPropagation()
             data.onAdd?.()
           }}
-          aria-label={`Add a subagent under ${data.label}`}
-          title="Add subagent"
+          aria-label={`Add a node under ${data.label}`}
+          title="Add node"
         >
           <Plus size={10} strokeWidth={2.5} />
         </button>
       )}
-      {(data.kind === 'supervisor' || data.kind === 'channel' || data.kind === 'dynamic') && (
+      {(
+        data.kind === 'supervisor' ||
+        data.kind === 'channel' ||
+        data.kind === 'dynamic' ||
+        data.kind === 'orchestrator' ||
+        data.kind === 'workflow-start' ||
+        (horizontal && data.kind !== 'workflow-end')
+      ) && (
         <Handle
           type="source"
-          position={data.kind === 'channel' ? Position.Right : Position.Bottom}
+          position={data.kind === 'channel' || horizontal ? Position.Right : Position.Bottom}
         />
       )}
     </div>

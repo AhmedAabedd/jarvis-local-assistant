@@ -16,6 +16,8 @@ import type {
   TtsVoiceCatalog,
   VoiceSettings,
   WhatsAppSettings,
+  Workflow,
+  WorkflowNodePlacement,
 } from './types'
 
 export class ApiError extends Error {
@@ -95,14 +97,42 @@ export const api = {
     remove: (id: number) => request(`/api/subagents/${id}`, json('DELETE')),
   },
   agentNodes: {
-    list: () => request<SubagentPlacement[]>('/api/subagent-nodes'),
-    create: (body: { subagent_id: number; parent_node_id: number | null }) =>
+    list: (workflowId?: number) =>
+      request<SubagentPlacement[]>(
+        `/api/subagent-nodes${workflowId === undefined ? '' : `?workflow_id=${workflowId}`}`,
+      ),
+    create: (body: {
+      subagent_id: number
+      parent_node_id: number | null
+      workflow_id?: number
+      position?: number
+    }) =>
       request<SubagentNode>('/api/subagent-nodes', json('POST', body)),
     get: (id: number) => request<SubagentNode>(`/api/subagent-nodes/${id}`),
     update: (id: number, body: { enabled_tools: string[] | null }) =>
       request<SubagentNode>(`/api/subagent-nodes/${id}`, json('PUT', body)),
     remove: (id: number) =>
       request<{ ok: boolean; removed_nodes: number }>(`/api/subagent-nodes/${id}`, json('DELETE')),
+  },
+  workflows: {
+    list: () => request<Workflow[]>('/api/workflows'),
+    create: (body: object) => request<Workflow>('/api/workflows', json('POST', body)),
+    update: (id: number, body: object) =>
+      request<Workflow>(`/api/workflows/${id}`, json('PUT', body)),
+    remove: (id: number) => request(`/api/workflows/${id}`, json('DELETE')),
+  },
+  workflowNodes: {
+    list: (ownerWorkflowId?: number) =>
+      request<WorkflowNodePlacement[]>(
+        `/api/workflow-nodes${ownerWorkflowId === undefined ? '' : `?owner_workflow_id=${ownerWorkflowId}`}`,
+      ),
+    create: (body: {
+      child_workflow_id: number
+      parent_node_id: number | null
+      owner_workflow_id?: number
+      position?: number
+    }) => request<WorkflowNodePlacement>('/api/workflow-nodes', json('POST', body)),
+    remove: (id: number) => request(`/api/workflow-nodes/${id}`, json('DELETE')),
   },
   voice: {
     get: () => request<VoiceSettings>('/api/voice-settings'),

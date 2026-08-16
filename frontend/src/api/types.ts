@@ -85,6 +85,8 @@ export interface SubagentPlacement {
   subagent_id: Id
   parent_node_id: Id | null
   parent_agent_id: Id | null
+  workflow_id: Id | null
+  position: number
   name: string
   description: string
   enabled: boolean
@@ -114,6 +116,8 @@ export interface SubagentNode {
   id: Id
   subagent_id: Id
   parent_node_id: Id | null
+  workflow_id: Id | null
+  position: number
   created_at: string
   depth: number
   path_names: string[]
@@ -133,6 +137,32 @@ export interface SubagentNode {
     has_icon: boolean
   }
   children: SubagentNodeRelation[]
+}
+
+export interface Workflow {
+  id: Id
+  name: string
+  description: string
+  system_prompt: string
+  model_id: Id | null
+  model_name?: string | null
+  model?: string | null
+  execution_mode: 'agentic' | 'direct'
+  node_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkflowNodePlacement {
+  id: Id
+  owner_workflow_id: Id | null
+  child_workflow_id: Id
+  parent_node_id: Id | null
+  position: number
+  created_at: string
+  name: string
+  description: string
+  execution_mode: 'agentic' | 'direct'
 }
 
 export interface BuiltinAgent {

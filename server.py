@@ -505,7 +505,7 @@ async def voice_turn(file: UploadFile = File(...)):
     return JSONResponse({"text": text, "lang": lang, "reply": reply, "audio_b64": audio_b64})
 
 
-# --- Admin: models, MCP servers, subagents ------------------------------------
+# --- Admin: models, MCP servers, subagents, workflows -------------------------
 
 @app.get("/api/voice-settings")
 async def get_voice_settings():
@@ -1314,15 +1314,16 @@ async def list_subagents():
 
 
 @app.get("/api/subagent-nodes")
-async def list_subagent_nodes():
-    return db.list_subagent_nodes()
+async def list_subagent_nodes(workflow_id: int | None = None):
+    return db.list_subagent_nodes(workflow_id)
 
 
 @app.post("/api/subagent-nodes")
 async def create_subagent_node(req: dict):
     try:
         return db.add_subagent_node(
-            req.get("subagent_id"), req.get("parent_node_id")
+            req.get("subagent_id"), req.get("parent_node_id"),
+            req.get("workflow_id"), req.get("position"),
         )
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1426,6 +1427,8 @@ async def create_subagent(req: dict):
             enabled_tools=req.get("enabled_tools"),
             parent_node_id=req.get("parent_node_id"),
             connect_to_workflow=req.get("connect_to_workflow", True),
+            workflow_id=req.get("workflow_id"),
+            position=req.get("position"),
             **icon,
         )
         return db.subagent_for_api(subagent)
@@ -1458,6 +1461,68 @@ async def delete_subagent(subagent_id: int):
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
     return JSONResponse({"error": "Subagent not found."}, status_code=404)
+
+
+@app.get("/api/workflows")
+async def list_workflows():
+    return db.list_workflows()
+
+
+@app.post("/api/workflows")
+async def create_workflow(req: dict):
+    try:
+        return db.create_workflow(**req)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/api/workflows/{workflow_id}")
+async def get_workflow(workflow_id: int):
+    workflow = db.get_workflow(workflow_id)
+    if workflow is None:
+        return JSONResponse({"error": "Workflow not found."}, status_code=404)
+    return workflow
+
+
+@app.put("/api/workflows/{workflow_id}")
+async def update_workflow(workflow_id: int, req: dict):
+    try:
+        workflow = db.update_workflow(workflow_id, **req)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if workflow is None:
+        return JSONResponse({"error": "Workflow not found."}, status_code=404)
+    return workflow
+
+
+@app.delete("/api/workflows/{workflow_id}")
+async def delete_workflow(workflow_id: int):
+    return _restricted_delete_response(db.delete_workflow(workflow_id), "Workflow")
+
+
+@app.get("/api/workflow-nodes")
+async def list_workflow_nodes(owner_workflow_id: int | None = None):
+    return db.list_workflow_nodes(owner_workflow_id)
+
+
+@app.post("/api/workflow-nodes")
+async def create_workflow_node(req: dict):
+    try:
+        return db.add_workflow_node(
+            req.get("child_workflow_id"),
+            req.get("parent_node_id"),
+            req.get("owner_workflow_id"),
+            req.get("position"),
+        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.delete("/api/workflow-nodes/{node_id}")
+async def delete_workflow_node(node_id: int):
+    if db.remove_workflow_node(node_id):
+        return {"ok": True}
+    return JSONResponse({"error": "Workflow node not found."}, status_code=404)
 
 
 if __name__ == "__main__":

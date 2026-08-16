@@ -434,6 +434,18 @@ async def _run_async(
                 )
 
             framework_tools.extend(make_delegate_tool(child) for child in children)
+            if current_node_id is not None:
+                from .. import workflow_runtime
+
+                workflow_children = workflow_runtime.attached_workflows(
+                    spec.get("workflow_id"), current_node_id
+                )
+                framework_tools.extend(
+                    workflow_runtime.async_delegate_tool(
+                        placement, protected_attempts, ()
+                    )
+                    for placement in workflow_children
+                )
             try:
                 from .. import db
 

@@ -263,13 +263,43 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_nodes_dynamic
-            ON subagent_nodes (parent_node_id, agent_id)
-            WHERE parent_node_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS workflows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '',
+            system_prompt TEXT NOT NULL DEFAULT '',
+            model_id INTEGER REFERENCES models(id) ON DELETE SET NULL,
+            execution_mode TEXT NOT NULL DEFAULT 'agentic'
+                CHECK (execution_mode IN ('agentic', 'direct')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_nodes_supervisor
-            ON subagent_nodes (agent_id)
-            WHERE parent_node_id IS NULL;
+        -- A NULL workflow_id keeps the existing global Mounir overview intact.
+        -- A value places the reusable subagent inside a custom workflow design.
+        -- Runtime resolution remains scope-aware: NULL is the global Mounir
+        -- overview and a concrete value is one saved workflow definition.
+        CREATE TABLE IF NOT EXISTS workflow_graph_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_workflow_id INTEGER
+                REFERENCES workflows(id) ON DELETE CASCADE,
+            child_workflow_id INTEGER NOT NULL
+                REFERENCES workflows(id) ON DELETE RESTRICT,
+            parent_node_id INTEGER
+                REFERENCES subagent_nodes(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            CHECK (
+                owner_workflow_id IS NULL
+                OR owner_workflow_id != child_workflow_id
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_graph_owner_position
+            ON workflow_graph_nodes (owner_workflow_id, position, id);
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_graph_parent
+            ON workflow_graph_nodes (parent_node_id);
 
         CREATE INDEX IF NOT EXISTS idx_subagent_nodes_parent
             ON subagent_nodes (parent_node_id);
@@ -630,6 +660,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         },
         "subagent_nodes": {
             "enabled_tools": "TEXT",
+            "workflow_id": "INTEGER REFERENCES workflows(id) ON DELETE CASCADE",
+            "position": "INTEGER NOT NULL DEFAULT 0",
         },
         "heartbeat_settings": {
             "interval_minutes": "INTEGER NOT NULL DEFAULT 30",
@@ -667,6 +699,56 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 added_columns.add((table, column))
+    # Discard the incompatible workflow experiment once. It used active/default
+    # state and a seeded system record; the current architecture has neither.
+    workflow_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(workflows)")
+    }
+    workflow_reset_key = "workflow_definitions_clean_v2"
+    if (
+        "is_default" in workflow_columns
+        and conn.execute(
+            "SELECT 1 FROM app_meta WHERE key = ?", (workflow_reset_key,)
+        ).fetchone() is None
+    ):
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_nodes'"
+        ).fetchone():
+            conn.execute("DELETE FROM workflow_nodes")
+        conn.execute("DELETE FROM workflow_graph_nodes")
+        conn.execute("DELETE FROM subagent_nodes WHERE workflow_id IS NOT NULL")
+        conn.execute("DELETE FROM workflows")
+        conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+            (workflow_reset_key, _now()),
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_subagent_nodes_workflow_position "
+        "ON subagent_nodes (workflow_id, position, id)"
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_subagent_nodes_dynamic")
+    conn.execute("DROP INDEX IF EXISTS idx_subagent_nodes_supervisor")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_nodes_global_root "
+        "ON subagent_nodes (agent_id) "
+        "WHERE workflow_id IS NULL AND parent_node_id IS NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_nodes_global_parent "
+        "ON subagent_nodes (parent_node_id, agent_id) "
+        "WHERE workflow_id IS NULL AND parent_node_id IS NOT NULL"
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_subagent_nodes_workflow_root")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_subagent_nodes_workflow_root "
+        "ON subagent_nodes (workflow_id, agent_id) "
+        "WHERE workflow_id IS NOT NULL AND parent_node_id IS NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_nodes_workflow_parent "
+        "ON subagent_nodes (workflow_id, parent_node_id, agent_id) "
+        "WHERE workflow_id IS NOT NULL AND parent_node_id IS NOT NULL"
+    )
     # Retire the former provider-specific onboarding adapter without removing
     # any user-owned server, connection, environment, or subagent records.
     conn.execute(
@@ -3322,6 +3404,20 @@ def get_model(model_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def get_model_runtime(model_id: int) -> dict | None:
+    """Return one configured model with environment-backed secrets resolved."""
+    model = get_model(model_id)
+    if model is None:
+        return None
+    return {
+        "model_id": int(model["id"]),
+        "model": model["model"],
+        "provider": model.get("provider") or "OpenAI compatible",
+        "base_url": model["base_url"],
+        "api_key": _resolve_key(model.get("api_key") or ""),
+    }
+
+
 def get_model_by_name(name: str) -> dict | None:
     with _connect() as conn:
         return _get_model_by_name(conn, name)
@@ -3958,6 +4054,328 @@ def record_server_test_failure(server_id: int, error: str) -> dict | None:
 
 
 # -----------------------------------------------------------------------------
+# Workflow definitions and reusable workflow nodes
+# -----------------------------------------------------------------------------
+
+_WORKFLOW_SELECT = """
+    SELECT w.id, w.name, w.description, w.system_prompt, w.model_id,
+           w.execution_mode, w.created_at, w.updated_at,
+           m.name AS model_name, m.model,
+           (SELECT COUNT(*) FROM subagent_nodes n
+            WHERE n.workflow_id = w.id) +
+           (SELECT COUNT(*) FROM workflow_graph_nodes wn
+            WHERE wn.owner_workflow_id = w.id) AS node_count
+    FROM workflows w
+    LEFT JOIN models m ON m.id = w.model_id
+"""
+
+
+def _workflow_dict(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["id"] = int(item["id"])
+    item["model_id"] = int(item["model_id"]) if item["model_id"] is not None else None
+    item["node_count"] = int(item.get("node_count") or 0)
+    return item
+
+
+def list_workflows() -> list[dict]:
+    with _connect() as conn:
+        return [
+            _workflow_dict(row)
+            for row in conn.execute(f"{_WORKFLOW_SELECT} ORDER BY w.updated_at DESC, w.id DESC")
+        ]
+
+
+def get_workflow(workflow_id: int) -> dict | None:
+    with _connect() as conn:
+        return _workflow_dict(
+            conn.execute(f"{_WORKFLOW_SELECT} WHERE w.id = ?", (workflow_id,)).fetchone()
+        )
+
+
+def _workflow_mode(value) -> str:
+    mode = str(value or "agentic").strip().lower()
+    if mode not in {"agentic", "direct"}:
+        raise ValueError("Execution mode must be agentic or direct.")
+    return mode
+
+
+def _optional_model_id(conn: sqlite3.Connection, value) -> int | None:
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        model_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Select an existing model.") from exc
+    if conn.execute("SELECT 1 FROM models WHERE id = ?", (model_id,)).fetchone() is None:
+        raise ValueError("Select an existing model.")
+    return model_id
+
+
+def create_workflow(
+    *, name: str, description: str = "", system_prompt: str = "",
+    model_id=None, execution_mode: str = "agentic",
+) -> dict:
+    with _connect() as conn:
+        now = _now()
+        mode = _workflow_mode(execution_mode)
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO workflows
+                    (name, description, system_prompt, model_id,
+                     execution_mode, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _required(name, "name"), str(description or "").strip(),
+                    "" if mode == "direct" else str(system_prompt or "").strip(),
+                    None if mode == "direct" else _optional_model_id(conn, model_id),
+                    mode, now, now,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+        workflow_id = int(cur.lastrowid)
+    return get_workflow(workflow_id)
+
+
+def update_workflow(workflow_id: int, **fields) -> dict | None:
+    allowed = {"name", "description", "system_prompt", "model_id", "execution_mode"}
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported workflow field: {sorted(unknown)[0]}")
+    with _connect() as conn:
+        existing = conn.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
+        if existing is None:
+            return None
+        values = {
+            "name": _required(fields.get("name", existing["name"]), "name"),
+            "description": str(fields.get("description", existing["description"]) or "").strip(),
+            "system_prompt": str(fields.get("system_prompt", existing["system_prompt"]) or "").strip(),
+            "model_id": _optional_model_id(conn, fields.get("model_id", existing["model_id"])),
+            "execution_mode": _workflow_mode(fields.get("execution_mode", existing["execution_mode"])),
+        }
+        if values["execution_mode"] == "direct":
+            values["model_id"] = None
+            values["system_prompt"] = ""
+            nested = conn.execute(
+                "SELECT 1 FROM subagent_nodes WHERE workflow_id = ? AND parent_node_id IS NOT NULL LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+            if nested:
+                raise ValueError("Move nested subagents to the workflow root before switching to direct mode.")
+        try:
+            conn.execute(
+                """
+                UPDATE workflows SET name = ?, description = ?, system_prompt = ?,
+                    model_id = ?, execution_mode = ?, updated_at = ? WHERE id = ?
+                """,
+                (*values.values(), _now(), workflow_id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+    return get_workflow(workflow_id)
+
+
+def delete_workflow(workflow_id: int) -> DeletionResult:
+    with _connect() as conn:
+        row = conn.execute("SELECT name FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
+        if row is None:
+            return DeletionResult("not_found")
+        references = int(conn.execute(
+            "SELECT COUNT(*) FROM workflow_graph_nodes WHERE child_workflow_id = ?",
+            (workflow_id,),
+        ).fetchone()[0])
+        if references:
+            return DeletionResult(
+                "restricted",
+                (f"{references} workflow placement{'s' if references != 1 else ''}",),
+            )
+        conn.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+        conn.commit()
+        return DeletionResult("deleted")
+
+
+def _workflow_would_cycle(
+    conn: sqlite3.Connection, owner_workflow_id: int, child_workflow_id: int
+) -> bool:
+    pending = [child_workflow_id]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current == owner_workflow_id:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        pending.extend(
+            int(row[0]) for row in conn.execute(
+                "SELECT child_workflow_id FROM workflow_graph_nodes WHERE owner_workflow_id = ?",
+                (current,),
+            )
+        )
+    return False
+
+
+def _next_graph_position(
+    conn: sqlite3.Connection, owner_workflow_id: int | None
+) -> int:
+    row = conn.execute(
+        """
+        SELECT COALESCE(MAX(position), -1) + 1 FROM (
+            SELECT position FROM subagent_nodes
+            WHERE ((workflow_id IS NULL AND ? IS NULL) OR workflow_id = ?)
+            UNION ALL
+            SELECT position FROM workflow_graph_nodes
+            WHERE ((owner_workflow_id IS NULL AND ? IS NULL) OR owner_workflow_id = ?)
+        )
+        """,
+        (
+            owner_workflow_id, owner_workflow_id,
+            owner_workflow_id, owner_workflow_id,
+        ),
+    ).fetchone()
+    return int(row[0])
+
+
+def _reserve_graph_position(
+    conn: sqlite3.Connection,
+    owner_workflow_id: int,
+    requested_position,
+) -> int:
+    """Open one deterministic sequence slot across both direct-node tables."""
+    next_position = _next_graph_position(conn, owner_workflow_id)
+    if requested_position in (None, ""):
+        return next_position
+    try:
+        position = int(requested_position)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Select a valid workflow insertion point.") from exc
+    if position < 0 or position > next_position:
+        raise ValueError("Select a valid workflow insertion point.")
+    conn.execute(
+        """
+        UPDATE subagent_nodes SET position = position + 1
+        WHERE workflow_id = ? AND position >= ?
+        """,
+        (owner_workflow_id, position),
+    )
+    conn.execute(
+        """
+        UPDATE workflow_graph_nodes SET position = position + 1
+        WHERE owner_workflow_id = ? AND position >= ?
+        """,
+        (owner_workflow_id, position),
+    )
+    return position
+
+
+def list_workflow_nodes(owner_workflow_id: int | None = None) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT n.id, n.owner_workflow_id, n.child_workflow_id,
+                   n.parent_node_id, n.position, n.created_at,
+                   w.name, w.description, w.execution_mode
+            FROM workflow_graph_nodes n
+            JOIN workflows w ON w.id = n.child_workflow_id
+            WHERE ((n.owner_workflow_id IS NULL AND ? IS NULL)
+                   OR n.owner_workflow_id = ?)
+            ORDER BY n.position, n.created_at, n.id
+            """,
+            (owner_workflow_id, owner_workflow_id),
+        ).fetchall()
+        return [
+            {
+                **dict(row),
+                "id": int(row["id"]),
+                "owner_workflow_id": (
+                    int(row["owner_workflow_id"])
+                    if row["owner_workflow_id"] is not None else None
+                ),
+                "child_workflow_id": int(row["child_workflow_id"]),
+                "parent_node_id": (
+                    int(row["parent_node_id"])
+                    if row["parent_node_id"] is not None else None
+                ),
+                "position": int(row["position"] or 0),
+            }
+            for row in rows
+        ]
+
+
+def add_workflow_node(
+    child_workflow_id: int, parent_node_id: int | None = None,
+    owner_workflow_id: int | None = None,
+    position=None,
+) -> dict:
+    owner = None if owner_workflow_id in (None, "") else int(owner_workflow_id)
+    parent_id = None if parent_node_id in (None, "") else int(parent_node_id)
+    child = int(child_workflow_id)
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM workflows WHERE id = ?", (child,)).fetchone() is None:
+            raise ValueError("Select an existing workflow.")
+        direct = False
+        if owner is not None:
+            owner_row = conn.execute(
+                "SELECT execution_mode FROM workflows WHERE id = ?", (owner,)
+            ).fetchone()
+            if owner_row is None:
+                raise ValueError("Select an existing workflow overview.")
+            direct = owner_row["execution_mode"] == "direct"
+            if direct and parent_id is not None:
+                raise ValueError("Direct workflow steps cannot have parent nodes.")
+            if _workflow_would_cycle(conn, owner, child):
+                raise ValueError("A workflow cannot contain itself, directly or indirectly.")
+        if parent_id is not None:
+            parent = conn.execute(
+                "SELECT workflow_id FROM subagent_nodes WHERE id = ?", (parent_id,)
+            ).fetchone()
+            if parent is None or parent["workflow_id"] != owner:
+                raise ValueError("The parent node belongs to a different workflow.")
+        duplicate = conn.execute(
+            """
+            SELECT 1 FROM workflow_graph_nodes
+            WHERE child_workflow_id = ?
+              AND ((owner_workflow_id IS NULL AND ? IS NULL) OR owner_workflow_id = ?)
+              AND ((parent_node_id IS NULL AND ? IS NULL) OR parent_node_id = ?)
+            """,
+            (child, owner, owner, parent_id, parent_id),
+        ).fetchone()
+        if duplicate and not direct:
+            raise ValueError("This workflow is already connected under this parent.")
+        selected_position = (
+            _reserve_graph_position(conn, owner, position)
+            if direct and owner is not None
+            else _next_graph_position(conn, owner)
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO workflow_graph_nodes
+                (owner_workflow_id, child_workflow_id, parent_node_id, position, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (owner, child, parent_id, selected_position, _now()),
+        )
+        conn.commit()
+        node_id = int(cur.lastrowid)
+    return next(item for item in list_workflow_nodes(owner) if item["id"] == node_id)
+
+
+def remove_workflow_node(node_id: int) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM workflow_graph_nodes WHERE id = ?", (node_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# -----------------------------------------------------------------------------
 # Subagents
 # -----------------------------------------------------------------------------
 
@@ -4015,19 +4433,33 @@ def _create_subagent_node(
     conn: sqlite3.Connection,
     agent_id: int,
     parent_node_id: int | None,
+    workflow_id: int | None = None,
+    position=None,
 ) -> int:
     agent = conn.execute(
         "SELECT enabled_tools FROM subagents WHERE id = ?", (agent_id,)
     ).fetchone()
     if agent is None:
         raise ValueError("Select an existing subagent.")
+    direct = False
+    if workflow_id is not None:
+        workflow = conn.execute(
+            "SELECT execution_mode FROM workflows WHERE id = ?", (workflow_id,)
+        ).fetchone()
+        if workflow is None:
+            raise ValueError("Select an existing workflow.")
+        direct = workflow["execution_mode"] == "direct"
+        if direct and parent_node_id is not None:
+            raise ValueError("Direct workflow steps cannot have parent nodes.")
     if parent_node_id is not None:
         parent = conn.execute(
-            "SELECT agent_id, parent_node_id FROM subagent_nodes WHERE id = ?",
+            "SELECT agent_id, parent_node_id, workflow_id FROM subagent_nodes WHERE id = ?",
             (parent_node_id,),
         ).fetchone()
         if parent is None:
             raise ValueError("Select an existing parent node.")
+        if parent["workflow_id"] != workflow_id:
+            raise ValueError("The parent node belongs to a different workflow.")
         current = parent
         visited: set[int] = set()
         while current is not None:
@@ -4052,33 +4484,53 @@ def _create_subagent_node(
     existing = conn.execute(
         """
         SELECT id FROM subagent_nodes
-        WHERE agent_id = ? AND (
+        WHERE agent_id = ?
+          AND ((workflow_id IS NULL AND ? IS NULL) OR workflow_id = ?)
+          AND (
             (parent_node_id IS NULL AND ? IS NULL) OR parent_node_id = ?
         )
         """,
-        (agent_id, parent_node_id, parent_node_id),
+        (agent_id, workflow_id, workflow_id, parent_node_id, parent_node_id),
     ).fetchone()
-    if existing:
+    if existing and not direct:
         raise ValueError("This subagent is already connected under this parent.")
+    selected_position = (
+        _reserve_graph_position(conn, workflow_id, position)
+        if direct and workflow_id is not None
+        else _next_graph_position(conn, workflow_id)
+    )
     cur = conn.execute(
         """
         INSERT INTO subagent_nodes (
-            agent_id, parent_node_id, enabled_tools, created_at
-        ) VALUES (?, ?, ?, ?)
+            agent_id, parent_node_id, enabled_tools, workflow_id, position, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (agent_id, parent_node_id, agent["enabled_tools"], _now()),
+        (
+            agent_id, parent_node_id, agent["enabled_tools"], workflow_id,
+            selected_position, _now(),
+        ),
     )
     return int(cur.lastrowid)
 
 
-def add_subagent_node(agent_id: int, parent_node_id: int | None = None) -> dict:
+def add_subagent_node(
+    agent_id: int,
+    parent_node_id: int | None = None,
+    workflow_id: int | None = None,
+    position=None,
+) -> dict:
     """Place an existing reusable subagent in one workflow branch."""
     normalized_parent = None if parent_node_id in (None, "") else int(parent_node_id)
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            node_id = _create_subagent_node(conn, int(agent_id), normalized_parent)
-            _sync_legacy_connections(conn)
+            node_id = _create_subagent_node(
+                conn, int(agent_id), normalized_parent,
+                None if workflow_id in (None, "") else int(workflow_id),
+                position,
+            )
+            if workflow_id in (None, ""):
+                _sync_legacy_connections(conn)
             conn.commit()
         except sqlite3.IntegrityError as exc:
             raise _friendly_integrity_error(exc) from exc
@@ -4119,7 +4571,7 @@ def _move_subagent_node(
 ) -> int:
     """Move the only placement of a legacy single-placement subagent."""
     placements = conn.execute(
-        "SELECT id FROM subagent_nodes WHERE agent_id = ? ORDER BY id LIMIT 2",
+        "SELECT id FROM subagent_nodes WHERE agent_id = ? AND workflow_id IS NULL ORDER BY id LIMIT 2",
         (subagent_id,),
     ).fetchall()
     if not placements:
@@ -4161,7 +4613,7 @@ def _move_subagent_node(
 def _canonical_parent_node(conn: sqlite3.Connection, agent_id: int) -> int:
     rows = conn.execute(
         """
-        SELECT id FROM subagent_nodes WHERE agent_id = ?
+        SELECT id FROM subagent_nodes WHERE agent_id = ? AND workflow_id IS NULL
         ORDER BY parent_node_id IS NOT NULL, created_at, id LIMIT 2
         """,
         (agent_id,),
@@ -4185,6 +4637,7 @@ def _sync_legacy_connections(conn: sqlite3.Connection) -> None:
         SELECT parent.agent_id, child.agent_id, child.created_at
         FROM subagent_nodes child
         LEFT JOIN subagent_nodes parent ON parent.id = child.parent_node_id
+        WHERE child.workflow_id IS NULL
         """
     )
     conn.execute("UPDATE subagents SET parent_agent_id = NULL")
@@ -4196,6 +4649,7 @@ def _sync_legacy_connections(conn: sqlite3.Connection) -> None:
             FROM subagent_nodes child_node
             JOIN subagent_nodes parent ON parent.id = child_node.parent_node_id
             WHERE child_node.agent_id = child.id
+              AND child_node.workflow_id IS NULL
             ORDER BY child_node.created_at, child_node.id
             LIMIT 1
         )
@@ -4220,6 +4674,8 @@ def _add_subagent(
     enabled_tools=None,
     parent_node_id: int | None = None,
     connect_to_workflow: bool = True,
+    workflow_id: int | None = None,
+    position=None,
 ) -> int:
     try:
         selected_model_id = int(model_id)
@@ -4242,6 +4698,13 @@ def _add_subagent(
     confirm_tools_json = _json_string_list(confirm_tools, "confirmation tools")
     dedupe_tools_json = _json_string_list(dedupe_tools or [], "duplicate protection tools")
     has_confirmations = bool(json.loads(confirm_tools_json))
+    selected_workflow_id = (
+        None if workflow_id in (None, "") else int(workflow_id)
+    )
+    if selected_workflow_id is not None and conn.execute(
+        "SELECT 1 FROM workflows WHERE id = ?", (selected_workflow_id,)
+    ).fetchone() is None:
+        raise ValueError("Select an existing workflow.")
     selected_parent_id = _subagent_parent_id(parent_agent_id)
     existing_agent_ids = {
         int(row["id"]) for row in conn.execute("SELECT id FROM subagents")
@@ -4257,16 +4720,18 @@ def _add_subagent(
         except (TypeError, ValueError) as exc:
             raise ValueError("Select an existing parent node.") from exc
         parent = conn.execute(
-            "SELECT agent_id FROM subagent_nodes WHERE id = ?",
+            "SELECT agent_id, workflow_id FROM subagent_nodes WHERE id = ?",
             (selected_parent_node_id,),
         ).fetchone()
         if parent is None:
             raise ValueError("Select an existing parent node.")
+        if parent["workflow_id"] != selected_workflow_id:
+            raise ValueError("The parent node belongs to a different workflow.")
         selected_parent_id = int(parent["agent_id"])
     else:
         selected_parent_node_id = (
             None
-            if selected_parent_id is None
+            if selected_parent_id is None or selected_workflow_id is not None
             else _canonical_parent_node(conn, selected_parent_id)
         )
     enabled_tools_json = (
@@ -4296,7 +4761,7 @@ def _add_subagent(
                 dedupe_tools_json,
                 int(_bool(enabled, "enabled")),
                 enabled_tools_json,
-                selected_parent_id,
+                selected_parent_id if selected_workflow_id is None else None,
                 _now(),
             ),
         )
@@ -4304,8 +4769,11 @@ def _add_subagent(
         raise _friendly_integrity_error(exc) from exc
     agent_id = int(cur.lastrowid)
     if _bool(connect_to_workflow, "connect_to_workflow"):
-        _create_subagent_node(conn, agent_id, selected_parent_node_id)
-    _sync_legacy_connections(conn)
+        _create_subagent_node(
+            conn, agent_id, selected_parent_node_id, selected_workflow_id, position
+        )
+    if selected_workflow_id is None:
+        _sync_legacy_connections(conn)
     conn.commit()
     return agent_id
 
@@ -4326,13 +4794,15 @@ def add_subagent(
     enabled_tools=None,
     parent_node_id: int | None = None,
     connect_to_workflow: bool = True,
+    workflow_id: int | None = None,
+    position=None,
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
             confirm_tool_calls, parent_agent_id, confirm_tools, icon_data, icon_mime,
             dedupe_tools, enabled, enabled_tools, parent_node_id,
-            connect_to_workflow,
+            connect_to_workflow, workflow_id, position,
         )
         return get_subagent(aid)
 
@@ -4378,11 +4848,15 @@ def _enrich_subagent_connections(
         int(row["id"]): row["name"]
         for row in conn.execute("SELECT id, name FROM subagents")
     }
+    workflow_names = {
+        int(item["id"]): item["name"]
+        for item in conn.execute("SELECT id, name FROM workflows")
+    }
     nodes = [
         dict(node)
         for node in conn.execute(
             """
-            SELECT id, agent_id, parent_node_id, enabled_tools, created_at
+            SELECT id, agent_id, parent_node_id, workflow_id, enabled_tools, created_at
             FROM subagent_nodes
             """
         )
@@ -4397,7 +4871,11 @@ def _enrich_subagent_connections(
         agent_id = int(row["id"])
         placements = sorted(
             (item for item in nodes if int(item["agent_id"]) == agent_id),
-            key=lambda item: (item["created_at"] or "", int(item["id"])),
+            key=lambda item: (
+                item["workflow_id"] is not None,
+                item["created_at"] or "",
+                int(item["id"]),
+            ),
         )
         row["placement_count"] = len(placements)
         node = placements[0] if placements else None
@@ -4428,6 +4906,8 @@ def _enrich_subagent_connections(
             key=lambda child: names.get(int(child["agent_id"]), ""),
         )
         path_names = _subagent_node_path(node, by_node_id, names)
+        if node["workflow_id"] is not None:
+            path_names[0] = workflow_names.get(int(node["workflow_id"]), "Workflow")
         parent_agent_id = int(parent_node["agent_id"]) if parent_node else None
         row["node_id"] = int(node["id"])
         row["parent_node_id"] = (
@@ -4441,7 +4921,9 @@ def _enrich_subagent_connections(
             if parent_agent_id is not None
             else "Mounir"
         )
-        row["connected_to_supervisor"] = parent_node is None
+        row["connected_to_supervisor"] = (
+            parent_node is None and node["workflow_id"] is None
+        )
         row["child_agent_ids"] = [
             int(child["agent_id"]) for child in direct_children
         ]
@@ -4479,14 +4961,15 @@ def get_subagent_by_name(name: str) -> dict | None:
         return result[0] if result else None
 
 
-def list_subagent_nodes() -> list[dict]:
-    """Return every workflow placement with its reusable subagent summary."""
+def list_subagent_nodes(workflow_id: int | None = None) -> list[dict]:
+    """Return placements from the global overview or one saved workflow."""
     with _connect() as conn:
         nodes = [
             dict(row)
             for row in conn.execute(
                 """
-                SELECT n.id, n.agent_id, n.parent_node_id, n.created_at,
+                SELECT n.id, n.agent_id, n.parent_node_id, n.workflow_id,
+                       n.position, n.created_at,
                        s.name, s.description, s.enabled, s.enabled_tools,
                        s.model_id, s.mcp_server_id,
                        CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
@@ -4496,8 +4979,10 @@ def list_subagent_nodes() -> list[dict]:
                 JOIN subagents s ON s.id = n.agent_id
                 JOIN models m ON m.id = s.model_id
                 JOIN mcp_servers srv ON srv.id = s.mcp_server_id
-                ORDER BY n.created_at, n.id
-                """
+                WHERE ((n.workflow_id IS NULL AND ? IS NULL) OR n.workflow_id = ?)
+                ORDER BY n.position, n.created_at, n.id
+                """,
+                (workflow_id, workflow_id),
             )
         ]
     by_id = {int(node["id"]): node for node in nodes}
@@ -4521,6 +5006,11 @@ def list_subagent_nodes() -> list[dict]:
                     else None
                 ),
                 "parent_agent_id": int(parent["agent_id"]) if parent else None,
+                "workflow_id": (
+                    int(node["workflow_id"])
+                    if node["workflow_id"] is not None else None
+                ),
+                "position": int(node["position"] or 0),
                 "name": node["name"],
                 "description": node["description"],
                 "enabled": bool(node["enabled"]),
@@ -4552,6 +5042,7 @@ def get_subagent_node(node_id: int) -> dict | None:
         node = conn.execute(
             """
             SELECT n.id, n.agent_id, n.parent_node_id, s.enabled_tools, n.created_at,
+                   n.workflow_id, n.position,
                    s.name, s.description, s.model_id, s.mcp_server_id, s.enabled,
                    CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
                    m.name AS model_name, m.model,
@@ -4567,16 +5058,21 @@ def get_subagent_node(node_id: int) -> dict | None:
         if node is None:
             return None
 
+        scope_id = node["workflow_id"]
+
         nodes = [
             dict(row)
             for row in conn.execute(
                 """
-                SELECT n.id, n.agent_id, n.parent_node_id, n.created_at,
+                SELECT n.id, n.agent_id, n.parent_node_id, n.workflow_id,
+                       n.position, n.created_at,
                        s.name, s.enabled,
                        CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon
                 FROM subagent_nodes n
                 JOIN subagents s ON s.id = n.agent_id
-                """
+                WHERE ((n.workflow_id IS NULL AND ? IS NULL) OR n.workflow_id = ?)
+                """,
+                (scope_id, scope_id),
             )
         ]
         by_id = {int(item["id"]): item for item in nodes}
@@ -4607,6 +5103,8 @@ def get_subagent_node(node_id: int) -> dict | None:
                 if node_data["parent_node_id"] is not None
                 else None
             ),
+            "workflow_id": int(scope_id) if scope_id is not None else None,
+            "position": int(node_data["position"] or 0),
             "created_at": node_data["created_at"],
             "enabled_tools": (
                 json.loads(
@@ -5004,11 +5502,11 @@ def build_server_spec(server_id: int) -> dict | None:
     }
 
 
-def build_specs() -> list[dict]:
-    """Return one runtime spec per connected workflow placement."""
+def build_specs(workflow_id: int | None = None) -> list[dict]:
+    """Return active subagent specs for the global or a saved-workflow scope."""
     specs = []
     agents = {int(agent["id"]): agent for agent in list_subagents()}
-    placements = list_subagent_nodes()
+    placements = list_subagent_nodes(workflow_id)
     children: dict[int, list[int]] = {}
     for placement in placements:
         if placement["parent_node_id"] is not None:
@@ -5027,6 +5525,7 @@ def build_specs() -> list[dict]:
             "id": s["id"],
             "node_id": placement["node_id"],
             "parent_node_id": placement.get("parent_node_id"),
+            "workflow_id": placement.get("workflow_id"),
             "mcp_server_id": s["mcp_server_id"],
             "name": s["name"],
             "description": s.get("description")
@@ -5047,9 +5546,12 @@ def build_specs() -> list[dict]:
                 if len(placement.get("path_names") or []) > 1
                 else "Mounir"
             ),
-            "connected_to_supervisor": placement.get("parent_node_id") is None,
+            "connected_to_supervisor": (
+                placement.get("workflow_id") is None
+                and placement.get("parent_node_id") is None
+            ),
             "child_agent_ids": children.get(int(placement["node_id"]), []),
-            "allowed_tools": s.get("enabled_tools"),
+            "allowed_tools": placement.get("enabled_tools"),
 
             "model": (s.get("model") or "").strip() or s["model_name"],
             "provider": s.get("provider") or "OpenAI compatible",

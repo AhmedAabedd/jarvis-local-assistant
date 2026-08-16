@@ -9,6 +9,7 @@ import {
   Mic2,
   Radio,
   UserRound,
+  Workflow,
 } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { McpIcon } from '../../components/icons/McpIcon'
@@ -19,6 +20,7 @@ const primary = [
   { to: '/admin/models', label: 'Models', icon: Database, resetResourceList: true },
   { to: '/admin/servers', label: 'MCP Servers', icon: McpIcon, resetResourceList: true },
   { to: '/admin/agents', label: 'Subagents', icon: Boxes, resetResourceList: true },
+  { to: '/admin/workflows', label: 'Workflows', icon: Workflow },
 ]
 const settings = [
   { to: '/admin/voice', label: 'Voice', icon: Mic2 },
