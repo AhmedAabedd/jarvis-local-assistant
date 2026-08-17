@@ -1,10 +1,10 @@
-"""Generic MCP specialist — one dynamic subagent instance per registry entry.
+"""Generic dynamic specialist — one subagent instance per registry entry.
 
-Connect to the configured server for the task, convert its advertised input
-schemas into ``StructuredTool`` objects, run them through a LangGraph
-``ToolNode`` workflow, and return only the short report.
-The server's tool schemas and raw results never leave this module — the parent
-just sees its delegate tool and the report.
+Connect to any configured MCP sources for the task, convert their advertised
+input schemas into ``StructuredTool`` objects, run them through a LangGraph
+``ToolNode`` workflow, and return only the short report. Prompt-only subagents
+use the same graph without MCP tools. Server schemas and raw results never
+leave this module — the parent just sees its delegate tool and the report.
 
 The server command, system prompt, LLM endpoint, extra environment, and tools
 requiring confirmation all come from the registry spec.
@@ -19,7 +19,7 @@ import os
 import re
 import shlex
 import traceback
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from langchain_core.tools import StructuredTool
 
@@ -37,7 +37,7 @@ MCP_AGENT_TIMEOUT_SECONDS = max(
 # can't flood the loop's context.
 MAX_RESULT_CHARS = 8000
 SHARED_SYSTEM_PROMPT = """\
-You are a focused subagent. Complete tasks only with the MCP tools and child
+You are a focused subagent. Use careful reasoning plus any MCP tools and child
 agent delegation tools provided to you in this conversation.
 
 WORKING RULES
@@ -127,7 +127,8 @@ async def _call(
     confirmation so a model cannot repeat it after either approval or refusal.
     """
     dedupe_tools = dedupe_tools or set()
-    if "*" in dedupe_tools or name in dedupe_tools:
+    qualified_name = f"{namespace}:{name}" if namespace else name
+    if "*" in dedupe_tools or name in dedupe_tools or qualified_name in dedupe_tools:
         attempts = protected_attempts if protected_attempts is not None else set()
         action_key = _protected_action_key(namespace, name, args)
         if action_key in attempts:
@@ -138,7 +139,7 @@ async def _call(
             )
         attempts.add(action_key)
 
-    if "*" in confirm_tools or name in confirm_tools:
+    if "*" in confirm_tools or name in confirm_tools or qualified_name in confirm_tools:
         from .. import tools as _tools
 
         summary = f"{name} {json.dumps(args, ensure_ascii=False)[:400]}"
@@ -266,6 +267,18 @@ async def discover_tools(spec: dict) -> list[dict]:
         ]
 
 
+def _runtime_sources(spec: dict) -> list[dict]:
+    """Read the new multi-source shape with one-server compatibility."""
+    if "mcp_sources" in spec:
+        return [dict(source) for source in spec.get("mcp_sources") or []]
+    return [spec] if (spec.get("connection") or "").strip() else []
+
+
+def _safe_tool_part(value: str) -> str:
+    normalized = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_-]+", "_", value))
+    return normalized.strip("_-") or "mcp"
+
+
 async def _run_async(
     task: str,
     spec: dict,
@@ -278,25 +291,57 @@ async def _run_async(
     dedupe_tools = set(spec.get("dedupe_tools") or [])
     executed: list[dict] = []
     protected_attempts = protected_attempts if protected_attempts is not None else set()
-    action_namespace = str(
-        spec.get("mcp_server_id")
-        or spec.get("connection")
-        or spec.get("name")
-        or "mcp"
-    )
 
     try:
-        async with _mcp_session(spec) as session:
-            advertised_tools = await _list_tools(session)
-            allowed_tools = spec.get("allowed_tools")
-            if allowed_tools is not None:
-                allowed_names = set(allowed_tools)
-                advertised_tools = [
-                    tool for tool in advertised_tools if tool.name in allowed_names
-                ]
-            framework_tools: list[StructuredTool] = []
+        async with AsyncExitStack() as stack:
+            advertised_entries = []
+            source_errors = []
+            for source in _runtime_sources(spec):
+                source_name = str(
+                    source.get("server_name")
+                    or source.get("name")
+                    or "MCP server"
+                )
+                try:
+                    session = await stack.enter_async_context(_mcp_session(source))
+                    advertised = await _list_tools(session)
+                    allowed_tools = source.get("allowed_tools")
+                    if allowed_tools is not None:
+                        allowed_names = set(allowed_tools)
+                        advertised = [
+                            tool for tool in advertised if tool.name in allowed_names
+                        ]
+                    advertised_entries.extend(
+                        (source, source_name, session, tool) for tool in advertised
+                    )
+                except Exception as exc:
+                    source_errors.append(f"{source_name}: {_exc_detail(exc)}")
 
-            def make_tool(advertised) -> StructuredTool:
+            framework_tools: list[StructuredTool] = []
+            raw_name_counts: dict[str, int] = {}
+            for _source, _source_name, _session, advertised in advertised_entries:
+                raw_name_counts[advertised.name] = (
+                    raw_name_counts.get(advertised.name, 0) + 1
+                )
+            used_runtime_names: set[str] = set()
+
+            def make_tool(source, source_name, session, advertised) -> StructuredTool:
+                namespace = str(
+                    source.get("mcp_server_id")
+                    or source.get("server_id")
+                    or source.get("connection")
+                    or source_name
+                )
+                runtime_name = advertised.name
+                if raw_name_counts.get(advertised.name, 0) > 1:
+                    runtime_name = (
+                        f"{_safe_tool_part(source_name)}__"
+                        f"{_safe_tool_part(advertised.name)}"
+                    )
+                if runtime_name in used_runtime_names:
+                    runtime_name = f"{runtime_name}_{_safe_tool_part(namespace)}"
+                used_runtime_names.add(runtime_name)
+
                 async def invoke(**arguments):
                     result, was_executed = await _call(
                         session,
@@ -304,7 +349,7 @@ async def _run_async(
                         arguments,
                         confirm_tools,
                         protected_attempts,
-                        action_namespace,
+                        namespace,
                         dedupe_tools,
                         MCP_TOOL_TIMEOUT_SECONDS,
                     )
@@ -318,7 +363,7 @@ async def _run_async(
                         executed.append(
                             {
                                 "agent": spec["name"],
-                                "name": advertised.name,
+                                "name": runtime_name,
                                 "result": result,
                             }
                         )
@@ -326,14 +371,20 @@ async def _run_async(
 
                 return StructuredTool.from_function(
                     coroutine=invoke,
-                    name=advertised.name,
-                    description=advertised.description or f"Run {advertised.name}.",
+                    name=runtime_name,
+                    description=(
+                        f"[{source_name}] "
+                        + (advertised.description or f"Run {advertised.name}.")
+                    ),
                     args_schema=advertised.inputSchema
                     or {"type": "object", "properties": {}},
                     response_format="content_and_artifact",
                 )
 
-            framework_tools.extend(make_tool(item) for item in advertised_tools)
+            framework_tools.extend(
+                make_tool(source, source_name, session, advertised)
+                for source, source_name, session, advertised in advertised_entries
+            )
             from .. import mcp_agents
 
             current_id = int(spec["id"]) if spec.get("id") is not None else None
@@ -383,11 +434,6 @@ async def _run_async(
                     except Exception as exc:
                         return (
                             f"Could not validate the {child['name']} agent: {exc}",
-                            None,
-                        )
-                    if not (child.get("connection") or "").strip():
-                        return (
-                            f"The {child['name']} agent has no MCP server connection.",
                             None,
                         )
                     try:
@@ -464,6 +510,18 @@ async def _run_async(
             )
             if tree_prompt:
                 messages.append({"role": "system", "content": tree_prompt})
+            if source_errors:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "UNAVAILABLE MCP SOURCES\n"
+                            "Continue with the remaining capabilities and report a "
+                            "source failure if it prevents the task:\n- "
+                            + "\n- ".join(source_errors)
+                        ),
+                    }
+                )
             messages.append({"role": "user", "content": task})
 
             async def call_model(history: list[dict], schemas: list[dict] | None):
@@ -516,7 +574,7 @@ async def _run_async(
             return report
     except Exception as exc:
         return (
-            f"{spec['name']} agent failed to connect to its MCP server: "
+            f"{spec['name']} agent failed while preparing its capabilities: "
             f"{_exc_detail(exc)}"
         )
 
@@ -540,11 +598,6 @@ def run(
         if all_specs is None:
             all_specs = db.build_specs()
     api_key = spec.get("api_key") or ""
-    if not (spec.get("connection") or "").strip():
-        return (
-            f"{name} agent failed: no MCP server connection configured. "
-            "Set one in the server preset (Admin page or `python -m mounir.mcp_agents`)."
-        )
     try:
         async def _bounded_run() -> str:
             try:

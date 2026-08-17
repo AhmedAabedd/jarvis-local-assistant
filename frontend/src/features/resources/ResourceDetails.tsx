@@ -26,13 +26,11 @@ export function ResourceDetails({
   kind,
   item,
   models,
-  servers,
   onToggle,
 }: {
   kind: 'models' | 'servers' | 'agents'
   item: ModelRecord | McpServer | Subagent
   models: ModelRecord[]
-  servers: McpServer[]
   onToggle: (enabled: boolean) => void
 }) {
   if (kind === 'models') {
@@ -113,7 +111,7 @@ export function ResourceDetails({
   const agent = item as Subagent
   const enabled = !(agent.enabled === false || Number(agent.enabled) === 0)
   const model = models.find((v) => v.id === Number(agent.model_id))
-  const server = servers.find((v) => v.id === Number(agent.mcp_server_id))
+  const sources = agent.mcp_sources || []
   const confirms = stringList(agent.confirm_tools, agent.confirm_tool_calls ? ['*'] : [])
   const dedupe = stringList(agent.dedupe_tools)
   return (
@@ -140,7 +138,14 @@ export function ResourceDetails({
             label="Model"
             value={model ? `${model.name} — ${model.model}` : agent.model_name}
           />
-          <Detail label="MCP server" value={server?.name || agent.mcp_server_name} />
+          <Detail
+            label="Capabilities"
+            value={
+              sources.length
+                ? `${sources.length} MCP server${sources.length === 1 ? '' : 's'}`
+                : 'Prompt only'
+            }
+          />
           <Detail label="Workflow placements" value={agent.placement_count || 'Not connected'} />
           <Detail label="Description" value={agent.description} full />
           <Detail
@@ -148,6 +153,25 @@ export function ResourceDetails({
             value={agent.system_prompt || 'Default instructions'}
             full
           />
+          <div className="detail detail--full">
+            <dt>MCP sources</dt>
+            <dd>
+              <div className="chips">
+                {sources.length ? (
+                  sources.map((source) => (
+                    <span className="chip" key={source.mcp_server_id}>
+                      {source.mcp_server_name || `Server ${source.mcp_server_id}`} ·{' '}
+                      {source.enabled_tools === null
+                        ? 'All tools'
+                        : `${source.enabled_tools.length} selected`}
+                    </span>
+                  ))
+                ) : (
+                  <span className="chip">No external tools</span>
+                )}
+              </div>
+            </dd>
+          </div>
           <div className="detail detail--full">
             <dt>Actions requiring confirmation</dt>
             <dd>

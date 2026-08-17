@@ -807,8 +807,9 @@ class DatabaseTests(TemporaryDatabaseTest):
             "User model", "user/model", "OpenAI",
             "https://models.example.test/v1", "key",
         )
-        with self.assertRaisesRegex(ValueError, "Select an MCP server"):
-            db.add_subagent("Helper", "Test helper", "", model["id"], None)
+        helper = db.add_subagent("Helper", "Test helper", "", model["id"], None)
+        self.assertIsNone(helper["mcp_server_id"])
+        self.assertEqual(helper["mcp_sources"], [])
 
         # A later application restart must not reinterpret this as an upgrade
         # and populate the registry.
@@ -817,7 +818,9 @@ class DatabaseTests(TemporaryDatabaseTest):
             [item["name"] for item in db.list_models()], ["User model"]
         )
         self.assertEqual(db.list_servers(), [])
-        self.assertEqual(db.list_subagents(), [])
+        self.assertEqual(
+            [item["name"] for item in db.list_subagents()], ["Helper"]
+        )
 
     def test_existing_empty_database_does_not_seed_dynamic_resources(self):
         # Existing databases follow the same user-owned registry policy as new
@@ -1367,6 +1370,9 @@ class DatabaseTests(TemporaryDatabaseTest):
             agent_columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(subagents)")
             }
+            agent_column_info = {
+                row["name"]: row for row in conn.execute("PRAGMA table_info(subagents)")
+            }
             tool_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_server_tools'"
             ).fetchone()
@@ -1384,6 +1390,9 @@ class DatabaseTests(TemporaryDatabaseTest):
             ).fetchone()
             migrated_connection = conn.execute(
                 "SELECT parent_agent_id, child_agent_id FROM subagent_connections"
+            ).fetchone()
+            migrated_source = conn.execute(
+                "SELECT subagent_id, mcp_server_id FROM subagent_mcp_sources"
             ).fetchone()
             builtin_settings_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'builtin_agent_settings'"
@@ -1426,6 +1435,8 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertIsNotNone(tool_table)
         self.assertIsNotNone(connection_table)
         self.assertIsNotNone(node_table)
+        self.assertEqual(agent_column_info["mcp_server_id"]["notnull"], 0)
+        self.assertEqual(tuple(migrated_source), (1, 1))
         self.assertIn("enabled_tools", node_columns)
         self.assertEqual(migrated_node["agent_id"], 1)
         self.assertIsNone(migrated_node["parent_node_id"])

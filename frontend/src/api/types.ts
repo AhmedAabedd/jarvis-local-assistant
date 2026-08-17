@@ -19,9 +19,20 @@ export interface ModelRecord {
 
 export interface ToolInfo {
   name: string
+  label?: string
   description?: string
+  server_name?: string
+  tool_name?: string
   requires_confirmation?: boolean
   selected?: boolean
+}
+
+export interface SubagentMcpSource {
+  mcp_server_id: Id
+  mcp_server_name?: string
+  mcp_server_description?: string
+  connection_status?: string
+  enabled_tools: string[] | null
 }
 
 export interface McpServer {
@@ -56,7 +67,9 @@ export interface Subagent {
   description: string
   system_prompt: string
   model_id: Id
-  mcp_server_id: Id
+  mcp_server_id: Id | null
+  mcp_sources: SubagentMcpSource[]
+  mcp_server_count?: number
   model?: string
   model_name?: string
   mcp_server_name?: string
@@ -94,7 +107,7 @@ export interface SubagentPlacement {
   model_id: Id
   model_name: string
   model: string
-  mcp_server_id: Id
+  mcp_server_id: Id | null
   mcp_server_name: string
   has_icon: boolean
   depth: number
@@ -131,8 +144,9 @@ export interface SubagentNode {
     model_id: Id
     model_name: string
     model: string
-    mcp_server_id: Id
+    mcp_server_id: Id | null
     mcp_server_name: string
+    mcp_sources: SubagentMcpSource[]
     enabled: boolean
     has_icon: boolean
   }

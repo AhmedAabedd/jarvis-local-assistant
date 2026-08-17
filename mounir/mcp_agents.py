@@ -4,8 +4,8 @@ Persistence is now SQLite (see ``mounir/db.py``), not JSON. Three concepts:
 
 - **Models**        reusable LLM presets (name, provider, base_url, api_key)
 - **MCP servers**   reusable MCP connections (name, connection string)
-- **Subagents**     the actual delegate targets (name, system_prompt,
-                    chosen model, chosen MCP server)
+- **Subagents**     the actual delegate targets (name, system_prompt, chosen
+                    model, and zero or more selected MCP capabilities)
 
 The graph reads ``mcp_agents.load()`` once per turn, so a new subagent is live
 from the next message.
@@ -292,7 +292,7 @@ def _agents_cmd(args):
             raise ValueError("description is required — it's how the supervisor decides to delegate here.")
         if db.get_model(args.model_id) is None:
             raise ValueError(f"model_id {args.model_id} does not exist.")
-        if db.get_server(args.server_id) is None:
+        if args.server_id is not None and db.get_server(args.server_id) is None:
             raise ValueError(f"server_id {args.server_id} does not exist.")
         a = db.add_subagent(
             args.name,
@@ -395,7 +395,11 @@ def _main() -> int:
     p_ag.add_argument("--description")
     p_ag.add_argument("--prompt")
     p_ag.add_argument("--model-id", type=int)
-    p_ag.add_argument("--server-id", type=int)
+    p_ag.add_argument(
+        "--server-id",
+        type=int,
+        help="Optional MCP server ID; omit it to create a prompt-only subagent.",
+    )
     p_ag.add_argument(
         "--parent-id",
         type=int,

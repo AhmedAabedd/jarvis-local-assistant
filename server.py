@@ -1429,6 +1429,7 @@ async def create_subagent(req: dict):
             connect_to_workflow=req.get("connect_to_workflow", True),
             workflow_id=req.get("workflow_id"),
             position=req.get("position"),
+            mcp_sources=req.get("mcp_sources"),
             **icon,
         )
         return db.subagent_for_api(subagent)

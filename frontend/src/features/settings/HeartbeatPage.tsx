@@ -609,8 +609,14 @@ export function HeartbeatPage() {
                                     }
                                   />
                                   <span>
-                                    <strong>{readable(tool.name)}</strong>
-                                    {tool.description && <small>{tool.description}</small>}
+                                    <strong>{tool.label || readable(tool.name)}</strong>
+                                    {(tool.server_name || tool.description) && (
+                                      <small>
+                                        {tool.server_name
+                                          ? `${tool.server_name}${tool.description ? ` · ${tool.description}` : ''}`
+                                          : tool.description}
+                                      </small>
+                                    )}
                                   </span>
                                 </label>
                               ))}

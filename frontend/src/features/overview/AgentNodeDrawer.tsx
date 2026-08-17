@@ -8,6 +8,11 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
 import { Loading } from '../../components/ui/Loading'
 import { ToolChoices } from '../resources/ToolChoices'
+import {
+  expandLegacyToolRules,
+  selectedToolOptions,
+  useMcpToolCatalog,
+} from '../resources/McpToolAccess'
 
 interface Props {
   nodeId: number | null
@@ -73,34 +78,50 @@ export function AgentNodeDrawer({
     queryFn: () => api.agentNodes.get(nodeId as number),
     enabled: nodeId !== null,
   })
-  const serverId = node.data?.subagent.mcp_server_id
-  const tools = useQuery({
-    queryKey: ['server-tools', serverId],
-    queryFn: () => api.servers.tools(serverId as number),
-    enabled: Boolean(serverId),
-  })
-  const availableTools = tools.data?.tools || []
+  const sources = useMemo(() => node.data?.subagent.mcp_sources || [], [node.data])
+  const sourceServers = useMemo(
+    () => sources.map((source) => ({
+      id: Number(source.mcp_server_id),
+      name: source.mcp_server_name || 'MCP server',
+      connection_status: source.connection_status,
+    })),
+    [sources],
+  )
+  const toolGroups = useMcpToolCatalog(sourceServers)
+  const availableTools = useMemo(
+    () => selectedToolOptions(toolGroups, sources),
+    [toolGroups, sources],
+  )
   const availableNames = useMemo(() => availableTools.map((tool) => tool.name), [availableTools])
+  const availableSignature = availableNames.join('\u0000')
   const filteredTools = useMemo(() => {
     const query = toolSearch.trim().toLowerCase()
     if (!query) return availableTools
     return availableTools.filter(
       (tool) =>
-        tool.name.toLowerCase().includes(query) ||
+        (tool.label || tool.name).toLowerCase().includes(query) ||
+        (tool.server_name || '').toLowerCase().includes(query) ||
         (tool.description || '').toLowerCase().includes(query),
     )
   }, [availableTools, toolSearch])
 
   useEffect(() => {
     if (!node.data) return
-    setSelectedTools(new Set(node.data.enabled_tools ?? availableNames))
+    setSelectedTools(
+      node.data.enabled_tools === null
+        ? new Set(availableNames)
+        : expandLegacyToolRules(node.data.enabled_tools, availableTools),
+    )
     setToolSearch('')
     setEditingTools(false)
-  }, [node.data, availableNames])
+  }, [node.data, availableSignature])
 
   const savedSelection = useMemo(
-    () => new Set(node.data?.enabled_tools ?? availableNames),
-    [node.data, availableNames],
+    () =>
+      node.data?.enabled_tools == null
+        ? new Set(availableNames)
+        : expandLegacyToolRules(node.data.enabled_tools, availableTools),
+    [node.data, availableSignature],
   )
   const selectionChanged =
     selectedTools.size !== savedSelection.size ||
@@ -123,8 +144,12 @@ export function AgentNodeDrawer({
     },
   })
   const refreshTools = useMutation({
-    mutationFn: () => api.servers.test(serverId as number),
-    onSuccess: (state) => queryClient.setQueryData(['server-tools', serverId], state),
+    mutationFn: () => Promise.all(
+      sourceServers.map((server) => api.servers.test(Number(server.id))),
+    ),
+    onSuccess: (states) => states.forEach((state, index) => {
+      queryClient.setQueryData(['server-tools', sourceServers[index].id], state)
+    }),
   })
   const removeChild = useMutation({
     mutationFn: (childId: number) => api.agentNodes.remove(childId),
@@ -150,7 +175,9 @@ export function AgentNodeDrawer({
 
   const placement = node.data
   const subagent = placement?.subagent
-  const toolError = tools.error || refreshTools.error || saveTools.error
+  const catalogError = toolGroups.find((group) => group.error)?.error
+  const toolsLoading = toolGroups.some((group) => group.loading)
+  const toolError = catalogError || refreshTools.error || saveTools.error
   const visibleTools = editingTools
     ? filteredTools
     : availableTools.filter((tool) => selectedTools.has(tool.name))
@@ -256,7 +283,7 @@ export function AgentNodeDrawer({
                       className="node-tools__icon-button"
                       type="button"
                       onClick={() => refreshTools.mutate()}
-                      disabled={refreshTools.isPending}
+                      disabled={refreshTools.isPending || !sourceServers.length}
                       aria-label="Refresh tools"
                       title="Refresh tools"
                     >
@@ -314,7 +341,7 @@ export function AgentNodeDrawer({
                   </div>
                 </div>
 
-                {tools.isLoading ? (
+                {toolsLoading ? (
                   <Loading label="Loading tools…" />
                 ) : (
                   <>
@@ -352,12 +379,14 @@ export function AgentNodeDrawer({
                             ? 'No tools match this search.'
                             : availableTools.length
                               ? 'No tools enabled.'
-                              : 'Refresh the MCP connection to discover its tools.'
+                              : sources.length
+                                ? 'Refresh the MCP connections to discover their tools.'
+                                : 'This is a prompt-only subagent with no external tools.'
                         }
                       />
                     </div>
                     <Feedback
-                      message={toolError instanceof Error ? toolError.message : undefined}
+                      message={toolError instanceof Error ? toolError.message : toolError || undefined}
                     />
                   </>
                 )}

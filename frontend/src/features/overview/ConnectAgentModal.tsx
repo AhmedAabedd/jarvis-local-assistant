@@ -6,27 +6,30 @@ import {
   Copy,
   Eye,
   Plus,
-  RefreshCw,
   Search,
   Workflow as WorkflowIcon,
 } from 'lucide-react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import type {
   McpServer,
   ModelRecord,
   Subagent,
+  SubagentMcpSource,
   SubagentPlacement,
   Workflow,
 } from '../../api/types'
-import { api } from '../../api/client'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
-import { Loading } from '../../components/ui/Loading'
 import { Modal } from '../../components/ui/Modal'
 import { readable, stringList, toDataUrl } from '../resources/helpers'
+import {
+  expandLegacyToolRules,
+  MultiServerToolPicker,
+  selectedToolOptions,
+  useMcpToolCatalog,
+} from '../resources/McpToolAccess'
 import { ToolChoices } from '../resources/ToolChoices'
 
 type WizardStep = 1 | 2 | 3
@@ -37,7 +40,6 @@ type Draft = {
   description: string
   systemPrompt: string
   modelId: number
-  serverId: number
   iconData?: string
   sourceIconId?: number
   enabled: boolean
@@ -48,7 +50,6 @@ const blankDraft = (): Draft => ({
   description: '',
   systemPrompt: '',
   modelId: 0,
-  serverId: 0,
   enabled: true,
 })
 
@@ -146,7 +147,7 @@ function PreviewValue({
 }
 
 function SubagentPreview({ agent }: { agent: Subagent }) {
-  const enabledTools = agent.enabled_tools
+  const sources = agent.mcp_sources || []
   const confirmationTools = stringList(agent.confirm_tools, agent.confirm_tool_calls ? ['*'] : [])
   const repeatedTools = stringList(agent.dedupe_tools)
   const placementCount = agent.placement_count || 0
@@ -185,7 +186,14 @@ function SubagentPreview({ agent }: { agent: Subagent }) {
       </div>
       <dl className="detail-grid subagent-preview__grid">
         <PreviewValue label="Model" value={modelLabel} />
-        <PreviewValue label="MCP server" value={agent.mcp_server_name || 'Not configured'} />
+        <PreviewValue
+          label="Capabilities"
+          value={
+            sources.length
+              ? `${sources.length} MCP server${sources.length === 1 ? '' : 's'}`
+              : 'Prompt only'
+          }
+        />
         <PreviewValue label="Description" value={agent.description} full />
         <PreviewValue
           label="System prompt"
@@ -193,11 +201,14 @@ function SubagentPreview({ agent }: { agent: Subagent }) {
           full
         />
         <div className="detail detail--full">
-          <dt>Enabled tools</dt>
+          <dt>MCP sources</dt>
           <dd>
-            {enabledTools === null
-              ? chips(['All available tools'], 'None')
-              : chips(enabledTools, 'None')}
+            {chips(
+              sources.map((source) =>
+                `${source.mcp_server_name || `Server ${source.mcp_server_id}`} · ${source.enabled_tools === null ? 'All tools' : `${source.enabled_tools.length} tools`}`,
+              ),
+              'No external tools',
+            )}
           </dd>
         </div>
         <div className="detail detail--full">
@@ -246,7 +257,6 @@ export function ConnectAgentModal({
   onConnectWorkflow?: (workflowId: number) => void
   onClose: () => void
 }) {
-  const queryClient = useQueryClient()
   const [resourceKind, setResourceKind] = useState<'subagent' | 'workflow' | null>(null)
   const [libraryOpen, setLibraryOpen] = useState(true)
   const [choosing, setChoosing] = useState(true)
@@ -256,10 +266,7 @@ export function ConnectAgentModal({
   const [query, setQuery] = useState('')
   const [draft, setDraft] = useState<Draft>(blankDraft)
   const [source, setSource] = useState<Subagent | undefined>()
-  const [selectedTools, setSelectedTools] = useState(new Set<string>())
-  const [toolDefaults, setToolDefaults] = useState<string[] | null>(null)
-  const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false)
-  const [initializedServerId, setInitializedServerId] = useState(0)
+  const [sources, setSources] = useState<SubagentMcpSource[]>([])
   const [confirmMode, setConfirmMode] = useState<ConfirmationMode>('all')
   const [confirmed, setConfirmed] = useState(new Set<string>())
   const [deduped, setDeduped] = useState(new Set<string>())
@@ -267,22 +274,17 @@ export function ConnectAgentModal({
   const [copyingIcon, setCopyingIcon] = useState(false)
   const [previewAgent, setPreviewAgent] = useState<Subagent | null>(null)
 
-  const tools = useQuery({
-    queryKey: ['server-tools', draft.serverId],
-    queryFn: () => api.servers.tools(draft.serverId),
-    enabled: open && !choosing && Boolean(draft.serverId),
-  })
-  const refreshTools = useMutation({
-    mutationFn: () => api.servers.test(draft.serverId),
-    onSuccess: (state) => queryClient.setQueryData(['server-tools', draft.serverId], state),
-  })
-  const availableTools = tools.data?.tools || []
-  const availableNames = useMemo(() => availableTools.map((tool) => tool.name), [availableTools])
-  const enabledTools = useMemo(
-    () => availableTools.filter((tool) => selectedTools.has(tool.name)),
-    [availableTools, selectedTools],
-  )
+  const toolGroups = useMcpToolCatalog(servers)
+  const enabledTools = useMemo(() => selectedToolOptions(toolGroups, sources), [toolGroups, sources])
   const enabledNames = useMemo(() => enabledTools.map((tool) => tool.name), [enabledTools])
+  const confirmedSelection = useMemo(
+    () => expandLegacyToolRules([...confirmed], enabledTools),
+    [confirmed, enabledTools],
+  )
+  const dedupedSelection = useMemo(
+    () => expandLegacyToolRules([...deduped], enabledTools),
+    [deduped, enabledTools],
+  )
   const visibleAgents = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
     return agents.filter(
@@ -334,10 +336,7 @@ export function ConnectAgentModal({
     setQuery('')
     setDraft(blankDraft())
     setSource(undefined)
-    setSelectedTools(new Set())
-    setToolDefaults(null)
-    setToolSelectionExplicit(false)
-    setInitializedServerId(0)
+    setSources([])
     setConfirmMode('all')
     setConfirmed(new Set())
     setDeduped(new Set())
@@ -345,31 +344,6 @@ export function ConnectAgentModal({
     setCopyingIcon(false)
     setPreviewAgent(null)
   }, [open, parentNodeId])
-
-  useEffect(() => {
-    if (!draft.serverId || tools.data === undefined) return
-    if (initializedServerId !== draft.serverId) {
-      const defaults = toolDefaults === null ? availableNames : toolDefaults
-      setSelectedTools(new Set(defaults.filter((name) => availableNames.includes(name))))
-      setInitializedServerId(draft.serverId)
-      return
-    }
-    if (
-      !toolSelectionExplicit &&
-      (selectedTools.size !== availableNames.length ||
-        availableNames.some((name) => !selectedTools.has(name)))
-    ) {
-      setSelectedTools(new Set(availableNames))
-    }
-  }, [
-    availableNames,
-    draft.serverId,
-    initializedServerId,
-    selectedTools,
-    toolDefaults,
-    toolSelectionExplicit,
-    tools.data,
-  ])
 
   useEffect(() => {
     if (!source?.has_icon || draft.iconData !== undefined) return
@@ -395,16 +369,18 @@ export function ConnectAgentModal({
             description: agent.description,
             systemPrompt: agent.system_prompt || '',
             modelId: Number(agent.model_id),
-            serverId: Number(agent.mcp_server_id),
             sourceIconId: agent.has_icon ? agent.id : undefined,
             enabled: !(agent.enabled === false || Number(agent.enabled) === 0),
           }
         : blankDraft(),
     )
-    setToolDefaults(agent?.enabled_tools ?? null)
-    setToolSelectionExplicit(agent?.enabled_tools != null)
-    setInitializedServerId(0)
-    setSelectedTools(new Set())
+    setSources(
+      agent?.mcp_sources?.length
+        ? agent.mcp_sources
+        : agent?.mcp_server_id
+          ? [{ mcp_server_id: Number(agent.mcp_server_id), enabled_tools: agent.enabled_tools }]
+          : [],
+    )
     setConfirmMode(confirmationMode(agent))
     setConfirmed(new Set(confirmRules.filter((name) => name !== '*')))
     setDeduped(new Set(stringList(agent?.dedupe_tools)))
@@ -415,24 +391,12 @@ export function ConnectAgentModal({
     setCopyListOpen(false)
   }
 
-  const setServer = (serverId: number) => {
-    setDraft((current) => ({ ...current, serverId }))
-    setToolDefaults(null)
-    setToolSelectionExplicit(false)
-    setInitializedServerId(0)
-    setSelectedTools(new Set())
-    setConfirmMode('all')
-    setConfirmed(new Set())
-    setDeduped(new Set())
-  }
-
   const goToStep = (target: WizardStep) => {
     setLocalError('')
     if (target > 1) {
       if (!draft.name.trim()) return setLocalError('Enter a name for the subagent.')
       if (!draft.description.trim()) return setLocalError('Enter a description for the subagent.')
       if (!draft.modelId) return setLocalError('Choose a model for the subagent.')
-      if (!draft.serverId) return setLocalError('Choose an MCP server for the subagent.')
     }
     setStep(target)
     setFurthestStep((current) => Math.max(current, target) as WizardStep)
@@ -442,26 +406,34 @@ export function ConnectAgentModal({
 
   const createSubagent = () => {
     setLocalError('')
-    const confirmedTools = [...confirmed].filter((name) => enabledNames.includes(name))
-    const dedupedTools = [...deduped].filter((name) => enabledNames.includes(name))
-    if (confirmMode === 'selected' && !confirmedTools.length) {
-      setLocalError('Select at least one action requiring confirmation.')
+    const confirmedTools = [...confirmedSelection].filter((name) => enabledNames.includes(name))
+    const dedupedTools = [...dedupedSelection].filter((name) => enabledNames.includes(name))
+    if (sources.length && confirmMode === 'selected' && !confirmedTools.length) {
+      setLocalError(
+        enabledTools.length
+          ? 'Select at least one action requiring confirmation.'
+          : 'Refresh the selected MCP servers before choosing individual confirmation rules.',
+      )
       return
     }
-    const allToolsEnabled =
-      availableNames.length > 0 &&
-      availableNames.length === selectedTools.size &&
-      availableNames.every((name) => selectedTools.has(name))
     onCreate({
       name: draft.name.trim(),
       description: draft.description.trim(),
       system_prompt: draft.systemPrompt.trim(),
       model_id: draft.modelId,
-      mcp_server_id: draft.serverId,
-      enabled_tools: !toolSelectionExplicit || allToolsEnabled ? null : [...selectedTools],
+      mcp_sources: sources.map(({ mcp_server_id, enabled_tools }) => ({
+        mcp_server_id,
+        enabled_tools,
+      })),
       confirm_tools:
-        confirmMode === 'all' ? ['*'] : confirmMode === 'selected' ? confirmedTools : [],
-      confirm_tool_calls: confirmMode !== 'none',
+        !sources.length
+          ? []
+          : confirmMode === 'all'
+            ? ['*']
+            : confirmMode === 'selected'
+              ? confirmedTools
+              : [],
+      confirm_tool_calls: Boolean(sources.length) && confirmMode !== 'none',
       dedupe_tools: dedupedTools,
       enabled: draft.enabled,
       ...(draft.iconData !== undefined ? { icon_data: draft.iconData } : {}),
@@ -746,7 +718,11 @@ export function ConnectAgentModal({
             {step === 1 && (
               <div className="form-grid subagent-wizard__page">
                 {!models.length && <div className="guidance">Create a model first.</div>}
-                {!servers.length && <div className="guidance">Connect an MCP server first.</div>}
+                {!servers.length && (
+                  <div className="guidance">
+                    No MCP servers are connected. You can still create a prompt-only subagent.
+                  </div>
+                )}
                 <Field full label="Name" hint="Use a unique name for this specific role.">
                   <input
                     value={draft.name}
@@ -833,19 +809,6 @@ export function ConnectAgentModal({
                     ))}
                   </select>
                 </Field>
-                <Field label="MCP server">
-                  <select
-                    value={draft.serverId || ''}
-                    onChange={(event) => setServer(Number(event.target.value))}
-                  >
-                    <option value="">Choose a server…</option>
-                    {servers.map((server) => (
-                      <option key={server.id} value={server.id}>
-                        {server.name}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
               </div>
             )}
 
@@ -853,54 +816,28 @@ export function ConnectAgentModal({
               <div className="subagent-wizard__page">
                 <div className="subagent-wizard__section-heading">
                   <span>
-                    <strong>Available tools</strong>
-                    <small>Choose which MCP actions this subagent can use.</small>
+                    <strong>Capabilities</strong>
+                    <small>
+                      Select individual tools across any connected MCP servers, or keep this subagent prompt-only.
+                    </small>
                   </span>
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setToolSelectionExplicit(false)
-                        setSelectedTools(new Set(availableNames))
-                      }}
-                    >
-                      Enable all
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setToolSelectionExplicit(true)
-                        setSelectedTools(new Set())
-                      }}
-                    >
-                      Disable all
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => refreshTools.mutate()}
-                      disabled={refreshTools.isPending}
-                    >
-                      <RefreshCw size={12} /> Refresh
-                    </button>
-                  </div>
                 </div>
-                {tools.isLoading ? (
-                  <Loading label="Loading tools…" />
-                ) : (
-                  <ToolChoices
-                    tools={availableTools}
-                    selected={selectedTools}
-                    onChange={(selection) => {
-                      setToolSelectionExplicit(true)
-                      setSelectedTools(selection)
-                    }}
-                  />
-                )}
+                <MultiServerToolPicker
+                  servers={servers}
+                  groups={toolGroups}
+                  sources={sources}
+                  onChange={setSources}
+                />
               </div>
             )}
 
             {step === 3 && (
               <div className="form-grid subagent-wizard__page">
+                {!sources.length && (
+                  <div className="guidance">
+                    Prompt-only subagents have no external actions to approve. You can create this subagent as-is.
+                  </div>
+                )}
                 <Field
                   full
                   label="Action confirmation"
@@ -908,6 +845,7 @@ export function ConnectAgentModal({
                 >
                   <select
                     value={confirmMode}
+                    disabled={!sources.length}
                     onChange={(event) => setConfirmMode(event.target.value as ConfirmationMode)}
                   >
                     <option value="all">Ask before every action</option>
@@ -915,7 +853,7 @@ export function ConnectAgentModal({
                     <option value="none">Run without confirmation</option>
                   </select>
                 </Field>
-                {confirmMode === 'selected' && (
+                {sources.length > 0 && confirmMode === 'selected' && (
                   <div className="key-value-editor">
                     <div className="key-value-editor__title">
                       <span>
@@ -925,13 +863,13 @@ export function ConnectAgentModal({
                     </div>
                     <ToolChoices
                       tools={enabledTools}
-                      selected={confirmed}
+                      selected={confirmedSelection}
                       onChange={setConfirmed}
                       empty="Enable at least one tool before configuring confirmation rules."
                     />
                   </div>
                 )}
-                <div className="key-value-editor">
+                {sources.length > 0 && <div className="key-value-editor">
                   <div className="key-value-editor__title">
                     <span>
                       <strong>Repeated action protection</strong>
@@ -942,11 +880,11 @@ export function ConnectAgentModal({
                   </div>
                   <ToolChoices
                     tools={enabledTools}
-                    selected={deduped}
+                    selected={dedupedSelection}
                     onChange={setDeduped}
                     empty="Enable at least one tool before configuring repeated-action protection."
                   />
-                </div>
+                </div>}
               </div>
             )}
 
@@ -954,8 +892,7 @@ export function ConnectAgentModal({
               message={
                 localError ||
                 error ||
-                (tools.error instanceof Error ? tools.error.message : '') ||
-                (refreshTools.error instanceof Error ? refreshTools.error.message : '')
+                ''
               }
             />
           </form>

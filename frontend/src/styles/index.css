@@ -2099,6 +2099,175 @@ button.resource-header-action {
   font-size: 10px;
   line-height: 1.4;
 }
+.tool-option__source {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 2px 6px;
+  color: #8fb8a3;
+  border: 1px solid rgba(88, 154, 119, 0.24);
+  border-radius: 999px;
+  background: rgba(47, 100, 72, 0.14);
+  font-size: 8px;
+  font-style: normal;
+}
+.mcp-access {
+  display: grid;
+  gap: 14px;
+}
+.mcp-access__summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+.mcp-access__mode {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  color: var(--muted);
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: rgba(10, 16, 13, 0.72);
+}
+.mcp-access__mode.is-active {
+  color: var(--text);
+  border-color: rgba(70, 154, 110, 0.42);
+  background: linear-gradient(135deg, rgba(38, 100, 66, 0.2), rgba(12, 20, 16, 0.82));
+  box-shadow: inset 0 0 0 1px rgba(92, 177, 133, 0.05);
+}
+.mcp-access__mode-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+}
+.mcp-access__mode strong,
+.mcp-access__mode small {
+  display: block;
+}
+.mcp-access__mode strong { font-size: 11px; }
+.mcp-access__mode small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+.mcp-access__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mcp-access__toolbar label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: #0b120f;
+}
+.mcp-access__toolbar input {
+  min-width: 0;
+  padding-inline: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.mcp-access__toolbar button,
+.mcp-access__server header > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--muted);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+}
+.mcp-access__servers {
+  display: grid;
+  gap: 9px;
+  max-height: 380px;
+  padding-right: 3px;
+  overflow: auto;
+}
+.mcp-access__server {
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: rgba(10, 16, 13, 0.68);
+}
+.mcp-access__server.is-selected { border-color: rgba(70, 154, 110, 0.4); }
+.mcp-access__server header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 11px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.mcp-access__server header label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  cursor: pointer;
+}
+.mcp-access__server input[type='checkbox'] {
+  width: 15px;
+  min-height: auto;
+  margin: 0;
+  accent-color: #4d9f73;
+}
+.mcp-access__server strong,
+.mcp-access__server small { display: block; }
+.mcp-access__server strong { font-size: 10px; }
+.mcp-access__server small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+}
+.mcp-access__tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line-soft);
+}
+.mcp-access__tools > label {
+  display: grid;
+  grid-template-columns: 17px 1fr;
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 11px;
+  background: #0d1511;
+  cursor: pointer;
+}
+.mcp-access__tools > label:hover { background: #111c17; }
+.mcp-access__tools > label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-access__message {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 9px;
+}
+.mcp-access__message.is-error { color: var(--danger); }
+.mcp-access__empty { min-height: 96px; }
 .agent-choice-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3920,6 +4089,17 @@ button.panel-close-button svg {
   }
 }
 @media (max-width: 720px) {
+  .mcp-access__summary,
+  .mcp-access__tools {
+    grid-template-columns: 1fr;
+  }
+  .mcp-access__toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .mcp-access__toolbar button {
+    align-self: flex-end;
+  }
   .studio-shell {
     display: block;
   }

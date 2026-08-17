@@ -173,8 +173,12 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           subtitle: agent.description,
           facts: [
             {
-              value: agent.mcp_server_name || 'Not configured',
-              title: `MCP: ${agent.mcp_server_name || 'Not configured'}`,
+              value: agent.mcp_sources?.length
+                ? `${agent.mcp_sources.length} MCP source${agent.mcp_sources.length === 1 ? '' : 's'}`
+                : 'Prompt only',
+              title: agent.mcp_sources?.length
+                ? `MCP: ${agent.mcp_sources.map((source) => source.mcp_server_name).join(', ')}`
+                : 'No external tools',
               icon: McpIcon,
             },
             {
@@ -333,7 +337,6 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
               kind={kind}
               item={selected}
               models={models.data || []}
-              servers={servers.data || []}
               onToggle={(enabled) => toggle.mutate(enabled)}
             />
             <Feedback message={toggle.error instanceof Error ? toggle.error.message : ''} />

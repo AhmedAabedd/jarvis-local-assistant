@@ -1,14 +1,17 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronLeft, ChevronRight, Plus, RefreshCw } from 'lucide-react'
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { api } from '../../api/client'
-import type { McpServer, ModelRecord, Subagent } from '../../api/types'
+import { Check, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
+import { useMemo, useState, type FormEvent } from 'react'
+import type { McpServer, ModelRecord, Subagent, SubagentMcpSource } from '../../api/types'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
-import { Loading } from '../../components/ui/Loading'
 import { stringList, toDataUrl } from './helpers'
+import {
+  expandLegacyToolRules,
+  MultiServerToolPicker,
+  selectedToolOptions,
+  useMcpToolCatalog,
+} from './McpToolAccess'
 import { ToolChoices } from './ToolChoices'
 
 type FormPage = 'configuration' | 'tools' | 'security'
@@ -29,79 +32,42 @@ export function AgentForm({
   busy?: boolean
   onSubmit: (body: object) => Promise<void>
 }) {
-  const queryClient = useQueryClient()
-  const existingConfirm = stringList(item?.confirm_tools, item?.confirm_tool_calls ? ['*'] : [])
+  const existingConfirm = stringList(
+    item?.confirm_tools,
+    item ? (item.confirm_tool_calls ? ['*'] : []) : ['*'],
+  )
   const [page, setPage] = useState<FormPage>('configuration')
   const [furthestPage, setFurthestPage] = useState(1)
   const [name, setName] = useState(item?.name || '')
   const [description, setDescription] = useState(item?.description || '')
   const [systemPrompt, setSystemPrompt] = useState(item?.system_prompt || '')
   const [modelId, setModelId] = useState(Number(item?.model_id || 0))
-  const [serverId, setServerId] = useState(Number(item?.mcp_server_id || 0))
+  const [sources, setSources] = useState<SubagentMcpSource[]>(
+    item?.mcp_sources?.length
+      ? item.mcp_sources
+      : item?.mcp_server_id
+        ? [{ mcp_server_id: Number(item.mcp_server_id), enabled_tools: item.enabled_tools }]
+        : [],
+  )
   const [mode, setMode] = useState<ConfirmationMode>(
     existingConfirm.includes('*') ? 'all' : existingConfirm.length ? 'selected' : 'none',
   )
   const [confirmed, setConfirmed] = useState(new Set(existingConfirm.filter((v) => v !== '*')))
   const [deduped, setDeduped] = useState(new Set(stringList(item?.dedupe_tools)))
-  const [selectedTools, setSelectedTools] = useState(new Set(item?.enabled_tools || []))
-  const [toolDefaults, setToolDefaults] = useState<string[] | null>(item?.enabled_tools ?? null)
-  const [toolSelectionExplicit, setToolSelectionExplicit] = useState(item?.enabled_tools != null)
-  const [initializedServerId, setInitializedServerId] = useState(0)
   const [icon, setIcon] = useState<string | undefined>()
   const [error, setError] = useState('')
 
-  const tools = useQuery({
-    queryKey: ['server-tools', serverId],
-    queryFn: () => api.servers.tools(serverId),
-    enabled: Boolean(serverId),
-  })
-  const refreshTools = useMutation({
-    mutationFn: () => api.servers.test(serverId),
-    onSuccess: (state) => queryClient.setQueryData(['server-tools', serverId], state),
-  })
-  const availableTools = tools.data?.tools || []
-  const availableNames = useMemo(() => availableTools.map((tool) => tool.name), [availableTools])
-  const enabledTools = useMemo(
-    () => availableTools.filter((tool) => selectedTools.has(tool.name)),
-    [availableTools, selectedTools],
-  )
+  const toolGroups = useMcpToolCatalog(servers)
+  const enabledTools = useMemo(() => selectedToolOptions(toolGroups, sources), [toolGroups, sources])
   const enabledNames = useMemo(() => enabledTools.map((tool) => tool.name), [enabledTools])
-
-  useEffect(() => {
-    if (!serverId || tools.data === undefined) return
-    if (initializedServerId !== serverId) {
-      const defaults = toolDefaults === null ? availableNames : toolDefaults
-      setSelectedTools(new Set(defaults.filter((tool) => availableNames.includes(tool))))
-      setInitializedServerId(serverId)
-      return
-    }
-    if (
-      !toolSelectionExplicit &&
-      (selectedTools.size !== availableNames.length ||
-        availableNames.some((tool) => !selectedTools.has(tool)))
-    ) {
-      setSelectedTools(new Set(availableNames))
-    }
-  }, [
-    availableNames,
-    initializedServerId,
-    selectedTools,
-    serverId,
-    toolDefaults,
-    toolSelectionExplicit,
-    tools.data,
-  ])
-
-  const selectServer = (nextServerId: number) => {
-    setServerId(nextServerId)
-    setToolDefaults(null)
-    setToolSelectionExplicit(false)
-    setInitializedServerId(0)
-    setSelectedTools(new Set())
-    setMode('all')
-    setConfirmed(new Set())
-    setDeduped(new Set())
-  }
+  const confirmedSelection = useMemo(
+    () => expandLegacyToolRules([...confirmed], enabledTools),
+    [confirmed, enabledTools],
+  )
+  const dedupedSelection = useMemo(
+    () => expandLegacyToolRules([...deduped], enabledTools),
+    [deduped, enabledTools],
+  )
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -110,32 +76,28 @@ export function AgentForm({
       if (!name.trim()) throw new Error('Enter a name for the subagent.')
       if (!description.trim()) throw new Error('Enter a description for the subagent.')
       if (!modelId) throw new Error('Choose a model for the subagent.')
-      if (!serverId) throw new Error('Choose an MCP server for the subagent.')
-
-      const hasToolInventory = tools.data !== undefined
-      const confirmedTools = hasToolInventory
-        ? [...confirmed].filter((tool) => enabledNames.includes(tool))
-        : [...confirmed]
-      const dedupedTools = hasToolInventory
-        ? [...deduped].filter((tool) => enabledNames.includes(tool))
-        : [...deduped]
-      if (mode === 'selected' && !confirmedTools.length) {
+      const confirmedTools = [...confirmedSelection].filter((tool) => enabledNames.includes(tool))
+      const dedupedTools = [...dedupedSelection].filter((tool) => enabledNames.includes(tool))
+      if (sources.length && mode === 'selected' && !confirmedTools.length) {
         setPage('security')
-        throw new Error('Select at least one action requiring confirmation.')
+        throw new Error(
+          enabledTools.length
+            ? 'Select at least one action requiring confirmation.'
+            : 'Refresh the selected MCP servers before choosing individual confirmation rules.',
+        )
       }
-      const allToolsEnabled =
-        availableNames.length > 0 &&
-        availableNames.length === selectedTools.size &&
-        availableNames.every((tool) => selectedTools.has(tool))
       await onSubmit({
         name: name.trim(),
         description: description.trim(),
         system_prompt: systemPrompt.trim(),
         model_id: modelId,
-        mcp_server_id: serverId,
-        enabled_tools: !toolSelectionExplicit || allToolsEnabled ? null : [...selectedTools],
-        confirm_tools: mode === 'all' ? ['*'] : mode === 'selected' ? confirmedTools : [],
-        confirm_tool_calls: mode !== 'none',
+        mcp_sources: sources.map(({ mcp_server_id, enabled_tools }) => ({
+          mcp_server_id,
+          enabled_tools,
+        })),
+        confirm_tools:
+          !sources.length ? [] : mode === 'all' ? ['*'] : mode === 'selected' ? confirmedTools : [],
+        confirm_tool_calls: Boolean(sources.length) && mode !== 'none',
         dedupe_tools: dedupedTools,
         ...(icon !== undefined ? { icon_data: icon } : {}),
       })
@@ -157,7 +119,6 @@ export function AgentForm({
       if (!name.trim()) return setError('Enter a name for the subagent.')
       if (!description.trim()) return setError('Enter a description for the subagent.')
       if (!modelId) return setError('Choose a model for the subagent.')
-      if (!serverId) return setError('Choose an MCP server for the subagent.')
     }
     setPage(nextPage)
     setFurthestPage((current) => Math.max(current, pageNumber))
@@ -204,7 +165,7 @@ export function AgentForm({
       {page === 'configuration' && (
         <div className="form-grid subagent-wizard__page">
           {!models.length && <div className="guidance">Create a model first.</div>}
-          {!servers.length && <div className="guidance">Connect an MCP server first.</div>}
+          {!servers.length && <div className="guidance">No MCP servers are connected. You can still create a prompt-only subagent.</div>}
           <Field full label="Name" hint="Use a unique name for this specific role.">
             <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
           </Field>
@@ -270,19 +231,6 @@ export function AgentForm({
               ))}
             </select>
           </Field>
-          <Field label="MCP server">
-            <select
-              value={serverId || ''}
-              onChange={(event) => selectServer(Number(event.target.value))}
-            >
-              <option value="">Choose a server…</option>
-              {servers.map((server) => (
-                <option key={server.id} value={server.id}>
-                  {server.name}
-                </option>
-              ))}
-            </select>
-          </Field>
         </div>
       )}
 
@@ -290,54 +238,26 @@ export function AgentForm({
         <div className="subagent-wizard__page">
           <div className="subagent-wizard__section-heading">
             <span>
-              <strong>Available tools</strong>
-              <small>Choose which MCP actions this subagent can use.</small>
+              <strong>Capabilities</strong>
+              <small>Select individual tools across any connected MCP servers, or keep this subagent prompt-only.</small>
             </span>
-            <div>
-              <button
-                type="button"
-                onClick={() => {
-                  setToolSelectionExplicit(false)
-                  setSelectedTools(new Set(availableNames))
-                }}
-              >
-                Enable all
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setToolSelectionExplicit(true)
-                  setSelectedTools(new Set())
-                }}
-              >
-                Disable all
-              </button>
-              <button
-                type="button"
-                onClick={() => refreshTools.mutate()}
-                disabled={!serverId || refreshTools.isPending}
-              >
-                <RefreshCw size={12} /> Refresh
-              </button>
-            </div>
           </div>
-          {tools.isLoading ? (
-            <Loading label="Loading tools…" />
-          ) : (
-            <ToolChoices
-              tools={availableTools}
-              selected={selectedTools}
-              onChange={(selection) => {
-                setToolSelectionExplicit(true)
-                setSelectedTools(selection)
-              }}
-            />
-          )}
+          <MultiServerToolPicker
+            servers={servers}
+            groups={toolGroups}
+            sources={sources}
+            onChange={setSources}
+          />
         </div>
       )}
 
       {page === 'security' && (
         <div className="form-grid subagent-wizard__page">
+          {!sources.length && (
+            <div className="guidance">
+              Prompt-only subagents have no external actions to approve. You can save this configuration as-is.
+            </div>
+          )}
           <Field
             full
             label="Action confirmation"
@@ -345,6 +265,7 @@ export function AgentForm({
           >
             <select
               value={mode}
+              disabled={!sources.length}
               onChange={(event) => setMode(event.target.value as ConfirmationMode)}
             >
               <option value="all">Ask before every action</option>
@@ -352,7 +273,7 @@ export function AgentForm({
               <option value="none">Run without confirmation</option>
             </select>
           </Field>
-          {mode === 'selected' && (
+          {sources.length > 0 && mode === 'selected' && (
             <div className="key-value-editor">
               <div className="key-value-editor__title">
                 <span>
@@ -362,13 +283,13 @@ export function AgentForm({
               </div>
               <ToolChoices
                 tools={enabledTools}
-                selected={confirmed}
+                selected={confirmedSelection}
                 onChange={setConfirmed}
                 empty="Enable at least one tool before configuring confirmation rules."
               />
             </div>
           )}
-          <div className="key-value-editor">
+          {sources.length > 0 && <div className="key-value-editor">
             <div className="key-value-editor__title">
               <span>
                 <strong>Repeated action protection</strong>
@@ -377,19 +298,18 @@ export function AgentForm({
             </div>
             <ToolChoices
               tools={enabledTools}
-              selected={deduped}
+              selected={dedupedSelection}
               onChange={setDeduped}
               empty="Enable at least one tool before configuring repeated-action protection."
             />
-          </div>
+          </div>}
         </div>
       )}
 
       <Feedback
         message={
           error ||
-          (tools.error instanceof Error ? tools.error.message : '') ||
-          (refreshTools.error instanceof Error ? refreshTools.error.message : '')
+          ''
         }
       />
 

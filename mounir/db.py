@@ -121,6 +121,63 @@ def _enable_reusable_subagent_placements(conn: sqlite3.Connection) -> None:
     )
 
 
+def _allow_prompt_only_subagents(conn: sqlite3.Connection) -> None:
+    """Rebuild the legacy subagent table so its MCP server can be NULL."""
+    columns = {
+        row["name"]: row for row in conn.execute("PRAGMA table_info(subagents)")
+    }
+    server_column = columns.get("mcp_server_id")
+    if server_column is None or not int(server_column["notnull"]):
+        return
+
+    # SQLite cannot drop a NOT NULL constraint in place. Foreign keys are
+    # disabled only for this committed table swap, then checked immediately.
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS subagents_nullable_upgrade;
+            CREATE TABLE subagents_nullable_upgrade (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL,
+                system_prompt TEXT NOT NULL,
+                icon_data BLOB NOT NULL DEFAULT X'',
+                icon_mime TEXT NOT NULL DEFAULT '',
+                model_id INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+                mcp_server_id INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT,
+                confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
+                confirm_tools TEXT NOT NULL DEFAULT '["*"]',
+                dedupe_tools TEXT NOT NULL DEFAULT '[]',
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                enabled_tools TEXT,
+                parent_agent_id INTEGER
+                    REFERENCES subagents(id) ON DELETE RESTRICT,
+                created_at TEXT
+            );
+            INSERT INTO subagents_nullable_upgrade (
+                id, name, description, system_prompt, icon_data, icon_mime,
+                model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
+                dedupe_tools, enabled, enabled_tools, parent_agent_id, created_at
+            )
+            SELECT id, name, description, system_prompt, icon_data, icon_mime,
+                   model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
+                   dedupe_tools, enabled, enabled_tools, parent_agent_id, created_at
+            FROM subagents;
+            DROP TABLE subagents;
+            ALTER TABLE subagents_nullable_upgrade RENAME TO subagents;
+            """
+        )
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+    if violation is not None:
+        raise sqlite3.IntegrityError(
+            f"Foreign key check failed after subagent migration: {tuple(violation)}"
+        )
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     # WAL lets readers continue while a short configuration write is committed.
     # This matters when chat, heartbeats, and Agent Studio are active together.
@@ -220,7 +277,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             icon_data BLOB NOT NULL DEFAULT X'',
             icon_mime TEXT NOT NULL DEFAULT '',
             model_id INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
-            mcp_server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT,
+            mcp_server_id INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT,
             confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
             confirm_tools TEXT NOT NULL DEFAULT '["*"]',
             dedupe_tools TEXT NOT NULL DEFAULT '[]',
@@ -231,6 +288,21 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 REFERENCES subagents(id) ON DELETE RESTRICT,
             created_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS subagent_mcp_sources (
+            subagent_id INTEGER NOT NULL
+                REFERENCES subagents(id) ON DELETE CASCADE,
+            mcp_server_id INTEGER NOT NULL
+                REFERENCES mcp_servers(id) ON DELETE RESTRICT,
+            -- NULL follows all tools currently advertised by this server.
+            enabled_tools TEXT,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (subagent_id, mcp_server_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_subagent_mcp_sources_server
+            ON subagent_mcp_sources (mcp_server_id, subagent_id);
 
         CREATE TABLE IF NOT EXISTS subagent_connections (
             parent_agent_id INTEGER
@@ -783,6 +855,26 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         # The column cannot be dropped safely in place on an existing SQLite
         # database. Neutralize it so a later init cannot undo a user reparent.
         conn.execute("UPDATE subagents SET parent = 'supervisor'")
+    _allow_prompt_only_subagents(conn)
+    source_migration_key = "subagent_mcp_sources_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?", (source_migration_key,)
+    ).fetchone() is None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO subagent_mcp_sources (
+                subagent_id, mcp_server_id, enabled_tools, position, created_at
+            )
+            SELECT id, mcp_server_id, enabled_tools, 0, ?
+            FROM subagents
+            WHERE mcp_server_id IS NOT NULL
+            """,
+            (_now(),),
+        )
+        conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+            (source_migration_key, _now()),
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_subagents_parent ON subagents(parent_agent_id)"
     )
@@ -1207,7 +1299,7 @@ def subagent_for_api(subagent: dict | None) -> dict | None:
     _, headers_configured = _masked_json_object(headers)
     _, env_configured = _masked_json_object(env)
     result["mcp_credentials_configured"] = headers_configured or env_configured
-    result["mcp_server_name"] = result.get("server_name", "")
+    result["mcp_server_name"] = result.get("server_name") or ""
     return result
 
 
@@ -2233,6 +2325,72 @@ def get_heartbeat_settings() -> dict:
     }
 
 
+def _heartbeat_mcp_tools(conn: sqlite3.Connection) -> dict[int, list[dict]]:
+    """Return definition-granted cached tools with stable cross-server keys."""
+    grouped: dict[int, list[dict]] = {}
+    rows = conn.execute(
+        """
+        SELECT s.id AS subagent_id, source.mcp_server_id,
+               source.enabled_tools, server.name AS server_name,
+               server.connection_status, tool.name, tool.description,
+               tool.position, source.position AS source_position
+        FROM subagents s
+        JOIN subagent_mcp_sources source ON source.subagent_id = s.id
+        JOIN mcp_servers server ON server.id = source.mcp_server_id
+        JOIN mcp_server_tools tool
+          ON tool.mcp_server_id = source.mcp_server_id
+        WHERE s.enabled = 1
+        ORDER BY s.name, source.position, tool.position, tool.id
+        """
+    ).fetchall()
+    for row in rows:
+        allowlist = None
+        if row["enabled_tools"] is not None:
+            try:
+                allowlist = set(json.loads(row["enabled_tools"] or "[]"))
+            except (json.JSONDecodeError, TypeError):
+                allowlist = set()
+        raw_name = str(row["name"])
+        if allowlist is not None and raw_name not in allowlist:
+            continue
+        server_id = int(row["mcp_server_id"])
+        grouped.setdefault(int(row["subagent_id"]), []).append(
+            {
+                "name": f"{server_id}:{raw_name}",
+                "tool_name": raw_name,
+                "label": raw_name,
+                "server_id": server_id,
+                "server_name": row["server_name"],
+                "connection_status": row["connection_status"] or "untested",
+                "description": row["description"] or "",
+            }
+        )
+    for tools in grouped.values():
+        counts: dict[str, int] = {}
+        for tool in tools:
+            counts[tool["tool_name"]] = counts.get(tool["tool_name"], 0) + 1
+        for tool in tools:
+            if counts[tool["tool_name"]] == 1:
+                tool["name"] = tool["tool_name"]
+    return grouped
+
+
+def _heartbeat_rule_matches(rules: set[str], tool: dict) -> bool:
+    return (
+        "*" in rules
+        or tool["name"] in rules
+        or tool["tool_name"] in rules
+        or f"{tool['server_id']}:{tool['tool_name']}" in rules
+    )
+
+
+def _canonical_heartbeat_tool(agent: dict, tool_name: str) -> str | None:
+    if tool_name in agent["tools"]:
+        return tool_name
+    matches = agent.get("aliases", {}).get(tool_name, [])
+    return matches[0] if len(matches) == 1 else None
+
+
 def update_heartbeat_settings(
     *,
     enabled: bool | None = None,
@@ -2299,24 +2457,28 @@ def update_heartbeat_settings(
             else interval_minutes
         )
         if normalized_tools is not None:
-            valid = {
-                (f"mcp:{int(row['subagent_id'])}", row["name"])
-                for row in conn.execute(
-                    """
-                    SELECT s.id AS subagent_id, t.name
-                    FROM subagents s
-                    JOIN mcp_server_tools t ON t.mcp_server_id = s.mcp_server_id
-                    WHERE s.enabled = 1
-                    """
+            catalog = _heartbeat_agent_catalog(conn)
+            canonical_tools: list[tuple[str, str]] = []
+            for agent_key, tool_name in normalized_tools:
+                agent = catalog.get(agent_key)
+                canonical = (
+                    _canonical_heartbeat_tool(agent, tool_name)
+                    if agent is not None else None
                 )
+                if canonical is None:
+                    raise ValueError(
+                        "one or more selected heartbeat tools are unavailable"
+                    )
+                canonical_tools.append((agent_key, canonical))
+            normalized_tools = canonical_tools
+            valid = {
+                (agent_key, tool_name)
+                for agent_key, agent in catalog.items()
+                for tool_name in agent["tools"]
             }
             confirmation_rules = {
-                f"mcp:{int(row['id'])}": set(
-                    json.loads(row["confirm_tools"] or "[]")
-                )
-                for row in conn.execute(
-                    "SELECT id, confirm_tools FROM subagents WHERE enabled = 1"
-                )
+                agent_key: set(agent["protected"])
+                for agent_key, agent in catalog.items()
             }
             active_builtin_keys = enabled_builtin_agent_keys()
             builtin_capabilities = [
@@ -2410,6 +2572,7 @@ def update_heartbeat_settings(
 def _heartbeat_agent_catalog(conn: sqlite3.Connection) -> dict[str, dict]:
     """Return active agents with valid tools and code-enforced protection rules."""
     catalog: dict[str, dict] = {}
+    mcp_tools = _heartbeat_mcp_tools(conn)
     rows = conn.execute(
         """
         SELECT id, name, confirm_tools
@@ -2421,25 +2584,22 @@ def _heartbeat_agent_catalog(conn: sqlite3.Connection) -> dict[str, dict]:
     for row in rows:
         key = f"mcp:{int(row['id'])}"
         try:
-            protected = set(json.loads(row["confirm_tools"] or "[]"))
+            rules = set(json.loads(row["confirm_tools"] or "[]"))
         except (json.JSONDecodeError, TypeError):
-            protected = {"*"}
-        tools = {
-            item["name"]
-            for item in conn.execute(
-                """
-                SELECT name FROM mcp_server_tools
-                WHERE mcp_server_id = (
-                    SELECT mcp_server_id FROM subagents WHERE id = ?
-                )
-                """,
-                (int(row["id"]),),
-            )
-        }
+            rules = {"*"}
+        tool_items = mcp_tools.get(int(row["id"]), [])
+        tools = {item["name"] for item in tool_items}
+        aliases: dict[str, list[str]] = {}
+        for item in tool_items:
+            aliases.setdefault(item["tool_name"], []).append(item["name"])
         catalog[key] = {
             "name": row["name"],
             "tools": tools,
-            "protected": protected,
+            "aliases": aliases,
+            "protected": {
+                item["name"] for item in tool_items
+                if _heartbeat_rule_matches(rules, item)
+            },
         }
 
     enabled_builtins = enabled_builtin_agent_keys()
@@ -2493,16 +2653,22 @@ def _normalize_heartbeat_selection(
     if any(agent_key not in agents for agent_key, _ in tools):
         raise ValueError("heartbeat tools must belong to a selected agent")
 
+    canonical_tools: list[tuple[str, str]] = []
     for agent_key, tool_name in tools:
         agent = catalog.get(agent_key)
-        if agent is None or tool_name not in agent["tools"]:
+        canonical = (
+            _canonical_heartbeat_tool(agent, tool_name)
+            if agent is not None else None
+        )
+        if canonical is None:
             raise ValueError("one or more selected heartbeat tools are unavailable")
         protected = agent["protected"]
-        if "*" in protected or tool_name in protected:
+        if "*" in protected or canonical in protected:
             raise ValueError(
                 "tools that require confirmation cannot run in a heartbeat task"
             )
-    return agents, tools
+        canonical_tools.append((agent_key, canonical))
+    return agents, canonical_tools
 
 
 def _heartbeat_task_dict(
@@ -2837,32 +3003,13 @@ def get_heartbeat_capabilities() -> list[dict]:
         configured.update(agent_key for agent_key, _ in selected)
         agents = conn.execute(
             """
-            SELECT s.id, s.name, s.confirm_tools, s.mcp_server_id,
-                   ms.connection_status
+            SELECT s.id, s.name, s.description, s.confirm_tools
             FROM subagents s
-            JOIN mcp_servers ms ON ms.id = s.mcp_server_id
             WHERE s.enabled = 1
             ORDER BY s.name
             """
         ).fetchall()
-        tool_rows = conn.execute(
-            """
-            SELECT s.id AS subagent_id, t.name, t.description, t.position
-            FROM subagents s
-            JOIN mcp_server_tools t ON t.mcp_server_id = s.mcp_server_id
-            WHERE s.enabled = 1
-            ORDER BY s.name, t.position, t.id
-            """
-        ).fetchall()
-    grouped: dict[int, list[dict]] = {}
-    for row in tool_rows:
-        grouped.setdefault(int(row["subagent_id"]), []).append(
-            {
-                "name": row["name"],
-                "description": row["description"] or "",
-                "selected": False,
-            }
-        )
+        grouped = _heartbeat_mcp_tools(conn)
     result = []
     for row in agents:
         try:
@@ -2872,21 +3019,28 @@ def get_heartbeat_capabilities() -> list[dict]:
         tools = grouped.get(int(row["id"]), [])
         agent_key = f"mcp:{int(row['id'])}"
         for tool in tools:
-            tool["requires_confirmation"] = (
-                "*" in protected or tool["name"] in protected
-            )
+            tool["requires_confirmation"] = _heartbeat_rule_matches(protected, tool)
             tool["selected"] = (
                 (agent_key, tool["name"]) in selected
+                or (agent_key, tool["tool_name"]) in selected
                 if agent_key in configured
                 else not tool["requires_confirmation"]
             )
+        statuses = {tool["connection_status"] for tool in tools}
         result.append(
             {
                 "id": int(row["id"]),
                 "key": agent_key,
                 "kind": "mcp",
                 "name": row["name"],
-                "connection_status": row["connection_status"] or "untested",
+                "description": row["description"] or (
+                    "Prompt-only subagent" if not tools else "MCP subagent"
+                ),
+                "connection_status": (
+                    "connected" if statuses == {"connected"}
+                    else "failed" if "failed" in statuses
+                    else "untested"
+                ),
                 "tools": tools,
             }
         )
@@ -2909,6 +3063,7 @@ def get_heartbeat_targets(task_id: int | None = None) -> list[dict]:
     """Return resolved built-in and MCP specs with selected safe tools only."""
     selected: dict[int, list[str]] = {}
     selected_builtins: dict[str, list[str]] = {}
+    resolved_dynamic: dict[int, dict[str, tuple[int, str]]] = {}
     with _connect() as conn:
         if task_id is None:
             dynamic_rows = conn.execute(
@@ -2916,9 +3071,6 @@ def get_heartbeat_targets(task_id: int | None = None) -> list[dict]:
                 SELECT ht.subagent_id, ht.tool_name
                 FROM heartbeat_tools ht
                 JOIN subagents s ON s.id = ht.subagent_id
-                JOIN mcp_server_tools t
-                  ON t.mcp_server_id = s.mcp_server_id
-                 AND t.name = ht.tool_name
                 WHERE s.enabled = 1
                 ORDER BY ht.subagent_id, ht.tool_name
                 """
@@ -2938,9 +3090,6 @@ def get_heartbeat_targets(task_id: int | None = None) -> list[dict]:
                 FROM heartbeat_task_tools htt
                 JOIN subagents s
                   ON s.id = CAST(substr(htt.agent_key, 5) AS INTEGER)
-                JOIN mcp_server_tools t
-                  ON t.mcp_server_id = s.mcp_server_id
-                 AND t.name = htt.tool_name
                 WHERE htt.task_id = ? AND htt.agent_key LIKE 'mcp:%'
                   AND s.enabled = 1
                 ORDER BY htt.agent_key, htt.tool_name
@@ -2960,6 +3109,12 @@ def get_heartbeat_targets(task_id: int | None = None) -> list[dict]:
             selected.setdefault(int(row["subagent_id"]), []).append(row["tool_name"])
         for row in builtin_rows:
             selected_builtins.setdefault(row["agent_key"], []).append(row["tool_name"])
+        for agent_id, tools in _heartbeat_mcp_tools(conn).items():
+            lookup = resolved_dynamic.setdefault(agent_id, {})
+            for tool in tools:
+                resolved = (int(tool["server_id"]), tool["tool_name"])
+                lookup[tool["name"]] = resolved
+                lookup[f"{tool['server_id']}:{tool['tool_name']}"] = resolved
     targets = []
     active_builtin_keys = enabled_builtin_agent_keys()
     for agent in builtin_agents.capabilities():
@@ -2989,15 +3144,40 @@ def get_heartbeat_targets(task_id: int | None = None) -> list[dict]:
         seen_dynamic_agents.add(int(spec["id"]))
         chosen = selected.get(int(spec["id"]), [])
         protected = set(spec.get("confirm_tools") or [])
-        safe = [name for name in chosen if "*" not in protected and name not in protected]
-        node_allowlist = spec.get("allowed_tools")
-        if node_allowlist is not None:
-            allowed = set(node_allowlist)
-            safe = [name for name in safe if name in allowed]
-        if safe:
+        safe_sources = []
+        safe_keys: list[str] = []
+        for source in spec.get("mcp_sources") or []:
+            server_id = int(source["mcp_server_id"])
+            source_allowlist = source.get("allowed_tools")
+            source_allowed = (
+                None if source_allowlist is None else set(source_allowlist)
+            )
+            safe_names = []
+            for selected_name in chosen:
+                resolved = resolved_dynamic.get(int(spec["id"]), {}).get(
+                    str(selected_name)
+                )
+                if resolved is None or resolved[0] != server_id:
+                    continue
+                raw_name = resolved[1]
+                canonical = f"{server_id}:{raw_name}"
+                if source_allowed is not None and raw_name not in source_allowed:
+                    continue
+                if (
+                    "*" in protected
+                    or raw_name in protected
+                    or canonical in protected
+                ):
+                    continue
+                safe_names.append(raw_name)
+                safe_keys.append(str(selected_name))
+            if safe_names:
+                safe_sources.append({**source, "allowed_tools": safe_names})
+        if safe_sources:
             target = dict(spec)
             target["kind"] = "mcp"
-            target["allowed_tools"] = safe
+            target["mcp_sources"] = safe_sources
+            target["allowed_tools"] = safe_keys
             targets.append(target)
     return targets
 
@@ -3933,7 +4113,13 @@ def delete_server_result(server_id: int) -> DeletionResult:
             conn.rollback()
             return DeletionResult("not_found")
         agent_rows = conn.execute(
-            "SELECT name FROM subagents WHERE mcp_server_id = ? ORDER BY name",
+            """
+            SELECT DISTINCT subagents.name
+            FROM subagent_mcp_sources source
+            JOIN subagents ON subagents.id = source.subagent_id
+            WHERE source.mcp_server_id = ?
+            ORDER BY subagents.name
+            """,
             (server_id,),
         ).fetchall()
         dependencies = tuple(f"the {row['name']} subagent" for row in agent_rows)
@@ -4379,6 +4565,154 @@ def remove_workflow_node(node_id: int) -> bool:
 # Subagents
 # -----------------------------------------------------------------------------
 
+def _normalize_subagent_sources(
+    conn: sqlite3.Connection, value
+) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("MCP sources must be provided as a list.")
+    known_servers = {
+        int(row["id"]) for row in conn.execute("SELECT id FROM mcp_servers")
+    }
+    normalized: list[dict] = []
+    seen: set[int] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Every MCP source must be an object.")
+        try:
+            server_id = int(item.get("mcp_server_id"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Select an existing MCP server.") from exc
+        if server_id not in known_servers:
+            raise ValueError("Select an existing MCP server.")
+        if server_id in seen:
+            raise ValueError("Each MCP server can be selected only once.")
+        seen.add(server_id)
+        selected = item.get("enabled_tools")
+        enabled_tools = (
+            None
+            if selected is None
+            else _json_string_list(selected, "enabled MCP tools")
+        )
+        parsed = None if enabled_tools is None else json.loads(enabled_tools)
+        # An explicit empty selection is equivalent to not granting the server.
+        if parsed == []:
+            continue
+        normalized.append(
+            {"mcp_server_id": server_id, "enabled_tools": enabled_tools}
+        )
+    if len(normalized) > 32:
+        raise ValueError("A subagent can use at most 32 MCP servers.")
+    return normalized
+
+
+def _replace_subagent_sources(
+    conn: sqlite3.Connection, subagent_id: int, sources
+) -> list[dict]:
+    normalized = _normalize_subagent_sources(conn, sources)
+    current = [
+        (int(row["mcp_server_id"]), row["enabled_tools"])
+        for row in conn.execute(
+            """
+            SELECT mcp_server_id, enabled_tools
+            FROM subagent_mcp_sources
+            WHERE subagent_id = ?
+            ORDER BY position, mcp_server_id
+            """,
+            (subagent_id,),
+        )
+    ]
+    requested = [
+        (source["mcp_server_id"], source["enabled_tools"])
+        for source in normalized
+    ]
+    conn.execute(
+        "DELETE FROM subagent_mcp_sources WHERE subagent_id = ?", (subagent_id,)
+    )
+    conn.executemany(
+        """
+        INSERT INTO subagent_mcp_sources (
+            subagent_id, mcp_server_id, enabled_tools, position, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                subagent_id,
+                source["mcp_server_id"],
+                source["enabled_tools"],
+                position,
+                _now(),
+            )
+            for position, source in enumerate(normalized)
+        ],
+    )
+    primary = normalized[0] if normalized else None
+    conn.execute(
+        """
+        UPDATE subagents SET mcp_server_id = ?, enabled_tools = ? WHERE id = ?
+        """,
+        (
+            primary["mcp_server_id"] if primary else None,
+            primary["enabled_tools"] if primary else None,
+            subagent_id,
+        ),
+    )
+    if current != requested:
+        # Source grants are definition-level. A placement allowlist may refer
+        # to capabilities that were removed, so inherit the revised grants.
+        conn.execute(
+            "UPDATE subagent_nodes SET enabled_tools = NULL WHERE agent_id = ?",
+            (subagent_id,),
+        )
+    return normalized
+
+
+def _subagent_sources_for(
+    conn: sqlite3.Connection, subagent_ids: set[int]
+) -> dict[int, list[dict]]:
+    if not subagent_ids:
+        return {}
+    placeholders = ",".join("?" for _ in subagent_ids)
+    rows = conn.execute(
+        f"""
+        SELECT source.subagent_id, source.mcp_server_id, source.enabled_tools,
+               source.position, server.name AS mcp_server_name,
+               server.description AS mcp_server_description,
+               server.connection_status
+        FROM subagent_mcp_sources source
+        JOIN mcp_servers server ON server.id = source.mcp_server_id
+        WHERE source.subagent_id IN ({placeholders})
+        ORDER BY source.subagent_id, source.position, server.name
+        """,
+        tuple(sorted(subagent_ids)),
+    ).fetchall()
+    grouped: dict[int, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(int(row["subagent_id"]), []).append(
+            {
+                "mcp_server_id": int(row["mcp_server_id"]),
+                "mcp_server_name": row["mcp_server_name"],
+                "mcp_server_description": row["mcp_server_description"] or "",
+                "connection_status": row["connection_status"] or "untested",
+                "enabled_tools": (
+                    json.loads(
+                        _json_string_list(row["enabled_tools"], "enabled MCP tools")
+                    )
+                    if row["enabled_tools"] is not None
+                    else None
+                ),
+            }
+        )
+    return grouped
+
+
+def list_subagent_mcp_sources(subagent_id: int) -> list[dict]:
+    with _connect() as conn:
+        return _subagent_sources_for(conn, {int(subagent_id)}).get(
+            int(subagent_id), []
+        )
+
 def _subagent_parent_id(value) -> int | None:
     """Normalize the API/CLI representation of Mounir as the root parent."""
     if value in (None, "", 0, "0", "supervisor"):
@@ -4506,7 +4840,7 @@ def _create_subagent_node(
         ) VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
-            agent_id, parent_node_id, agent["enabled_tools"], workflow_id,
+            agent_id, parent_node_id, None, workflow_id,
             selected_position, _now(),
         ),
     )
@@ -4663,7 +4997,7 @@ def _add_subagent(
     description: str,
     system_prompt: str,
     model_id: int,
-    mcp_server_id: int,
+    mcp_server_id: int | None,
     confirm_tool_calls: bool = True,
     parent_agent_id: int | None = None,
     confirm_tools=None,
@@ -4676,20 +5010,20 @@ def _add_subagent(
     connect_to_workflow: bool = True,
     workflow_id: int | None = None,
     position=None,
+    mcp_sources=None,
 ) -> int:
     try:
         selected_model_id = int(model_id)
     except (TypeError, ValueError) as exc:
         raise ValueError("Select a model before creating the subagent.") from exc
-    try:
-        selected_server_id = int(mcp_server_id)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Select an MCP server before creating the subagent.") from exc
+    selected_server_id = (
+        None if mcp_server_id in (None, "", 0, "0") else int(mcp_server_id)
+    )
     if selected_model_id <= 0 or conn.execute(
         "SELECT 1 FROM models WHERE id = ?", (selected_model_id,)
     ).fetchone() is None:
         raise ValueError("Select an existing model before creating the subagent.")
-    if selected_server_id <= 0 or conn.execute(
+    if selected_server_id is not None and conn.execute(
         "SELECT 1 FROM mcp_servers WHERE id = ?", (selected_server_id,)
     ).fetchone() is None:
         raise ValueError("Select an existing MCP server before creating the subagent.")
@@ -4768,6 +5102,16 @@ def _add_subagent(
     except sqlite3.IntegrityError as exc:
         raise _friendly_integrity_error(exc) from exc
     agent_id = int(cur.lastrowid)
+    requested_sources = (
+        mcp_sources
+        if mcp_sources is not None
+        else (
+            [{"mcp_server_id": selected_server_id, "enabled_tools": enabled_tools}]
+            if selected_server_id is not None
+            else []
+        )
+    )
+    _replace_subagent_sources(conn, agent_id, requested_sources)
     if _bool(connect_to_workflow, "connect_to_workflow"):
         _create_subagent_node(
             conn, agent_id, selected_parent_node_id, selected_workflow_id, position
@@ -4783,7 +5127,7 @@ def add_subagent(
     description: str,
     system_prompt: str,
     model_id: int,
-    mcp_server_id: int,
+    mcp_server_id: int | None = None,
     confirm_tool_calls: bool = True,
     parent_agent_id: int | None = None,
     confirm_tools=None,
@@ -4796,13 +5140,14 @@ def add_subagent(
     connect_to_workflow: bool = True,
     workflow_id: int | None = None,
     position=None,
+    mcp_sources=None,
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
             confirm_tool_calls, parent_agent_id, confirm_tools, icon_data, icon_mime,
             dedupe_tools, enabled, enabled_tools, parent_node_id,
-            connect_to_workflow, workflow_id, position,
+            connect_to_workflow, workflow_id, position, mcp_sources,
         )
         return get_subagent(aid)
 
@@ -4819,7 +5164,7 @@ _SUBAGENT_SELECT = """
            srv.oauth_redirect_uri, srv.setup_command
     FROM subagents s
     JOIN models m ON s.model_id = m.id
-    JOIN mcp_servers srv ON s.mcp_server_id = srv.id
+    LEFT JOIN mcp_servers srv ON s.mcp_server_id = srv.id
 """
 
 
@@ -4852,6 +5197,9 @@ def _enrich_subagent_connections(
         int(item["id"]): item["name"]
         for item in conn.execute("SELECT id, name FROM workflows")
     }
+    sources_by_agent = _subagent_sources_for(
+        conn, {int(row["id"]) for row in rows}
+    )
     nodes = [
         dict(node)
         for node in conn.execute(
@@ -4869,6 +5217,8 @@ def _enrich_subagent_connections(
 
     for row in rows:
         agent_id = int(row["id"])
+        row["mcp_sources"] = sources_by_agent.get(agent_id, [])
+        row["mcp_server_count"] = len(row["mcp_sources"])
         placements = sorted(
             (item for item in nodes if int(item["agent_id"]) == agent_id),
             key=lambda item: (
@@ -4970,7 +5320,8 @@ def list_subagent_nodes(workflow_id: int | None = None) -> list[dict]:
                 """
                 SELECT n.id, n.agent_id, n.parent_node_id, n.workflow_id,
                        n.position, n.created_at,
-                       s.name, s.description, s.enabled, s.enabled_tools,
+                       s.name, s.description, s.enabled,
+                       n.enabled_tools AS enabled_tools,
                        s.model_id, s.mcp_server_id,
                        CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
                        m.name AS model_name, m.model,
@@ -4978,7 +5329,7 @@ def list_subagent_nodes(workflow_id: int | None = None) -> list[dict]:
                 FROM subagent_nodes n
                 JOIN subagents s ON s.id = n.agent_id
                 JOIN models m ON m.id = s.model_id
-                JOIN mcp_servers srv ON srv.id = s.mcp_server_id
+                LEFT JOIN mcp_servers srv ON srv.id = s.mcp_server_id
                 WHERE ((n.workflow_id IS NULL AND ? IS NULL) OR n.workflow_id = ?)
                 ORDER BY n.position, n.created_at, n.id
                 """,
@@ -5024,8 +5375,11 @@ def list_subagent_nodes(workflow_id: int | None = None) -> list[dict]:
                 "model_id": int(node["model_id"]),
                 "model_name": node["model_name"],
                 "model": node["model"],
-                "mcp_server_id": int(node["mcp_server_id"]),
-                "mcp_server_name": node["mcp_server_name"],
+                "mcp_server_id": (
+                    int(node["mcp_server_id"])
+                    if node["mcp_server_id"] is not None else None
+                ),
+                "mcp_server_name": node["mcp_server_name"] or "",
                 "has_icon": bool(node["has_icon"]),
                 "depth": len(path_names) - 1,
                 "path_names": path_names,
@@ -5041,7 +5395,8 @@ def get_subagent_node(node_id: int) -> dict | None:
     with _connect() as conn:
         node = conn.execute(
             """
-            SELECT n.id, n.agent_id, n.parent_node_id, s.enabled_tools, n.created_at,
+            SELECT n.id, n.agent_id, n.parent_node_id,
+                   n.enabled_tools AS enabled_tools, n.created_at,
                    n.workflow_id, n.position,
                    s.name, s.description, s.model_id, s.mcp_server_id, s.enabled,
                    CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
@@ -5050,7 +5405,7 @@ def get_subagent_node(node_id: int) -> dict | None:
             FROM subagent_nodes n
             JOIN subagents s ON s.id = n.agent_id
             JOIN models m ON m.id = s.model_id
-            JOIN mcp_servers srv ON srv.id = s.mcp_server_id
+            LEFT JOIN mcp_servers srv ON srv.id = s.mcp_server_id
             WHERE n.id = ?
             """,
             (node_id,),
@@ -5137,8 +5492,14 @@ def get_subagent_node(node_id: int) -> dict | None:
                 "model_id": int(node_data["model_id"]),
                 "model_name": node_data["model_name"],
                 "model": node_data["model"],
-                "mcp_server_id": int(node_data["mcp_server_id"]),
-                "mcp_server_name": node_data["mcp_server_name"],
+                "mcp_server_id": (
+                    int(node_data["mcp_server_id"])
+                    if node_data["mcp_server_id"] is not None else None
+                ),
+                "mcp_server_name": node_data["mcp_server_name"] or "",
+                "mcp_sources": list_subagent_mcp_sources(
+                    int(node_data["agent_id"])
+                ),
                 "enabled": bool(node_data["enabled"]),
                 "has_icon": bool(node_data["has_icon"]),
             },
@@ -5304,6 +5665,8 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
         if child_selection_supplied
         else set()
     )
+    sources_supplied = "mcp_sources" in kwargs
+    requested_sources = kwargs.pop("mcp_sources", None)
     allowed = {
         "name", "description", "system_prompt", "model_id",
         "mcp_server_id", "confirm_tool_calls", "confirm_tools",
@@ -5314,12 +5677,14 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
         for k, v in kwargs.items()
         if k in allowed and v is not None
     }
-    if "enabled_tools" in kwargs:
-        fields["enabled_tools"] = kwargs["enabled_tools"]
+    for nullable_field in ("mcp_server_id", "enabled_tools"):
+        if nullable_field in kwargs:
+            fields[nullable_field] = kwargs[nullable_field]
     if (
         not fields
         and not parent_selection_supplied
         and not child_selection_supplied
+        and not sources_supplied
     ):
         return get_subagent(subagent_id)
     if "name" in fields:
@@ -5333,7 +5698,11 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
             raise ValueError("Select a model for the subagent.") from exc
     if "mcp_server_id" in fields:
         try:
-            fields["mcp_server_id"] = int(fields["mcp_server_id"])
+            fields["mcp_server_id"] = (
+                None
+                if fields["mcp_server_id"] in (None, "", 0, "0")
+                else int(fields["mcp_server_id"])
+            )
         except (TypeError, ValueError) as exc:
             raise ValueError("Select an MCP server for the subagent.") from exc
     if "icon_data" in fields:
@@ -5384,11 +5753,31 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
             "SELECT 1 FROM models WHERE id = ?", (fields["model_id"],)
         ).fetchone() is None:
             raise ValueError("Select an existing model for the subagent.")
-        if "mcp_server_id" in fields and conn.execute(
+        if (
+            "mcp_server_id" in fields
+            and fields["mcp_server_id"] is not None
+            and conn.execute(
             "SELECT 1 FROM mcp_servers WHERE id = ?",
             (fields["mcp_server_id"],),
-        ).fetchone() is None:
+            ).fetchone() is None
+        ):
             raise ValueError("Select an existing MCP server for the subagent.")
+        legacy_sources = None
+        if not sources_supplied and "mcp_server_id" in fields:
+            legacy_sources = (
+                [
+                    {
+                        "mcp_server_id": fields["mcp_server_id"],
+                        "enabled_tools": (
+                            kwargs.get("enabled_tools")
+                            if "enabled_tools" in kwargs
+                            else None
+                        ),
+                    }
+                ]
+                if fields["mcp_server_id"] is not None
+                else []
+            )
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
             if fields:
@@ -5401,6 +5790,12 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
                         "UPDATE subagent_nodes SET enabled_tools = ? WHERE agent_id = ?",
                         (fields["enabled_tools"], subagent_id),
                     )
+            if sources_supplied or legacy_sources is not None:
+                _replace_subagent_sources(
+                    conn,
+                    subagent_id,
+                    requested_sources if sources_supplied else legacy_sources,
+                )
             if child_selection_supplied:
                 primary_node_id = _canonical_parent_node(conn, subagent_id)
                 _set_node_children(conn, primary_node_id, selected_child_ids)
@@ -5519,26 +5914,60 @@ def build_specs(workflow_id: int | None = None) -> list[dict]:
             continue
         if not s.get("enabled"):
             continue
-        server_env = _resolved_json_object(s.get("env") or "{}")
-        server_env.update(_materialized_server_file_env(int(s["mcp_server_id"])))
+        source_specs = []
+        node_allowlist = placement.get("enabled_tools")
+        for source in s.get("mcp_sources") or []:
+            server = build_server_spec(int(source["mcp_server_id"]))
+            if server is None:
+                continue
+            source_allowlist = source.get("enabled_tools")
+            if node_allowlist is not None:
+                server_prefix = f"{int(source['mcp_server_id'])}:"
+                node_names = {
+                    (
+                        name[len(server_prefix):]
+                        if str(name).startswith(server_prefix)
+                        else str(name)
+                    )
+                    for name in node_allowlist
+                    if ":" not in str(name) or str(name).startswith(server_prefix)
+                }
+                source_allowlist = (
+                    sorted(node_names)
+                    if source_allowlist is None
+                    else [name for name in source_allowlist if name in node_names]
+                )
+            source_specs.append(
+                {
+                    **server,
+                    "mcp_server_id": int(source["mcp_server_id"]),
+                    "server_name": source["mcp_server_name"],
+                    "allowed_tools": source_allowlist,
+                }
+            )
+        primary = source_specs[0] if source_specs else {}
         specs.append({
             "id": s["id"],
             "node_id": placement["node_id"],
             "parent_node_id": placement.get("parent_node_id"),
             "workflow_id": placement.get("workflow_id"),
-            "mcp_server_id": s["mcp_server_id"],
+            "mcp_server_id": primary.get("mcp_server_id"),
+            "mcp_sources": source_specs,
             "name": s["name"],
             "description": s.get("description")
-            or f"Uses the {s['server_name']} MCP server.",
+            or (
+                f"Uses {len(source_specs)} configured MCP source(s)."
+                if source_specs else "Prompt-only subagent without MCP tools."
+            ),
             "prompt": s["system_prompt"],
 
-            "transport": s.get("transport") or "stdio",
-            "connection": s["connection"],
+            "transport": primary.get("transport") or "stdio",
+            "connection": primary.get("connection") or "",
 
-            "headers": _resolved_json_object(s.get("headers") or "{}"),
-            "env": dict(server_env),
-            "auth_scheme": s.get("auth_scheme") or "",
-            "oauth_redirect_uri": s.get("oauth_redirect_uri") or "",
+            "headers": dict(primary.get("headers") or {}),
+            "env": dict(primary.get("env") or {}),
+            "auth_scheme": primary.get("auth_scheme") or "",
+            "oauth_redirect_uri": primary.get("oauth_redirect_uri") or "",
 
             "parent_agent_id": placement.get("parent_agent_id"),
             "parent_name": (

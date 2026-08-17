@@ -37,8 +37,9 @@ export function ToolChoices({
               />
             )}
             <span>
-              <strong>{readable(tool.name)}</strong>
+              <strong>{tool.label || readable(tool.name)}</strong>
               <small>{tool.description || 'No description available.'}</small>
+              {tool.server_name && <em className="tool-option__source">{tool.server_name}</em>}
             </span>
           </>
         )
