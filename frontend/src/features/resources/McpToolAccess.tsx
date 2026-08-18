@@ -1,6 +1,6 @@
 import { useQueries, useQueryClient } from '@tanstack/react-query'
-import { Check, Plug, RefreshCw, Search, ShieldCheck } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { RefreshCw, Search } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api/client'
 import type { McpServer, SubagentMcpSource, ToolInfo } from '../../api/types'
 import { readable } from './helpers'
@@ -61,9 +61,7 @@ export function expandLegacyToolRules(rules: string[], options: ToolInfo[]) {
   return new Set(
     rules.flatMap((rule) => {
       if (rule === '*' || names.has(rule)) return [rule]
-      const matches = options
-        .filter((tool) => tool.tool_name === rule)
-        .map((tool) => tool.name)
+      const matches = options.filter((tool) => tool.tool_name === rule).map((tool) => tool.name)
       return matches.length ? matches : [rule]
     }),
   )
@@ -81,14 +79,82 @@ export function MultiServerToolPicker({
   onChange: (sources: SubagentMcpSource[]) => void
 }) {
   const queryClient = useQueryClient()
-  const [query, setQuery] = useState('')
+  const [serverQuery, setServerQuery] = useState('')
+  const [toolQuery, setToolQuery] = useState('')
+  const [activeServerId, setActiveServerId] = useState<number | null>(() => {
+    const initialId = sources[0]?.mcp_server_id ?? servers[0]?.id
+    return initialId === undefined ? null : Number(initialId)
+  })
   const [refreshing, setRefreshing] = useState(new Set<number>())
   const [refreshErrors, setRefreshErrors] = useState(new Map<number, string>())
   const selectedByServer = useMemo(
     () => new Map(sources.map((source) => [Number(source.mcp_server_id), source])),
     [sources],
   )
-  const selectedCount = selectedToolOptions(groups, sources).length
+  const serverDetails = useMemo(
+    () => new Map(servers.map((server) => [Number(server.id), server])),
+    [servers],
+  )
+  const normalizedServerQuery = serverQuery.trim().toLocaleLowerCase()
+  const visibleGroups = useMemo(
+    () =>
+      groups.filter((group) => {
+        if (!normalizedServerQuery) return true
+        const details = serverDetails.get(Number(group.server.id))
+        return (
+          group.server.name.toLocaleLowerCase().includes(normalizedServerQuery) ||
+          (details?.description || '').toLocaleLowerCase().includes(normalizedServerQuery)
+        )
+      }),
+    [groups, normalizedServerQuery, serverDetails],
+  )
+  const activeGroup = useMemo(
+    () => groups.find((group) => Number(group.server.id) === activeServerId),
+    [activeServerId, groups],
+  )
+  const activeSource = activeServerId === null ? undefined : selectedByServer.get(activeServerId)
+  const activeSelection = useMemo(
+    () =>
+      new Set(
+        activeSource?.enabled_tools === null
+          ? activeGroup?.tools.map((tool) => tool.name) || []
+          : activeSource?.enabled_tools || [],
+      ),
+    [activeGroup, activeSource],
+  )
+  const activeEnabledCount = useMemo(
+    () => activeGroup?.tools.filter((tool) => activeSelection.has(tool.name)).length || 0,
+    [activeGroup, activeSelection],
+  )
+  const allActiveToolsEnabled = Boolean(
+    activeGroup?.tools.length && activeEnabledCount === activeGroup.tools.length,
+  )
+  const normalizedToolQuery = toolQuery.trim().toLocaleLowerCase()
+  const visibleTools = useMemo(
+    () =>
+      (activeGroup?.tools || []).filter(
+        (tool) =>
+          !normalizedToolQuery ||
+          readable(tool.name).toLocaleLowerCase().includes(normalizedToolQuery) ||
+          tool.name.toLocaleLowerCase().includes(normalizedToolQuery) ||
+          (tool.description || '').toLocaleLowerCase().includes(normalizedToolQuery),
+      ),
+    [activeGroup, normalizedToolQuery],
+  )
+
+  useEffect(() => {
+    if (
+      activeServerId !== null &&
+      groups.some((group) => Number(group.server.id) === activeServerId)
+    ) {
+      return
+    }
+    const selectedGroup = groups.find((group) => selectedByServer.has(Number(group.server.id)))
+    const nextId = selectedGroup?.server.id ?? groups[0]?.server.id
+    setActiveServerId(nextId === undefined ? null : Number(nextId))
+  }, [activeServerId, groups, selectedByServer])
+
+  useEffect(() => setToolQuery(''), [activeServerId])
 
   const replaceSource = (serverId: number, enabledTools: string[] | null | undefined) => {
     const index = sources.findIndex((source) => Number(source.mcp_server_id) === serverId)
@@ -127,10 +193,12 @@ export function MultiServerToolPicker({
       const state = await api.servers.test(serverId)
       queryClient.setQueryData(['server-tools', serverId], state)
     } catch (cause) {
-      setRefreshErrors((current) => new Map(current).set(
-        serverId,
-        cause instanceof Error ? cause.message : 'Could not refresh this MCP server.',
-      ))
+      setRefreshErrors((current) =>
+        new Map(current).set(
+          serverId,
+          cause instanceof Error ? cause.message : 'Could not refresh this MCP server.',
+        ),
+      )
     } finally {
       setRefreshing((current) => {
         const next = new Set(current)
@@ -140,117 +208,138 @@ export function MultiServerToolPicker({
     }
   }
 
-  const normalizedQuery = query.trim().toLocaleLowerCase()
+  if (!servers.length) {
+    return (
+      <div className="empty-state mcp-access__empty">
+        No MCP servers are connected. This subagent will run with its model and prompt only.
+      </div>
+    )
+  }
+
   return (
     <div className="mcp-access">
-      <div className="mcp-access__summary">
-        <div className={`mcp-access__mode ${sources.length ? '' : 'is-active'}`}>
-          <span className="mcp-access__mode-icon"><ShieldCheck size={17} /></span>
-          <span>
-            <strong>Prompt only</strong>
-            <small>Model and instructions, with no external tools.</small>
-          </span>
-          {!sources.length && <Check size={16} />}
-        </div>
-        <div className={`mcp-access__mode ${sources.length ? 'is-active' : ''}`}>
-          <span className="mcp-access__mode-icon"><Plug size={17} /></span>
-          <span>
-            <strong>MCP capabilities</strong>
-            <small>{selectedCount} tool{selectedCount === 1 ? '' : 's'} from {sources.length} server{sources.length === 1 ? '' : 's'}.</small>
-          </span>
-          {sources.length > 0 && <Check size={16} />}
-        </div>
-      </div>
-
-      <div className="mcp-access__toolbar">
-        <label>
-          <Search size={14} />
+      <aside className="mcp-access__sidebar">
+        <strong className="mcp-access__sidebar-title">MCP servers</strong>
+        <label className="resource-search mcp-access__search">
+          <Search size={13} />
           <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search servers and tools…"
+            type="search"
+            value={serverQuery}
+            onChange={(event) => setServerQuery(event.target.value)}
+            placeholder="Search servers…"
+            aria-label="Search MCP servers"
           />
         </label>
-        {sources.length > 0 && (
-          <button type="button" onClick={() => onChange([])}>Use prompt only</button>
-        )}
-      </div>
-
-      {!servers.length ? (
-        <div className="empty-state mcp-access__empty">
-          No MCP servers are connected. This subagent will run with its model and prompt only.
+        <div className="mcp-access__server-list">
+          {visibleGroups.length ? (
+            visibleGroups.map((group) => {
+              const serverId = Number(group.server.id)
+              return (
+                <button
+                  className={`mcp-access__server-item ${activeServerId === serverId ? 'is-active' : ''}`}
+                  type="button"
+                  key={serverId}
+                  aria-pressed={activeServerId === serverId}
+                  onClick={() => setActiveServerId(serverId)}
+                >
+                  {group.server.name}
+                </button>
+              )
+            })
+          ) : (
+            <div className="mcp-access__message">No MCP servers match this search.</div>
+          )}
         </div>
-      ) : (
-        <div className="mcp-access__servers">
-          {groups.map((group) => {
-            const serverId = Number(group.server.id)
-            const source = selectedByServer.get(serverId)
-            const selected = new Set(
-              source?.enabled_tools === null
-                ? group.tools.map((tool) => tool.name)
-                : source?.enabled_tools || [],
-            )
-            const visibleTools = group.tools.filter(
-              (tool) =>
-                !normalizedQuery ||
-                group.server.name.toLocaleLowerCase().includes(normalizedQuery) ||
-                tool.name.toLocaleLowerCase().includes(normalizedQuery) ||
-                (tool.description || '').toLocaleLowerCase().includes(normalizedQuery),
-            )
-            if (normalizedQuery && !visibleTools.length && !group.server.name.toLocaleLowerCase().includes(normalizedQuery)) return null
-            return (
-              <section className={`mcp-access__server ${source ? 'is-selected' : ''}`} key={serverId}>
-                <header>
-                  <label>
+      </aside>
+
+      <section className="mcp-access__detail">
+        {activeGroup ? (
+          <>
+            <header className="mcp-access__detail-header">
+              <strong>{activeGroup.server.name}</strong>
+              <div className="mcp-access__counts">
+                <strong>{activeEnabledCount} tools enabled</strong>
+                <span>{activeGroup.tools.length} available</span>
+              </div>
+              <button
+                type="button"
+                title="Refresh discovered tools"
+                aria-label={`Refresh tools from ${activeGroup.server.name}`}
+                disabled={refreshing.has(Number(activeGroup.server.id))}
+                onClick={() => refresh(Number(activeGroup.server.id))}
+              >
+                <RefreshCw
+                  size={13}
+                  className={refreshing.has(Number(activeGroup.server.id)) ? 'spin' : ''}
+                />
+              </button>
+            </header>
+
+            <div className="mcp-access__tool-toolbar">
+              <label className="resource-search mcp-access__search">
+                <Search size={13} />
+                <input
+                  type="search"
+                  value={toolQuery}
+                  onChange={(event) => setToolQuery(event.target.value)}
+                  placeholder="Search tools…"
+                  aria-label={`Search tools from ${activeGroup.server.name}`}
+                />
+              </label>
+              <button
+                className={`mcp-access__select-all ${allActiveToolsEnabled ? 'is-active' : ''}`}
+                type="button"
+                disabled={!activeGroup.tools.length}
+                aria-pressed={allActiveToolsEnabled}
+                aria-label={`${allActiveToolsEnabled ? 'Disable' : 'Enable'} all tools from ${activeGroup.server.name}`}
+                title={allActiveToolsEnabled ? 'Disable all tools' : 'Enable all tools'}
+                onClick={() =>
+                  replaceSource(
+                    Number(activeGroup.server.id),
+                    allActiveToolsEnabled ? undefined : null,
+                  )
+                }
+              >
+                Select all
+              </button>
+            </div>
+
+            <div className="mcp-access__tool-list">
+              {activeGroup.loading ? (
+                <div className="mcp-access__message">Loading discovered tools…</div>
+              ) : activeGroup.error || refreshErrors.get(Number(activeGroup.server.id)) ? (
+                <div className="mcp-access__message is-error">
+                  {activeGroup.error || refreshErrors.get(Number(activeGroup.server.id))}
+                </div>
+              ) : visibleTools.length ? (
+                visibleTools.map((tool) => (
+                  <label key={tool.name}>
                     <input
                       type="checkbox"
-                      checked={Boolean(source)}
-                      onChange={(event) => replaceSource(serverId, event.target.checked ? null : undefined)}
+                      checked={activeSelection.has(tool.name)}
+                      onChange={(event) => toggleTool(activeGroup, tool.name, event.target.checked)}
                     />
                     <span>
-                      <strong>{group.server.name}</strong>
-                      <small>{source ? `${selected.size || group.tools.length} selected` : `${group.tools.length} available`} · {group.server.connection_status || 'untested'}</small>
+                      <strong>{readable(tool.name)}</strong>
+                      <small>{tool.description || 'No description available.'}</small>
                     </span>
                   </label>
-                  <button
-                    type="button"
-                    title="Refresh discovered tools"
-                    disabled={refreshing.has(serverId)}
-                    onClick={() => refresh(serverId)}
-                  >
-                    <RefreshCw size={13} className={refreshing.has(serverId) ? 'spin' : ''} />
-                  </button>
-                </header>
-                {group.loading ? (
-                  <div className="mcp-access__message">Loading discovered tools…</div>
-                ) : group.error || refreshErrors.get(serverId) ? (
-                  <div className="mcp-access__message is-error">
-                    {group.error || refreshErrors.get(serverId)}
-                  </div>
-                ) : visibleTools.length ? (
-                  <div className="mcp-access__tools">
-                    {visibleTools.map((tool) => (
-                      <label key={tool.name}>
-                        <input
-                          type="checkbox"
-                          checked={selected.has(tool.name)}
-                          onChange={(event) => toggleTool(group, tool.name, event.target.checked)}
-                        />
-                        <span>
-                          <strong>{readable(tool.name)}</strong>
-                          <small>{tool.description || 'No description available.'}</small>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="mcp-access__message">Test this server to discover its tools.</div>
-                )}
-              </section>
-            )
-          })}
-        </div>
-      )}
+                ))
+              ) : (
+                <div className="mcp-access__message">
+                  {normalizedToolQuery
+                    ? 'No tools match this search.'
+                    : 'Refresh this MCP server to discover its tools.'}
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="empty-state mcp-access__detail-empty">
+            Select an MCP server to configure its tools.
+          </div>
+        )}
+      </section>
     </div>
   )
 }

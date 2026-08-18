@@ -1,4 +1,5 @@
 import type { ToolInfo } from '../../api/types'
+import { McpIcon } from '../../components/icons/McpIcon'
 import { readable } from './helpers'
 
 export function ToolChoices({
@@ -39,7 +40,12 @@ export function ToolChoices({
             <span>
               <strong>{tool.label || readable(tool.name)}</strong>
               <small>{tool.description || 'No description available.'}</small>
-              {tool.server_name && <em className="tool-option__source">{tool.server_name}</em>}
+              {tool.server_name && (
+                <span className="tool-option__source">
+                  <McpIcon size={10} />
+                  <span>{tool.server_name}</span>
+                </span>
+              )}
             </span>
           </>
         )

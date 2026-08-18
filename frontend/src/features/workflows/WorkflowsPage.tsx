@@ -42,8 +42,8 @@ import {
   useWorkflowNodes,
   useWorkflows,
 } from '../../hooks/useStudioData'
-import { agentNodeTypes, type FlowData } from '../overview/AgentFlowNode'
-import { ConnectAgentModal } from '../overview/ConnectAgentModal'
+import { agentNodeTypes, createLayeredFlowLayout, type FlowData } from '../overview/AgentFlowNode'
+import { ConnectAgentModal, WorkflowPreviewModal } from '../overview/ConnectAgentModal'
 import { PageHeader } from '../studio/PageHeader'
 
 type Tab = 'overview' | 'details'
@@ -87,7 +87,12 @@ function WorkflowForm({
     >
       <div className="form-grid">
         <Field label="Name" full>
-          <input value={name} onChange={(event) => setName(event.target.value)} required autoFocus={!workflow} />
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            required
+            autoFocus={!workflow}
+          />
         </Field>
         <Field label="Description" full>
           <AutoTextarea
@@ -104,7 +109,10 @@ function WorkflowForm({
               onClick={() => setMode('agentic')}
             >
               <GitBranch size={18} />
-              <span><strong>Agentic</strong><small>Branching workflow design</small></span>
+              <span>
+                <strong>Agentic</strong>
+                <small>Branching workflow design</small>
+              </span>
             </button>
             <button
               type="button"
@@ -112,22 +120,42 @@ function WorkflowForm({
               onClick={() => setMode('direct')}
             >
               <ListChecks size={18} />
-              <span><strong>Direct</strong><small>Sequential workflow design</small></span>
+              <span>
+                <strong>Direct</strong>
+                <small>Sequential workflow design</small>
+              </span>
             </button>
           </div>
         </Field>
         {mode === 'agentic' && (
           <>
-            <Field label="Orchestrator model" hint="Any saved OpenAI-compatible model can orchestrate this workflow." full>
-              <select value={modelId || ''} onChange={(event) => setModelId(Number(event.target.value))}>
+            <Field
+              label="Orchestrator model"
+              hint="Any saved OpenAI-compatible model can orchestrate this workflow."
+              full
+            >
+              <select
+                value={modelId || ''}
+                onChange={(event) => setModelId(Number(event.target.value))}
+              >
                 <option value="">Choose a model…</option>
                 {models.map((model) => (
-                  <option value={model.id} key={model.id}>{model.name} — {model.model}</option>
+                  <option value={model.id} key={model.id}>
+                    {model.name} — {model.model}
+                  </option>
                 ))}
               </select>
             </Field>
-            <Field label="Orchestrator system prompt" hint="Explain how the orchestrator should delegate to the connected nodes." full>
-              <AutoTextarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={8} />
+            <Field
+              label="Orchestrator system prompt"
+              hint="Explain how the orchestrator should delegate to the connected nodes."
+              full
+            >
+              <AutoTextarea
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                rows={8}
+              />
             </Field>
           </>
         )}
@@ -135,17 +163,6 @@ function WorkflowForm({
       <Feedback message={error} />
     </form>
   )
-}
-
-function edge(source: string, target: string, color: string): Edge {
-  return {
-    id: `${source}-${target}`,
-    source,
-    target,
-    animated: true,
-    markerEnd: { type: MarkerType.ArrowClosed, color, width: 13, height: 13 },
-    style: { stroke: color, strokeWidth: 1.6, strokeDasharray: '6 7' },
-  }
 }
 
 function AddNodeEdge({
@@ -231,7 +248,9 @@ function OrchestratorWizard({
       onClose={onClose}
       footer={
         <>
-          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
           <Button
             variant="primary"
             icon={<Save size={14} />}
@@ -245,19 +264,41 @@ function OrchestratorWizard({
       }
     >
       <div className="form-grid orchestrator-wizard">
-        <Field label="Model" hint="Any saved OpenAI-compatible model can orchestrate this workflow." full>
-          <select value={modelId || ''} onChange={(event) => setModelId(Number(event.target.value))} autoFocus>
+        <Field
+          label="Model"
+          hint="Any saved OpenAI-compatible model can orchestrate this workflow."
+          full
+        >
+          <select
+            value={modelId || ''}
+            onChange={(event) => setModelId(Number(event.target.value))}
+            autoFocus
+          >
             <option value="">Choose a model…</option>
             {models.map((model) => (
-              <option value={model.id} key={model.id}>{model.name} — {model.model}</option>
+              <option value={model.id} key={model.id}>
+                {model.name} — {model.model}
+              </option>
             ))}
           </select>
         </Field>
-        <Field label="System prompt" hint="Explain how the orchestrator should delegate to the connected nodes." full>
-          <AutoTextarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={8} />
+        <Field
+          label="System prompt"
+          hint="Explain how the orchestrator should delegate to the connected nodes."
+          full
+        >
+          <AutoTextarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={8}
+          />
         </Field>
       </div>
-      <Feedback message={error || (!models.length ? 'Create a model before configuring the orchestrator.' : '')} />
+      <Feedback
+        message={
+          error || (!models.length ? 'Create a model before configuring the orchestrator.' : '')
+        }
+      />
     </Modal>
   )
 }
@@ -273,50 +314,67 @@ function WorkflowOverview({ workflow, workflows }: { workflow: Workflow; workflo
   const [parent, setParent] = useState<Parent | null>(null)
   const [pending, setPending] = useState<PendingNode | null>(null)
   const [orchestratorOpen, setOrchestratorOpen] = useState(false)
+  const [previewWorkflow, setPreviewWorkflow] = useState<Workflow | null>(null)
 
-  const refresh = () => Promise.all([
-    client.invalidateQueries({ queryKey: keys.agents }),
-    client.invalidateQueries({ queryKey: keys.agentNodes }),
-    client.invalidateQueries({ queryKey: keys.workflowNodes }),
-    client.invalidateQueries({ queryKey: keys.workflows }),
-  ])
+  const refresh = () =>
+    Promise.all([
+      client.invalidateQueries({ queryKey: keys.agents }),
+      client.invalidateQueries({ queryKey: keys.agentNodes }),
+      client.invalidateQueries({ queryKey: keys.workflowNodes }),
+      client.invalidateQueries({ queryKey: keys.workflows }),
+    ])
   const createAgent = useMutation({
-    mutationFn: (body: object) => api.agents.create({
-      ...body,
-      workflow_id: workflow.id,
-      parent_node_id: workflow.execution_mode === 'direct' ? null : parent?.nodeId ?? null,
-      ...(workflow.execution_mode === 'direct' && parent?.position !== undefined
-        ? { position: parent.position }
-        : {}),
-    }),
-    onSuccess: async () => { await refresh(); setParent(null) },
+    mutationFn: (body: object) =>
+      api.agents.create({
+        ...body,
+        workflow_id: workflow.id,
+        parent_node_id: workflow.execution_mode === 'direct' ? null : (parent?.nodeId ?? null),
+        ...(workflow.execution_mode === 'direct' && parent?.position !== undefined
+          ? { position: parent.position }
+          : {}),
+      }),
+    onSuccess: async () => {
+      await refresh()
+      setParent(null)
+    },
   })
   const connectAgent = useMutation({
-    mutationFn: (subagentId: number) => api.agentNodes.create({
-      subagent_id: subagentId,
-      workflow_id: workflow.id,
-      parent_node_id: workflow.execution_mode === 'direct' ? null : parent?.nodeId ?? null,
-      ...(workflow.execution_mode === 'direct' && parent?.position !== undefined
-        ? { position: parent.position }
-        : {}),
-    }),
-    onSuccess: async () => { await refresh(); setParent(null) },
+    mutationFn: (subagentId: number) =>
+      api.agentNodes.create({
+        subagent_id: subagentId,
+        workflow_id: workflow.id,
+        parent_node_id: workflow.execution_mode === 'direct' ? null : (parent?.nodeId ?? null),
+        ...(workflow.execution_mode === 'direct' && parent?.position !== undefined
+          ? { position: parent.position }
+          : {}),
+      }),
+    onSuccess: async () => {
+      await refresh()
+      setParent(null)
+    },
   })
   const connectWorkflow = useMutation({
-    mutationFn: (childWorkflowId: number) => api.workflowNodes.create({
-      child_workflow_id: childWorkflowId,
-      owner_workflow_id: workflow.id,
-      parent_node_id: workflow.execution_mode === 'direct' ? null : parent?.nodeId ?? null,
-      ...(workflow.execution_mode === 'direct' && parent?.position !== undefined
-        ? { position: parent.position }
-        : {}),
-    }),
-    onSuccess: async () => { await refresh(); setParent(null) },
+    mutationFn: (childWorkflowId: number) =>
+      api.workflowNodes.create({
+        child_workflow_id: childWorkflowId,
+        owner_workflow_id: workflow.id,
+        parent_node_id: workflow.execution_mode === 'direct' ? null : (parent?.nodeId ?? null),
+        ...(workflow.execution_mode === 'direct' && parent?.position !== undefined
+          ? { position: parent.position }
+          : {}),
+      }),
+    onSuccess: async () => {
+      await refresh()
+      setParent(null)
+    },
   })
   const removeNode = useMutation({
     mutationFn: (item: PendingNode) =>
       item.kind === 'subagent' ? api.agentNodes.remove(item.id) : api.workflowNodes.remove(item.id),
-    onSuccess: async () => { await refresh(); setPending(null) },
+    onSuccess: async () => {
+      await refresh()
+      setPending(null)
+    },
   })
   const saveOrchestrator = useMutation({
     mutationFn: ({ modelId, prompt }: { modelId: number; prompt: string }) =>
@@ -344,9 +402,10 @@ function WorkflowOverview({ workflow, workflows }: { workflow: Workflow; workflo
     const nodes: Node<FlowData>[] = []
     const edges: Edge[] = []
     const direct = workflow.execution_mode === 'direct'
-    const row = [...subagents.map((item) => ({ kind: 'subagent' as const, item })),
-      ...nested.map((item) => ({ kind: 'workflow' as const, item }))]
-      .sort((a, b) => a.item.position - b.item.position || a.item.id - b.item.id)
+    const row = [
+      ...subagents.map((item) => ({ kind: 'subagent' as const, item })),
+      ...nested.map((item) => ({ kind: 'workflow' as const, item })),
+    ].sort((a, b) => a.item.position - b.item.position || a.item.id - b.item.id)
 
     if (direct) {
       nodes.push({
@@ -366,16 +425,22 @@ function WorkflowOverview({ workflow, workflows }: { workflow: Workflow; workflo
         nodes.push({
           id,
           type: 'agent',
-          position: { x: 250 + index * 215, y: 190 },
+          position: { x: 250 + index * 230, y: 190 },
           data: {
             label: item.name,
             kind: isSubagent ? 'dynamic' : 'workflow',
             flowDirection: 'horizontal',
-            model: isSubagent ? item.model || item.model_name : item.execution_mode,
-            icon: isSubagent && item.has_icon ? `/api/subagents/${item.subagent_id}/icon` : undefined,
-            onOpen: () => isSubagent
-              ? navigate(`/admin/agents?open=${item.subagent_id}`)
-              : navigate(`/admin/workflows?open=${item.child_workflow_id}&tab=overview`),
+            ...(isSubagent
+              ? { model: item.model || item.model_name }
+              : { workflowMode: item.execution_mode }),
+            icon:
+              isSubagent && item.has_icon ? `/api/subagents/${item.subagent_id}/icon` : undefined,
+            onOpen: () =>
+              isSubagent
+                ? navigate(`/admin/agents?open=${item.subagent_id}`)
+                : setPreviewWorkflow(
+                    workflows.find((candidate) => candidate.id === item.child_workflow_id) || null,
+                  ),
             onDelete: () => setPending({ kind, id: item.id, name: item.name }),
           },
         })
@@ -411,10 +476,27 @@ function WorkflowOverview({ workflow, workflows }: { workflow: Workflow; workflo
       return { nodes, edges }
     }
 
+    const occurrences = subagents
+      .map((item) => ({
+        item,
+        depth: Math.max(0, (item.depth || 1) - 1),
+      }))
+      .sort(
+        (left, right) => left.depth - right.depth || left.item.name.localeCompare(right.item.name),
+      )
+    const workflowDepths = nested.map((item) => {
+      const parentNode = subagents.find((node) => node.node_id === item.parent_node_id)
+      return parentNode ? Math.max(0, parentNode.depth || 1) : 0
+    })
+    const { center, nextPosition } = createLayeredFlowLayout([
+      ...occurrences.map(({ depth }) => depth),
+      ...workflowDepths,
+    ])
+
     nodes.push({
       id: 'orchestrator',
       type: 'agent',
-      position: { x: 380, y: 65 },
+      position: { x: center - 105, y: 145 },
       data: {
         label: 'Orchestrator',
         kind: 'orchestrator',
@@ -423,17 +505,14 @@ function WorkflowOverview({ workflow, workflows }: { workflow: Workflow; workflo
         onAdd: () => setParent({ nodeId: null, name: workflow.name }),
       },
     })
-    const byDepth = new Map<number, number>()
-    subagents.forEach((item) => {
-      const depth = Math.max(0, (item.depth || 1) - 1)
-      const index = byDepth.get(depth) || 0
-      byDepth.set(depth, index + 1)
+    occurrences.forEach(({ item, depth }) => {
       const id = `subagent-${item.id}`
-      const parentId = item.parent_node_id === null ? 'orchestrator' : `subagent-${item.parent_node_id}`
+      const parentId =
+        item.parent_node_id === null ? 'orchestrator' : `subagent-${item.parent_node_id}`
       nodes.push({
         id,
         type: 'agent',
-        position: { x: 150 + index * 210, y: 245 + depth * 145 },
+        position: nextPosition(depth),
         data: {
           label: item.name,
           kind: 'dynamic',
@@ -441,35 +520,56 @@ function WorkflowOverview({ workflow, workflows }: { workflow: Workflow; workflo
           model: item.model || item.model_name,
           icon: item.has_icon ? `/api/subagents/${item.subagent_id}/icon` : undefined,
           onOpen: () => navigate(`/admin/agents?open=${item.subagent_id}`),
-          onAdd: item.depth < 4 ? () => setParent({ nodeId: item.id, name: item.path_label }) : undefined,
+          onAdd:
+            item.depth < 4
+              ? () => setParent({ nodeId: item.id, name: item.path_label })
+              : undefined,
           onDelete: () => setPending({ kind: 'subagent', id: item.id, name: item.name }),
         },
       })
-      edges.push(edge(parentId, id, '#59c98e'))
+      edges.push({
+        id: `${parentId}-${id}`,
+        source: parentId,
+        target: id,
+        animated: Boolean(item.enabled),
+        style: { stroke: item.enabled ? '#79b8ff' : '#ff7d79' },
+      })
     })
     nested.forEach((item, index) => {
+      const depth = workflowDepths[index]
       const id = `workflow-${item.id}`
-      const parentId = item.parent_node_id === null ? 'orchestrator' : `subagent-${item.parent_node_id}`
+      const parentId =
+        item.parent_node_id === null ? 'orchestrator' : `subagent-${item.parent_node_id}`
       nodes.push({
         id,
         type: 'agent',
-        position: { x: 150 + (subagents.length + index) * 210, y: 245 },
+        position: nextPosition(depth),
         data: {
           label: item.name,
           kind: 'workflow',
-          model: item.execution_mode,
-          onOpen: () => navigate(`/admin/workflows?open=${item.child_workflow_id}&tab=overview`),
+          workflowMode: item.execution_mode,
+          onOpen: () =>
+            setPreviewWorkflow(
+              workflows.find((candidate) => candidate.id === item.child_workflow_id) || null,
+            ),
           onDelete: () => setPending({ kind: 'workflow', id: item.id, name: item.name }),
         },
       })
-      edges.push(edge(parentId, id, '#59c98e'))
+      edges.push({
+        id: `${parentId}-${id}`,
+        source: parentId,
+        target: id,
+        animated: true,
+        style: { stroke: '#f472b6' },
+      })
     })
     return { nodes, edges }
-  }, [agentNodes.data, navigate, workflow, workflowNodes.data])
+  }, [agentNodes.data, navigate, workflow, workflowNodes.data, workflows])
 
   if (agentNodes.isLoading || workflowNodes.isLoading) return <Loading />
-  const modalError = [createAgent.error, connectAgent.error, connectWorkflow.error]
-    .find((value) => value instanceof Error)
+  const modalError = [createAgent.error, connectAgent.error, connectWorkflow.error].find(
+    (value) => value instanceof Error,
+  )
   return (
     <>
       <section className="card flow-card workflow-flow-card">
@@ -517,6 +617,7 @@ function WorkflowOverview({ workflow, workflows }: { workflow: Workflow; workflo
         onConnectWorkflow={(id) => connectWorkflow.mutate(id)}
         onClose={() => setParent(null)}
       />
+      <WorkflowPreviewModal workflow={previewWorkflow} onClose={() => setPreviewWorkflow(null)} />
       <ConfirmDialog
         open={Boolean(pending)}
         title="Disconnect node?"
@@ -566,13 +667,21 @@ export function WorkflowsPage() {
 
   const visible = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
-    return (workflows.data || []).filter((item) =>
-      !normalized || item.name.toLocaleLowerCase().includes(normalized) || item.description.toLocaleLowerCase().includes(normalized),
+    return (workflows.data || []).filter(
+      (item) =>
+        !normalized ||
+        item.name.toLocaleLowerCase().includes(normalized) ||
+        item.description.toLocaleLowerCase().includes(normalized),
     )
   }, [query, workflows.data])
 
   if (workflows.isLoading || models.isLoading) {
-    return <><PageHeader title="Workflows" description="Design reusable agent workflows" /><Loading /></>
+    return (
+      <>
+        <PageHeader title="Workflows" description="Design reusable agent workflows" />
+        <Loading />
+      </>
+    )
   }
   if (creating) {
     return (
@@ -580,9 +689,35 @@ export function WorkflowsPage() {
         <PageHeader
           title="Create workflow"
           description="Save a reusable agentic or direct workflow"
-          actions={<><Button icon={<ChevronLeft size={14} />} onClick={() => setParams({})}>Cancel</Button><Button form="workflow-form" type="submit" variant="primary" icon={<Save size={14} />} busy={create.isPending}>Create</Button></>}
+          actions={
+            <>
+              <Button icon={<ChevronLeft size={14} />} onClick={() => setParams({})}>
+                Cancel
+              </Button>
+              <Button
+                form="workflow-form"
+                type="submit"
+                variant="primary"
+                icon={<Save size={14} />}
+                busy={create.isPending}
+              >
+                Create
+              </Button>
+            </>
+          }
         />
-        <div className="page-content"><section className="card resource-workspace resource-workspace--form"><div className="card__body"><WorkflowForm models={models.data || []} busy={create.isPending} error={create.error instanceof Error ? create.error.message : ''} onSubmit={(body) => create.mutate(body)} /></div></section></div>
+        <div className="page-content">
+          <section className="card resource-workspace resource-workspace--form">
+            <div className="card__body">
+              <WorkflowForm
+                models={models.data || []}
+                busy={create.isPending}
+                error={create.error instanceof Error ? create.error.message : ''}
+                onSubmit={(body) => create.mutate(body)}
+              />
+            </div>
+          </section>
+        </div>
       </>
     )
   }
@@ -592,17 +727,62 @@ export function WorkflowsPage() {
         <PageHeader
           title={selected.name}
           description={selected.description || 'Reusable workflow'}
-          actions={<><Button icon={<ChevronLeft size={14} />} onClick={() => setParams({})}>All workflows</Button>{tab === 'details' && <Button form="workflow-form" type="submit" variant="primary" icon={<Save size={14} />} busy={update.isPending}>Save</Button>}<Button variant="danger" icon={<Trash2 size={14} />} onClick={() => setPendingDelete(selected)}>Delete</Button></>}
+          actions={
+            <>
+              <Button icon={<ChevronLeft size={14} />} onClick={() => setParams({})}>
+                All workflows
+              </Button>
+              {tab === 'details' && (
+                <Button
+                  form="workflow-form"
+                  type="submit"
+                  variant="primary"
+                  icon={<Save size={14} />}
+                  busy={update.isPending}
+                >
+                  Save
+                </Button>
+              )}
+              <Button
+                variant="danger"
+                icon={<Trash2 size={14} />}
+                onClick={() => setPendingDelete(selected)}
+              >
+                Delete
+              </Button>
+            </>
+          }
         />
         <div className="workflow-tabs">
-          <button className={tab === 'overview' ? 'is-active' : ''} onClick={() => setParams({ open: String(selected.id), tab: 'overview' })}>Overview</button>
-          <button className={tab === 'details' ? 'is-active' : ''} onClick={() => setParams({ open: String(selected.id), tab: 'details' })}>Details</button>
+          <button
+            className={tab === 'overview' ? 'is-active' : ''}
+            onClick={() => setParams({ open: String(selected.id), tab: 'overview' })}
+          >
+            Overview
+          </button>
+          <button
+            className={tab === 'details' ? 'is-active' : ''}
+            onClick={() => setParams({ open: String(selected.id), tab: 'details' })}
+          >
+            Details
+          </button>
         </div>
         <div className="page-content">
           {tab === 'overview' ? (
             <WorkflowOverview workflow={selected} workflows={workflows.data || []} />
           ) : (
-            <section className="card resource-workspace resource-workspace--form"><div className="card__body"><WorkflowForm key={selected.id} workflow={selected} models={models.data || []} busy={update.isPending} error={update.error instanceof Error ? update.error.message : ''} onSubmit={(body) => update.mutate(body)} /></div></section>
+            <section className="card resource-workspace resource-workspace--form">
+              <div className="card__body">
+                <WorkflowForm
+                  key={selected.id}
+                  workflow={selected}
+                  models={models.data || []}
+                  busy={update.isPending}
+                  error={update.error instanceof Error ? update.error.message : ''}
+                  onSubmit={(body) => update.mutate(body)}
+                />
+              </div>
+            </section>
           )}
         </div>
         <ConfirmDialog
@@ -621,20 +801,71 @@ export function WorkflowsPage() {
   }
   return (
     <>
-      <PageHeader title="Workflows" description="Design and reuse agentic or direct workflows" actions={<Button variant="primary" icon={<Plus size={14} />} onClick={() => setParams({ new: '1' })}>New workflow</Button>} />
-      <div className="page-content"><div className="resource-browser">
-        <label className="resource-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search workflows…" /></label>
-        <div className="resource-list">
-          {visible.map((workflow) => (
-            <button className="resource-row workflow-card" key={workflow.id} onClick={() => setParams({ open: String(workflow.id), tab: 'overview' })}>
-              <span className="resource-row__identity"><span className="workflow-card__icon"><WorkflowIcon size={19} /></span><span><strong>{workflow.name}</strong><small>{workflow.description || 'No description'}</small></span></span>
-              <span className="workflow-card__mode">{workflow.execution_mode}</span>
-              <span className="resource-row__facts"><span>{workflow.node_count} node{workflow.node_count === 1 ? '' : 's'}</span><span>{workflow.model_name || 'No model selected'}</span></span>
-            </button>
-          ))}
+      <PageHeader
+        title="Workflows"
+        description="Design and reuse agentic or direct workflows"
+        actions={
+          <Button
+            variant="primary"
+            icon={<Plus size={14} />}
+            onClick={() => setParams({ new: '1' })}
+          >
+            New workflow
+          </Button>
+        }
+      />
+      <div className="page-content">
+        <div className="resource-browser">
+          <label className="resource-search">
+            <Search size={14} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search workflows…"
+            />
+          </label>
+          <div className="resource-list">
+            {visible.map((workflow) => (
+              <button
+                className="resource-row workflow-card"
+                key={workflow.id}
+                onClick={() => setParams({ open: String(workflow.id), tab: 'overview' })}
+              >
+                <span className="resource-row__identity">
+                  <span className="workflow-card__icon">
+                    <WorkflowIcon size={19} />
+                  </span>
+                  <span>
+                    <strong>{workflow.name}</strong>
+                    <small>{workflow.description || 'No description'}</small>
+                  </span>
+                </span>
+                <span className="workflow-card__mode">
+                  {workflow.execution_mode === 'agentic' ? (
+                    <GitBranch size={11} />
+                  ) : (
+                    <ListChecks size={11} />
+                  )}
+                  {workflow.execution_mode}
+                </span>
+                <span className="resource-row__facts">
+                  <span>
+                    {workflow.node_count} node{workflow.node_count === 1 ? '' : 's'}
+                  </span>
+                  <span>{workflow.model_name || 'No model selected'}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          {!visible.length && (
+            <div className="empty-state resource-search-empty">
+              {query
+                ? 'No matching workflows.'
+                : 'No workflows yet. Create your first reusable workflow.'}
+            </div>
+          )}
         </div>
-        {!visible.length && <div className="empty-state resource-search-empty">{query ? 'No matching workflows.' : 'No workflows yet. Create your first reusable workflow.'}</div>}
-      </div></div>
+      </div>
     </>
   )
 }

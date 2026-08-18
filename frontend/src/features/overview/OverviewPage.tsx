@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api/client'
-import type { BuiltinAgent, SubagentPlacement } from '../../api/types'
+import type { BuiltinAgent, SubagentPlacement, Workflow } from '../../api/types'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Loading } from '../../components/ui/Loading'
 import {
@@ -26,9 +26,9 @@ import {
 } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 import { AgentConfigDrawer } from './AgentConfigDrawer'
-import { agentNodeTypes, type FlowData } from './AgentFlowNode'
+import { agentNodeTypes, createLayeredFlowLayout, type FlowData } from './AgentFlowNode'
 import { AgentNodeDrawer } from './AgentNodeDrawer'
-import { ConnectAgentModal } from './ConnectAgentModal'
+import { ConnectAgentModal, WorkflowPreviewModal } from './ConnectAgentModal'
 
 type ConnectionParent = { nodeId: number | null; name: string }
 type PendingDelete = { nodeId: number; name: string }
@@ -65,8 +65,10 @@ export function OverviewPage() {
   const [connectionParent, setConnectionParent] = useState<ConnectionParent | null>(null)
   const [openNodeId, setOpenNodeId] = useState<number | null>(null)
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null)
-  const [pendingWorkflowDelete, setPendingWorkflowDelete] =
-    useState<PendingWorkflowDelete | null>(null)
+  const [pendingWorkflowDelete, setPendingWorkflowDelete] = useState<PendingWorkflowDelete | null>(
+    null,
+  )
+  const [previewWorkflow, setPreviewWorkflow] = useState<Workflow | null>(null)
 
   const save = useMutation({
     mutationFn: async () => {
@@ -169,8 +171,6 @@ export function OverviewPage() {
     const custom = agentNodes.data || []
     const reusableWorkflows = workflowNodes.data || []
     if (!info) return { nodes: [], edges: [] }
-    const nodeWidth = 158
-    const nodeGap = 14
     type Occurrence = {
       item: SubagentPlacement
       nodeId: number
@@ -192,19 +192,15 @@ export function OverviewPage() {
       .sort(
         (left, right) => left.depth - right.depth || left.item.name.localeCompare(right.item.name),
       )
-    const layerCount = new Map<number, number>([[0, info.builtins.length]])
-    occurrences.forEach(({ depth }) => {
-      layerCount.set(depth, (layerCount.get(depth) || 0) + 1)
-    })
-    reusableWorkflows.forEach((item) => {
+    const workflowDepths = reusableWorkflows.map((item) => {
       const parent = custom.find((node) => node.node_id === item.parent_node_id)
-      const depth = parent ? Math.max(0, parent.depth || 1) : 0
-      layerCount.set(depth, (layerCount.get(depth) || 0) + 1)
+      return parent ? Math.max(0, parent.depth || 1) : 0
     })
-    const widestLayer = Math.max(1, ...layerCount.values())
-    const rowWidth = widestLayer * nodeWidth + Math.max(0, widestLayer - 1) * nodeGap
-    const width = Math.max(900, rowWidth + 80)
-    const center = width / 2
+    const { center, nextPosition } = createLayeredFlowLayout([
+      ...info.builtins.map(() => 0),
+      ...occurrences.map(({ depth }) => depth),
+      ...workflowDepths,
+    ])
     const nodes: Node<FlowData>[] = [
       {
         id: 'supervisor',
@@ -229,17 +225,6 @@ export function OverviewPage() {
       },
     ]
     const edges: Edge[] = []
-    const layerOffsets = new Map<number, number>()
-    const nextPosition = (depth: number) => {
-      const count = layerCount.get(depth) || 1
-      const layerWidth = count * nodeWidth + Math.max(0, count - 1) * nodeGap
-      const index = layerOffsets.get(depth) || 0
-      layerOffsets.set(depth, index + 1)
-      return {
-        x: (width - layerWidth) / 2 + index * (nodeWidth + nodeGap),
-        y: 345 + depth * 135,
-      }
-    }
     if (telegram.data?.enabled) {
       nodes.push({
         id: 'telegram',
@@ -339,9 +324,8 @@ export function OverviewPage() {
       const parent = custom.find((node) => node.node_id === item.parent_node_id)
       const depth = parent ? Math.max(0, parent.depth || 1) : 0
       const id = `workflow-${item.id}`
-      const parentId = item.parent_node_id === null
-        ? 'supervisor'
-        : `dynamic-agent-${item.parent_node_id}`
+      const parentId =
+        item.parent_node_id === null ? 'supervisor' : `dynamic-agent-${item.parent_node_id}`
       nodes.push({
         id,
         type: 'agent',
@@ -349,8 +333,16 @@ export function OverviewPage() {
         data: {
           label: item.name,
           kind: 'workflow',
-          model: item.execution_mode,
-          onOpen: () => navigate(`/admin/workflows?open=${item.child_workflow_id}&tab=overview`),
+          workflowMode: item.execution_mode,
+          onOpen: () => {
+            setConnectionParent(null)
+            setOpenNodeId(null)
+            setSelected(null)
+            setSupervisorOpen(false)
+            setPreviewWorkflow(
+              workflows.data?.find((workflow) => workflow.id === item.child_workflow_id) || null,
+            )
+          },
           onDelete: () => {
             deleteWorkflowNode.reset()
             setPendingWorkflowDelete({ nodeId: item.id, name: item.name })
@@ -362,7 +354,7 @@ export function OverviewPage() {
         source: parentId,
         target: id,
         animated: true,
-        style: { stroke: '#a78bfa' },
+        style: { stroke: '#f472b6' },
       })
     })
     return { nodes, edges }
@@ -370,6 +362,7 @@ export function OverviewPage() {
     overview.data,
     agentNodes.data,
     workflowNodes.data,
+    workflows.data,
     telegram.data?.enabled,
     whatsapp.data?.enabled,
     navigate,
@@ -378,8 +371,11 @@ export function OverviewPage() {
   ])
 
   if (
-    overview.isLoading || agents.isLoading || agentNodes.isLoading ||
-    workflows.isLoading || workflowNodes.isLoading
+    overview.isLoading ||
+    agents.isLoading ||
+    agentNodes.isLoading ||
+    workflows.isLoading ||
+    workflowNodes.isLoading
   )
     return (
       <>
@@ -446,6 +442,7 @@ export function OverviewPage() {
         onCreate={(body) => createAgent.mutate(body)}
         onClose={() => setConnectionParent(null)}
       />
+      <WorkflowPreviewModal workflow={previewWorkflow} onClose={() => setPreviewWorkflow(null)} />
       <ConfirmDialog
         open={Boolean(pendingDelete)}
         title="Disconnect subagent?"
@@ -469,7 +466,9 @@ export function OverviewPage() {
         danger
         busy={deleteWorkflowNode.isPending}
         error={deleteWorkflowNode.error instanceof Error ? deleteWorkflowNode.error.message : ''}
-        onConfirm={() => pendingWorkflowDelete && deleteWorkflowNode.mutate(pendingWorkflowDelete.nodeId)}
+        onConfirm={() =>
+          pendingWorkflowDelete && deleteWorkflowNode.mutate(pendingWorkflowDelete.nodeId)
+        }
         onCancel={() => {
           if (deleteWorkflowNode.isPending) return
           deleteWorkflowNode.reset()

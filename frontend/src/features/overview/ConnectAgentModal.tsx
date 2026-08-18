@@ -1,15 +1,15 @@
 import {
-  Bot,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Copy,
-  Eye,
-  Plus,
-  Search,
-  Workflow as WorkflowIcon,
-} from 'lucide-react'
+  Background,
+  BackgroundVariant,
+  Controls,
+  MarkerType,
+  ReactFlow,
+  type Edge,
+  type Node,
+} from '@xyflow/react'
+import { Check, ChevronLeft, ChevronRight, Copy, Eye, Plus, Search } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import type {
   McpServer,
   ModelRecord,
@@ -23,6 +23,7 @@ import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
 import { Modal } from '../../components/ui/Modal'
+import { useAgentNodes, useWorkflowNodes } from '../../hooks/useStudioData'
 import { readable, stringList, toDataUrl } from '../resources/helpers'
 import {
   expandLegacyToolRules,
@@ -31,6 +32,7 @@ import {
   useMcpToolCatalog,
 } from '../resources/McpToolAccess'
 import { ToolChoices } from '../resources/ToolChoices'
+import { agentNodeTypes, type FlowData } from './AgentFlowNode'
 
 type WizardStep = 1 | 2 | 3
 type ConfirmationMode = 'all' | 'selected' | 'none'
@@ -129,6 +131,43 @@ function AgentListItem({
   )
 }
 
+function WorkflowListItem({
+  workflow,
+  busy,
+  onSelect,
+  onDetails,
+}: {
+  workflow: Workflow
+  busy?: boolean
+  onSelect: () => void
+  onDetails: () => void
+}) {
+  return (
+    <div className="subagent-start__agent subagent-start__agent--workflow">
+      <button
+        className="subagent-start__agent-select"
+        type="button"
+        disabled={busy}
+        onClick={onSelect}
+      >
+        <span>
+          <strong>{workflow.name}</strong>
+          <small>{workflow.description || `${workflow.execution_mode} workflow`}</small>
+        </span>
+      </button>
+      <button
+        className="subagent-start__agent-details"
+        type="button"
+        onClick={onDetails}
+        aria-label={`View ${workflow.name} details`}
+        title="View details"
+      >
+        <Eye size={14} />
+      </button>
+    </div>
+  )
+}
+
 function PreviewValue({
   label,
   value,
@@ -204,8 +243,9 @@ function SubagentPreview({ agent }: { agent: Subagent }) {
           <dt>MCP sources</dt>
           <dd>
             {chips(
-              sources.map((source) =>
-                `${source.mcp_server_name || `Server ${source.mcp_server_id}`} · ${source.enabled_tools === null ? 'All tools' : `${source.enabled_tools.length} tools`}`,
+              sources.map(
+                (source) =>
+                  `${source.mcp_server_name || `Server ${source.mcp_server_id}`} · ${source.enabled_tools === null ? 'All tools' : `${source.enabled_tools.length} tools`}`,
               ),
               'No external tools',
             )}
@@ -221,6 +261,246 @@ function SubagentPreview({ agent }: { agent: Subagent }) {
         </div>
       </dl>
     </div>
+  )
+}
+
+function previewEdge(source: string, target: string): Edge {
+  return {
+    id: `${source}-${target}`,
+    source,
+    target,
+    animated: true,
+    markerEnd: { type: MarkerType.ArrowClosed, color: '#59c98e', width: 13, height: 13 },
+    style: { stroke: '#59c98e', strokeWidth: 1.6, strokeDasharray: '6 7' },
+  }
+}
+
+function WorkflowPreviewOverview({ workflow }: { workflow: Workflow }) {
+  const agentNodes = useAgentNodes(workflow.id)
+  const workflowNodes = useWorkflowNodes(workflow.id)
+  const graph = useMemo(() => {
+    const subagents = agentNodes.data || []
+    const nested = workflowNodes.data || []
+    const nodes: Node<FlowData>[] = []
+    const edges: Edge[] = []
+
+    if (workflow.execution_mode === 'direct') {
+      const row = [
+        ...subagents.map((item) => ({ kind: 'subagent' as const, item })),
+        ...nested.map((item) => ({ kind: 'workflow' as const, item })),
+      ].sort((a, b) => a.item.position - b.item.position || a.item.id - b.item.id)
+      nodes.push({
+        id: 'start',
+        type: 'agent',
+        position: { x: 20, y: 150 },
+        data: { label: 'Start', kind: 'workflow-start', flowDirection: 'horizontal' },
+      })
+      let previous = 'start'
+      row.forEach(({ kind, item }, index) => {
+        const id = `${kind}-${item.id}`
+        const isSubagent = kind === 'subagent'
+        nodes.push({
+          id,
+          type: 'agent',
+          position: { x: 240 + index * 230, y: 150 },
+          data: {
+            label: item.name,
+            kind: isSubagent ? 'dynamic' : 'workflow',
+            flowDirection: 'horizontal',
+            ...(isSubagent
+              ? { model: item.model || item.model_name }
+              : { workflowMode: item.execution_mode }),
+            icon:
+              isSubagent && item.has_icon ? `/api/subagents/${item.subagent_id}/icon` : undefined,
+          },
+        })
+        edges.push(previewEdge(previous, id))
+        previous = id
+      })
+      nodes.push({
+        id: 'end',
+        type: 'agent',
+        position: { x: row.length ? 250 + row.length * 230 : 350, y: 150 },
+        data: { label: 'End', kind: 'workflow-end', flowDirection: 'horizontal' },
+      })
+      edges.push(previewEdge(previous, 'end'))
+      return { nodes, edges }
+    }
+
+    nodes.push({
+      id: 'orchestrator',
+      type: 'agent',
+      position: { x: 350, y: 30 },
+      data: {
+        label: 'Orchestrator',
+        kind: 'orchestrator',
+        model: workflow.model || workflow.model_name || 'No model selected',
+      },
+    })
+    const byDepth = new Map<number, number>()
+    subagents.forEach((item) => {
+      const depth = Math.max(0, (item.depth || 1) - 1)
+      const index = byDepth.get(depth) || 0
+      byDepth.set(depth, index + 1)
+      const id = `subagent-${item.id}`
+      const parentId =
+        item.parent_node_id === null ? 'orchestrator' : `subagent-${item.parent_node_id}`
+      nodes.push({
+        id,
+        type: 'agent',
+        position: { x: 80 + index * 225, y: 205 + depth * 135 },
+        data: {
+          label: item.name,
+          kind: 'dynamic',
+          enabled: item.enabled,
+          model: item.model || item.model_name,
+          icon: item.has_icon ? `/api/subagents/${item.subagent_id}/icon` : undefined,
+        },
+      })
+      edges.push(previewEdge(parentId, id))
+    })
+    nested.forEach((item, index) => {
+      const id = `workflow-${item.id}`
+      const parentId =
+        item.parent_node_id === null ? 'orchestrator' : `subagent-${item.parent_node_id}`
+      nodes.push({
+        id,
+        type: 'agent',
+        position: { x: 80 + (subagents.length + index) * 225, y: 205 },
+        data: {
+          label: item.name,
+          kind: 'workflow',
+          workflowMode: item.execution_mode,
+        },
+      })
+      edges.push(previewEdge(parentId, id))
+    })
+    return { nodes, edges }
+  }, [agentNodes.data, workflow, workflowNodes.data])
+
+  if (agentNodes.isLoading || workflowNodes.isLoading) {
+    return <div className="workflow-preview__loading">Loading workflow…</div>
+  }
+  const loadError = agentNodes.error || workflowNodes.error
+  if (loadError) {
+    return (
+      <Feedback
+        message={loadError instanceof Error ? loadError.message : 'Could not load the workflow.'}
+      />
+    )
+  }
+  return (
+    <div className="workflow-preview__canvas">
+      <ReactFlow
+        nodes={graph.nodes}
+        edges={graph.edges}
+        nodeTypes={agentNodeTypes}
+        fitView
+        minZoom={0.3}
+        maxZoom={1.7}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={false}
+        proOptions={{ hideAttribution: true }}
+        onInit={(instance) => {
+          requestAnimationFrame(() => instance.fitView({ padding: 0.2 }))
+        }}
+      >
+        <Background variant={BackgroundVariant.Dots} color="#587064" gap={18} size={1.3} />
+        <Controls showInteractive={false} />
+      </ReactFlow>
+    </div>
+  )
+}
+
+function WorkflowPreview({ workflow }: { workflow: Workflow }) {
+  const [tab, setTab] = useState<'overview' | 'details'>('overview')
+  useEffect(() => setTab('overview'), [workflow.id])
+  return (
+    <div className="workflow-preview">
+      <nav className="workflow-tabs workflow-preview__tabs" aria-label="Workflow preview pages">
+        <button
+          type="button"
+          className={tab === 'overview' ? 'is-active' : ''}
+          onClick={() => setTab('overview')}
+        >
+          Overview
+        </button>
+        <button
+          type="button"
+          className={tab === 'details' ? 'is-active' : ''}
+          onClick={() => setTab('details')}
+        >
+          Details
+        </button>
+      </nav>
+      {tab === 'overview' ? (
+        <WorkflowPreviewOverview workflow={workflow} />
+      ) : (
+        <dl className="detail-grid workflow-preview__details">
+          <PreviewValue label="Name" value={workflow.name} />
+          <PreviewValue
+            label="Execution mode"
+            value={workflow.execution_mode === 'agentic' ? 'Agentic' : 'Direct'}
+          />
+          <PreviewValue label="Description" value={workflow.description || 'No description'} full />
+          {workflow.execution_mode === 'agentic' && (
+            <>
+              <PreviewValue
+                label="Orchestrator model"
+                value={
+                  workflow.model_name
+                    ? `${workflow.model_name}${workflow.model ? ` — ${workflow.model}` : ''}`
+                    : workflow.model || 'Not configured'
+                }
+                full
+              />
+              <PreviewValue
+                label="Orchestrator system prompt"
+                value={workflow.system_prompt || 'Default instructions'}
+                full
+              />
+            </>
+          )}
+        </dl>
+      )}
+    </div>
+  )
+}
+
+export function WorkflowPreviewModal({
+  workflow,
+  onClose,
+}: {
+  workflow: Workflow | null
+  onClose: () => void
+}) {
+  const navigate = useNavigate()
+  return (
+    <Modal
+      open={Boolean(workflow)}
+      wide
+      className="modal--workflow-preview"
+      title={workflow?.name || 'Workflow details'}
+      description="Read-only workflow configuration."
+      onClose={onClose}
+      footer={
+        workflow ? (
+          <Button
+            type="button"
+            variant="primary"
+            onClick={() => {
+              onClose()
+              navigate(`/admin/workflows?open=${workflow.id}&tab=overview`)
+            }}
+          >
+            View workflow <ChevronRight size={13} />
+          </Button>
+        ) : undefined
+      }
+    >
+      {workflow && <WorkflowPreview workflow={workflow} />}
+    </Modal>
   )
 }
 
@@ -273,9 +553,13 @@ export function ConnectAgentModal({
   const [localError, setLocalError] = useState('')
   const [copyingIcon, setCopyingIcon] = useState(false)
   const [previewAgent, setPreviewAgent] = useState<Subagent | null>(null)
+  const [previewWorkflow, setPreviewWorkflow] = useState<Workflow | null>(null)
 
   const toolGroups = useMcpToolCatalog(servers)
-  const enabledTools = useMemo(() => selectedToolOptions(toolGroups, sources), [toolGroups, sources])
+  const enabledTools = useMemo(
+    () => selectedToolOptions(toolGroups, sources),
+    [toolGroups, sources],
+  )
   const enabledNames = useMemo(() => enabledTools.map((tool) => tool.name), [enabledTools])
   const confirmedSelection = useMemo(
     () => expandLegacyToolRules([...confirmed], enabledTools),
@@ -343,6 +627,7 @@ export function ConnectAgentModal({
     setLocalError('')
     setCopyingIcon(false)
     setPreviewAgent(null)
+    setPreviewWorkflow(null)
   }, [open, parentNodeId])
 
   useEffect(() => {
@@ -425,14 +710,13 @@ export function ConnectAgentModal({
         mcp_server_id,
         enabled_tools,
       })),
-      confirm_tools:
-        !sources.length
-          ? []
-          : confirmMode === 'all'
-            ? ['*']
-            : confirmMode === 'selected'
-              ? confirmedTools
-              : [],
+      confirm_tools: !sources.length
+        ? []
+        : confirmMode === 'all'
+          ? ['*']
+          : confirmMode === 'selected'
+            ? confirmedTools
+            : [],
       confirm_tool_calls: Boolean(sources.length) && confirmMode !== 'none',
       dedupe_tools: dedupedTools,
       enabled: draft.enabled,
@@ -493,25 +777,30 @@ export function ConnectAgentModal({
       >
         <div className="node-kind-list">
           <button type="button" onClick={() => setResourceKind('subagent')}>
-            <span className="node-kind-list__icon"><Bot size={18} /></span>
-            <span><strong>Subagent</strong><small>Add a saved specialist or create a new one.</small></span>
+            <span className="node-kind-list__copy">
+              <strong>Subagent</strong>
+              <small>Add a saved specialist or create a new one.</small>
+            </span>
             <ChevronRight size={16} />
           </button>
           <button type="button" onClick={() => setResourceKind('workflow')}>
-            <span className="node-kind-list__icon node-kind-list__icon--workflow">
-              <WorkflowIcon size={18} />
+            <span className="node-kind-list__copy">
+              <strong>Workflow</strong>
+              <small>Reuse one of your saved workflows.</small>
             </span>
-            <span><strong>Workflow</strong><small>Reuse one of your saved workflows.</small></span>
             <ChevronRight size={16} />
           </button>
         </div>
       </Modal>
       <Modal
-        open={open && resourceKind === 'workflow'}
+        open={open && resourceKind === 'workflow' && !previewWorkflow}
         side
         title="Add workflow"
         description={`Select a workflow to add under ${parentName}.`}
-        onClose={() => { setQuery(''); setResourceKind(null) }}
+        onClose={() => {
+          setQuery('')
+          setResourceKind(null)
+        }}
       >
         <div className="subagent-start subagent-library">
           <label className="subagent-start__search">
@@ -524,23 +813,17 @@ export function ConnectAgentModal({
             />
           </label>
           <div className="subagent-start__list">
-            {visibleWorkflows.length ? visibleWorkflows.map((workflow) => (
-              <button
-                className="workflow-picker-row"
-                type="button"
-                key={workflow.id}
-                disabled={busy}
-                onClick={() => onConnectWorkflow?.(workflow.id)}
-              >
-                <span className="node-kind-list__icon node-kind-list__icon--workflow">
-                  <WorkflowIcon size={17} />
-                </span>
-                <span>
-                  <strong>{workflow.name}</strong>
-                  <small>{workflow.description || `${workflow.execution_mode} workflow`}</small>
-                </span>
-              </button>
-            )) : (
+            {visibleWorkflows.length ? (
+              visibleWorkflows.map((workflow) => (
+                <WorkflowListItem
+                  key={workflow.id}
+                  workflow={workflow}
+                  busy={busy}
+                  onSelect={() => onConnectWorkflow?.(workflow.id)}
+                  onDetails={() => setPreviewWorkflow(workflow)}
+                />
+              ))
+            ) : (
               <div className="empty-state subagent-start__empty">
                 {query ? 'No matching workflows.' : 'No workflows available.'}
               </div>
@@ -577,7 +860,10 @@ export function ConnectAgentModal({
         }
         onClose={
           libraryOpen
-            ? () => { setQuery(''); setResourceKind(null) }
+            ? () => {
+                setQuery('')
+                setResourceKind(null)
+              }
             : returnToLibrary
         }
         footer={footer}
@@ -814,14 +1100,9 @@ export function ConnectAgentModal({
 
             {step === 2 && (
               <div className="subagent-wizard__page">
-                <div className="subagent-wizard__section-heading">
-                  <span>
-                    <strong>Capabilities</strong>
-                    <small>
-                      Select individual tools across any connected MCP servers, or keep this subagent prompt-only.
-                    </small>
-                  </span>
-                </div>
+                <p className="subagent-wizard__section-description">
+                  Choose tools from available MCP servers to connect them to your subagent.
+                </p>
                 <MultiServerToolPicker
                   servers={servers}
                   groups={toolGroups}
@@ -835,7 +1116,8 @@ export function ConnectAgentModal({
               <div className="form-grid subagent-wizard__page">
                 {!sources.length && (
                   <div className="guidance">
-                    Prompt-only subagents have no external actions to approve. You can create this subagent as-is.
+                    Prompt-only subagents have no external actions to approve. You can create this
+                    subagent as-is.
                   </div>
                 )}
                 <Field
@@ -869,32 +1151,28 @@ export function ConnectAgentModal({
                     />
                   </div>
                 )}
-                {sources.length > 0 && <div className="key-value-editor">
-                  <div className="key-value-editor__title">
-                    <span>
-                      <strong>Repeated action protection</strong>
-                      <small>
-                        Block an identical action from running twice during the same request.
-                      </small>
-                    </span>
+                {sources.length > 0 && (
+                  <div className="key-value-editor">
+                    <div className="key-value-editor__title">
+                      <span>
+                        <strong>Repeated action protection</strong>
+                        <small>
+                          Block an identical action from running twice during the same request.
+                        </small>
+                      </span>
+                    </div>
+                    <ToolChoices
+                      tools={enabledTools}
+                      selected={dedupedSelection}
+                      onChange={setDeduped}
+                      empty="Enable at least one tool before configuring repeated-action protection."
+                    />
                   </div>
-                  <ToolChoices
-                    tools={enabledTools}
-                    selected={dedupedSelection}
-                    onChange={setDeduped}
-                    empty="Enable at least one tool before configuring repeated-action protection."
-                  />
-                </div>}
+                )}
               </div>
             )}
 
-            <Feedback
-              message={
-                localError ||
-                error ||
-                ''
-              }
-            />
+            <Feedback message={localError || error || ''} />
           </form>
         )}
       </Modal>
@@ -907,6 +1185,7 @@ export function ConnectAgentModal({
       >
         {previewAgent && <SubagentPreview agent={previewAgent} />}
       </Modal>
+      <WorkflowPreviewModal workflow={previewWorkflow} onClose={() => setPreviewWorkflow(null)} />
     </>
   )
 }

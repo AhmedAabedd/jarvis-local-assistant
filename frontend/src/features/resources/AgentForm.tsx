@@ -236,12 +236,9 @@ export function AgentForm({
 
       {page === 'tools' && (
         <div className="subagent-wizard__page">
-          <div className="subagent-wizard__section-heading">
-            <span>
-              <strong>Capabilities</strong>
-              <small>Select individual tools across any connected MCP servers, or keep this subagent prompt-only.</small>
-            </span>
-          </div>
+          <p className="subagent-wizard__section-description">
+            Choose tools from available MCP servers to connect them to your subagent.
+          </p>
           <MultiServerToolPicker
             servers={servers}
             groups={toolGroups}
