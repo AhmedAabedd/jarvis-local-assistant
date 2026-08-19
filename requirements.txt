@@ -20,6 +20,17 @@ yt-dlp>=2024.1.1
 mcp>=1.27,<2
 httpx>=0.27
 
+# File and media specialist — format handlers are lazy-imported so an
+# unavailable codec produces a focused tool error instead of breaking startup.
+Pillow>=10.0
+pypdf>=4.0
+PyMuPDF>=1.24
+openpyxl>=3.1
+python-docx>=1.1
+python-pptx>=1.0
+reportlab>=4.0
+opencv-python-headless>=4.9
+
 # Web dashboard + admin API
 fastapi>=0.110
 uvicorn>=0.29

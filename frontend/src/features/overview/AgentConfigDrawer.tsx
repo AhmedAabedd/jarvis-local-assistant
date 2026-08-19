@@ -10,6 +10,13 @@ import { ToolChoices } from '../resources/ToolChoices'
 
 type ModelOption = { id: number; label: string }
 type Availability = { enabled: boolean; onChange: (enabled: boolean) => void }
+type SecondaryModel = {
+  label: string
+  modelId: number
+  options?: ModelOption[]
+  hint: string
+  onChange: (modelId: number) => void
+}
 
 export function AgentConfigDrawer({
   open,
@@ -21,7 +28,9 @@ export function AgentConfigDrawer({
   tools,
   availability,
   capabilitiesLabel = 'Tools',
+  modelLabel = 'Model',
   modelHint,
+  secondaryModel,
   busy,
   error,
   onModelChange,
@@ -37,7 +46,9 @@ export function AgentConfigDrawer({
   tools?: ToolInfo[]
   availability?: Availability
   capabilitiesLabel?: string
+  modelLabel?: string
   modelHint: string
+  secondaryModel?: SecondaryModel
   busy?: boolean
   error?: string
   onModelChange: (modelId: number) => void
@@ -107,7 +118,7 @@ export function AgentConfigDrawer({
               />
             </div>
           )}
-          <Field label="Model" hint={modelHint}>
+          <Field label={modelLabel} hint={modelHint}>
             <select value={modelId} onChange={(event) => onModelChange(Number(event.target.value))}>
               <option value={0}>Choose a model…</option>
               {(modelOptions || []).map((model) => (
@@ -117,6 +128,21 @@ export function AgentConfigDrawer({
               ))}
             </select>
           </Field>
+          {secondaryModel && (
+            <Field label={secondaryModel.label} hint={secondaryModel.hint}>
+              <select
+                value={secondaryModel.modelId}
+                onChange={(event) => secondaryModel.onChange(Number(event.target.value))}
+              >
+                <option value={0}>Choose a model…</option>
+                {(secondaryModel.options || []).map((model) => (
+                  <option value={model.id} key={model.id}>
+                    {model.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
           <div>
             <span className="field__label">{capabilitiesLabel}</span>
             <div className="node-tool-list agent-config-drawer__capabilities">

@@ -1,18 +1,17 @@
 """Knowledge agent — curator of the knowledge folder (long-term memory).
 
 The orchestrator calls run(task) and gets back a short plain-text report of
-what was saved, updated, or deleted. The knowledge agent does the whole judge →
-check-for-duplicates → write → report loop in its OWN context; the supervisor
-never edits knowledge files itself.
+what was found, saved, updated, or deleted. The knowledge agent performs reads
+and the whole judge → check-for-duplicates → write → report loop in its OWN
+context; the supervisor never accesses knowledge files directly.
 
 The index (index.md) is maintained BY CODE, not by the model: save_knowledge
 and delete_knowledge update it automatically, so a file can never exist
 without its index line or vice versa. The knowledge agent cannot touch index.md
 directly.
 
-Writes are ISOLATED to this agent. The supervisor still READS knowledge
-directly (the index rides in its context; read_file is its fast path) — only
-changes go through here.
+Knowledge-folder access is ISOLATED to this agent. The small index still rides
+in the supervisor's context so it knows when to delegate a lookup.
 """
 
 from __future__ import annotations
@@ -84,8 +83,9 @@ HARD RULES
 
 FINAL REPORT (MANDATORY)
 Your last message is read by the SUPERVISOR, not the user. One short paragraph,
-no headers, stating: the action taken (saved/appended/updated/deleted/refused),
-the exact filename(s), and a one-line summary of the content change — e.g.
+no headers, stating: the result or action taken
+(found/saved/appended/updated/deleted/refused), the exact filename(s), and a
+one-line summary of the relevant content or change — e.g.
 "Appended 'Sami: sami@x.com' to contacts.md." If you refused or found a
 conflict, say exactly why and what you did instead. The supervisor relays this
 to the user, so make it self-contained. No fluff, no "certainly!".

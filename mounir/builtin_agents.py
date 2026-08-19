@@ -13,12 +13,15 @@ from . import config
 
 _BUILTINS = {
     "media": {
-        "name": "Media",
+        "name": "Files and Media",
         "module": "mounir.specialists.media",
         "provider": "NVIDIA",
         "default_model": config.MEDIA_MODEL,
-        "description": "Understands images, PDFs, audio, and video files on this computer.",
-        "safe_tools": {"load_media", "sample_frames", "find_media"},
+        "description": (
+            "Owns every local file and media operation: finding, listing, reading, "
+            "creating, editing, appending, converting, and generating artifacts."
+        ),
+        "safe_tools": {"read_file", "load_media", "find_files"},
     },
     "knowledge": {
         "name": "Knowledge",
@@ -67,6 +70,16 @@ def definition(key: str) -> dict | None:
         "default_model": item["default_model"],
         "description": item["description"],
     }
+
+
+def system_prompt(key: str) -> str:
+    """Return the built-in's shipped prompt without importing all specialists."""
+    normalized = str(key or "").removeprefix("builtin:").strip()
+    item = _BUILTINS.get(normalized)
+    if item is None:
+        raise ValueError(f"unknown built-in specialist: {key}")
+    module = import_module(item["module"])
+    return str(getattr(module, "SYSTEM_PROMPT", "")).strip()
 
 
 def capabilities() -> list[dict]:

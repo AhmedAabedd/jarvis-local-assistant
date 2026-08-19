@@ -916,7 +916,7 @@ async def agent_overview():
             ),
             "tools": supervisor_tools,
         },
-        "builtins": db.list_builtin_agents(),
+        "builtins": db.list_builtin_agents(connected_only=True),
     }
 
 
@@ -932,13 +932,23 @@ async def update_supervisor(req: dict):
 @app.put("/api/builtin-agents/{agent_key}")
 async def update_builtin_agent(agent_key: str, req: dict):
     try:
-        return db.update_builtin_agent(
-            agent_key,
-            model_id=req.get("model_id") if "model_id" in req else None,
-            enabled=req.get("enabled") if "enabled" in req else None,
-        )
+        changes = {}
+        if "model_id" in req:
+            changes["model_id"] = req.get("model_id")
+        if "generation_model_id" in req:
+            changes["generation_model_id"] = req.get("generation_model_id")
+        if "connected" in req:
+            changes["connected"] = req.get("connected")
+        if "enabled" in req:
+            changes["enabled"] = req.get("enabled")
+        return db.update_builtin_agent(agent_key, **changes)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/api/builtin-agents")
+async def list_builtin_agents():
+    return db.list_builtin_agents()
 
 @app.get("/api/models")
 async def list_models():

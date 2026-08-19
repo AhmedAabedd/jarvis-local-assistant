@@ -183,13 +183,18 @@ export interface BuiltinAgent {
   key: string
   name: string
   description: string
+  system_prompt: string
   purpose?: string
   model?: string
-  model_id?: Id
+  model_id?: Id | null
+  generation_model?: string | null
+  generation_model_id?: Id | null
   provider?: string
   enabled: boolean
+  connected: boolean
   tools?: ToolInfo[]
   model_options?: Array<{ id: Id; model: string; label: string }>
+  generation_model_options?: Array<{ id: Id; model: string; label: string }>
 }
 
 export interface Supervisor {

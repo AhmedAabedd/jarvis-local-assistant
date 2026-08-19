@@ -74,16 +74,18 @@ def build_system_prompt(profile: dict | None = None) -> str:
         "changed, prices, docs, comparisons — use an available web or research "
         "specialist tool. If none is supplied, say that lookup capability is unavailable. "
         "Never answer a potentially stale lookup from memory.\n"
-        "3. For anything that requires LOOKING AT or LISTENING TO a file — an "
-        "image, a PDF, a screenshot, an audio clip, a video — you MUST call "
-        "an available media specialist with the file path. If none is supplied, say "
-        "that media-reading capability is unavailable.\n"
+        "3. For EVERY local file or media operation — finding or listing paths; "
+        "reading, creating, editing, appending, or converting files; and analyzing "
+        "or generating documents, data, presentations, images, audio, or video — "
+        "you MUST delegate to the available Files and Media specialist. Pass every "
+        "name, location hint, and path the user supplied. Do not guess a path or "
+        "use shell commands as a substitute. If the specialist is unavailable, "
+        "say that local artifact capability is unavailable.\n"
         "4. For anything that changes long-term knowledge — \"remember this\", a "
         "new contact, a preference, a template, or forgetting/cleaning stored "
-        "knowledge — use an available knowledge specialist with what to store or "
-        "remove. If none is supplied, say that knowledge-writing capability is "
-        "unavailable. Never create, edit, or delete files in the knowledge folder "
-        "yourself; you may still READ them with read_file.\n"
+        "knowledge — use an available knowledge specialist with what to read, store, "
+        "or remove. If none is supplied, say that knowledge capability is unavailable. "
+        "Never manipulate files in the knowledge folder through another specialist.\n"
         "5. When you don't know something, say so straight instead of making it up."
     )
 
@@ -180,13 +182,15 @@ KNOWLEDGE_DIR: Path = Path(
 CONTACTS_FILE: Path = KNOWLEDGE_DIR / "contacts.md"
 # index.md is the always-loaded "menu" of the knowledge folder: it lists every
 # knowledge file and when to open it. Only this small index rides in context;
-# the model reads a specific file (read_file) on demand when a task needs it.
+# the supervisor delegates a specific lookup to the Knowledge specialist.
 INDEX_FILE: Path = KNOWLEDGE_DIR / "index.md"
 
 LOCATION: str = DEFAULT_LOCATION
 
 
 def build_context_message(profile: dict | None = None) -> str:
+    from . import path_search
+
     profile = profile or {}
     user_name = profile.get("user_name") or DEFAULT_USER_NAME
     assistant_name = profile.get("assistant_name") or DEFAULT_ASSISTANT_NAME
@@ -199,18 +203,17 @@ def build_context_message(profile: dict | None = None) -> str:
         f"OS: {platform.system()} {platform.release()}",
         f"Home: {h}",
         f"Current directory: {Path.cwd()}",
-        f"Downloads: {h / 'Downloads'}",
-        f"Documents: {h / 'Documents'}",
-        f"Desktop: {h / 'Desktop'}",
         f"Location: {location}",
         f"Preferred language: {language}",
     ]
+    for key, path in sorted(path_search.xdg_user_directories().items()):
+        lines.append(f"{key.title()}: {path}")
     # Append the knowledge index (the "menu") so Mounir always knows what
     # knowledge files exist and when to read one. Kept small on purpose.
     try:
         index = INDEX_FILE.read_text(encoding="utf-8", errors="replace").strip()
         if index:
-            lines.append("\nKnowledge available (read a file with read_file when needed):")
+            lines.append("\nKnowledge available (delegate a lookup when needed):")
             lines.append(index)
     except OSError:
         pass

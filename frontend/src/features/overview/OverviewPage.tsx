@@ -60,6 +60,7 @@ export function OverviewPage() {
   const whatsapp = useQuery({ queryKey: keys.whatsapp, queryFn: api.whatsapp.get })
   const [selected, setSelected] = useState<BuiltinAgent | null>(null)
   const [modelId, setModelId] = useState<number>(0)
+  const [generationModelId, setGenerationModelId] = useState<number>(0)
   const [supervisorOpen, setSupervisorOpen] = useState(false)
   const [supervisorModelId, setSupervisorModelId] = useState(0)
   const [connectionParent, setConnectionParent] = useState<ConnectionParent | null>(null)
@@ -73,7 +74,12 @@ export function OverviewPage() {
   const save = useMutation({
     mutationFn: async () => {
       if (!selected || !modelId) return
-      return api.overview.updateBuiltin(selected.key, { model_id: modelId })
+      return api.overview.updateBuiltin(selected.key, {
+        model_id: modelId,
+        ...(selected.key === 'media'
+          ? { generation_model_id: generationModelId || null }
+          : {}),
+      })
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: keys.overview })
@@ -271,6 +277,7 @@ export function OverviewPage() {
             setSupervisorOpen(false)
             setSelected(item)
             setModelId(item.model_id || 0)
+            setGenerationModelId(Number(item.generation_model_id) || 0)
           },
         },
       })
@@ -494,7 +501,24 @@ export function OverviewPage() {
               }
             : undefined
         }
-        modelHint="Any saved OpenAI-compatible model can power this agent."
+        modelLabel={selected?.key === 'media' ? 'Analysis model' : 'Model'}
+        modelHint={
+          selected?.key === 'media'
+            ? 'Choose a tool-calling vision model for file and media analysis.'
+            : 'Any saved OpenAI-compatible model can power this agent.'
+        }
+        secondaryModel={
+          selected?.key === 'media'
+            ? {
+                label: 'Image generation model',
+                modelId: generationModelId,
+                options: selected.generation_model_options,
+                hint:
+                  'Supports the OpenAI-compatible Images endpoint and Mistral image generation.',
+                onChange: setGenerationModelId,
+              }
+            : undefined
+        }
         busy={save.isPending}
         error={save.error instanceof Error ? save.error.message : ''}
         onModelChange={setModelId}

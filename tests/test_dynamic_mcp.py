@@ -605,7 +605,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             interval_minutes=1440,
             selected_agents=["builtin:media"],
             selected_tools=[
-                {"agent_key": "builtin:media", "tool_name": "find_media"}
+                {"agent_key": "builtin:media", "tool_name": "find_files"}
             ],
         )
 
@@ -616,7 +616,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
         self.assertEqual(
             db.get_heartbeat_targets(second["id"])[0]["allowed_tools"],
-            ["find_media"],
+            ["find_files"],
         )
         run_id = db.begin_heartbeat_task_run(first["id"], "manual")
         db.finish_heartbeat_task_run(
@@ -790,6 +790,21 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(runtime["provider"], "NVIDIA")
         updated = db.update_builtin_agent_model("system", ollama["id"])
         self.assertEqual(updated["model_id"], ollama["id"])
+
+    def test_builtin_agent_connection_is_distinct_from_enabled_state(self):
+        db.init()
+        disabled = db.update_builtin_agent("system", enabled=False)
+        self.assertFalse(disabled["enabled"])
+        self.assertTrue(disabled["connected"])
+        self.assertEqual(len(db.list_builtin_agents(connected_only=True)), 3)
+        disconnected = db.update_builtin_agent("system", connected=False)
+        self.assertFalse(disconnected["connected"])
+        self.assertEqual(len(db.list_builtin_agents()), 3)
+        self.assertEqual(len(db.list_builtin_agents(connected_only=True)), 2)
+        db.init()
+        saved = next(agent for agent in db.list_builtin_agents() if agent["key"] == "system")
+        self.assertFalse(saved["enabled"])
+        self.assertFalse(saved["connected"])
 
     def test_fresh_database_keeps_user_registry_empty(self):
         db.init()
@@ -1172,7 +1187,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         db.init()
         db.update_heartbeat_settings(
             selected_tools=[
-                {"agent_key": "builtin:media", "tool_name": "find_media"}
+                {"agent_key": "builtin:media", "tool_name": "find_files"}
             ]
         )
         with patch.object(
@@ -1182,7 +1197,7 @@ class DatabaseTests(TemporaryDatabaseTest):
 
         run_builtin.assert_called_once()
         self.assertEqual(run_builtin.call_args.args[0], "media")
-        self.assertEqual(run_builtin.call_args.args[2], ["find_media"])
+        self.assertEqual(run_builtin.call_args.args[2], ["find_files"])
 
     def test_heartbeat_task_is_read_by_scoped_mounir_supervisor(self):
         db.init()
@@ -1943,7 +1958,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         run_media.assert_not_called()
         with self.assertRaisesRegex(ValueError, "inactive"):
             heartbeat_mod.builtin_agents.run(
-                "media", "Inspect media", ["find_media"]
+                "media", "Inspect media", ["find_files"]
             )
         stale_state = {
             "messages": [
@@ -1967,7 +1982,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         with self.assertRaisesRegex(ValueError, "unavailable"):
             langgraph_agent.db.update_heartbeat_settings(
                 selected_tools=[
-                    {"agent_key": "builtin:media", "tool_name": "find_media"}
+                    {"agent_key": "builtin:media", "tool_name": "find_files"}
                 ]
             )
 
@@ -2034,9 +2049,9 @@ class DatabaseTests(TemporaryDatabaseTest):
             if not any(message.get("role") == "tool" for message in messages):
                 tool_calls_out.append(
                     SimpleNamespace(
-                        id="list_1",
+                        id="browser_1",
                         function=SimpleNamespace(
-                            name="list_directory", arguments={"path": "."}
+                            name="open_browser", arguments={"url": "example.com"}
                         ),
                     )
                 )
@@ -2050,14 +2065,14 @@ class DatabaseTests(TemporaryDatabaseTest):
 
         with (
             patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
-            patch.object(mounir_tools, "list_directory", return_value="listing"),
+            patch.object(mounir_tools, "open_browser", return_value="opened"),
         ):
             reply = "".join(
                 Agent(conversation=Conversation(system_prompt="test")).respond("list")
             )
 
         self.assertEqual(reply, "done")
-        self.assertEqual(observed, ["listing"])
+        self.assertEqual(observed, ["opened"])
 
     def test_foreign_keys_prevent_deleting_in_use_presets(self):
         db.init()
@@ -3558,7 +3573,11 @@ class AdminApiTests(TemporaryDatabaseTest):
                 supervisor_tools = {
                     tool["name"] for tool in overview["supervisor"]["tools"]
                 }
-                self.assertIn("read_file", supervisor_tools)
+                self.assertIn("open_browser", supervisor_tools)
+                self.assertTrue(
+                    {"read_file", "write_file", "edit_file", "list_directory"}
+                    .isdisjoint(supervisor_tools)
+                )
                 self.assertFalse(
                     any(name.startswith("delegate_to_") for name in supervisor_tools)
                 )
@@ -3770,7 +3789,8 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(invalid.status_code, 400)
 
                 builtin = await client.put(
-                    "/api/builtin-agents/media", json={"enabled": False}
+                    "/api/builtin-agents/media",
+                    json={"enabled": False},
                 )
                 self.assertEqual(builtin.status_code, 200)
                 self.assertFalse(builtin.json()["enabled"])
@@ -3780,6 +3800,18 @@ class AdminApiTests(TemporaryDatabaseTest):
                     if item["key"] == "media"
                 )
                 self.assertFalse(media["enabled"])
+
+                disconnected = await client.put(
+                    "/api/builtin-agents/media", json={"connected": False}
+                )
+                self.assertEqual(disconnected.status_code, 200)
+                self.assertFalse(disconnected.json()["connected"])
+                builtins = await client.get("/api/builtin-agents")
+                self.assertEqual(len(builtins.json()), 3)
+                overview = await client.get("/api/agent-overview")
+                self.assertFalse(
+                    any(item["key"] == "media" for item in overview.json()["builtins"])
+                )
 
                 restored = await client.put(
                     f"/api/subagents/{subagent['id']}",

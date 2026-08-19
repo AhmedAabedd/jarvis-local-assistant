@@ -255,7 +255,7 @@ def _media(state: TurnState) -> Command:
         "delegate_to_media",
         "media",
         run_media,
-        None if enabled else "The Media agent is inactive and cannot be used.",
+        None if enabled else "Files and Media is inactive and cannot be used.",
     )
 
 

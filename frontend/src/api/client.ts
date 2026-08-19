@@ -1,5 +1,6 @@
 import type {
   AgentOverview,
+  BuiltinAgent,
   HeartbeatSettings,
   HeartbeatTask,
   McpServer,
@@ -58,6 +59,11 @@ export const api = {
     updateSupervisor: (model_id: number) => request('/api/supervisor', json('PUT', { model_id })),
     updateBuiltin: (key: string, body: object) =>
       request(`/api/builtin-agents/${key}`, json('PUT', body)),
+  },
+  builtins: {
+    list: () => request<BuiltinAgent[]>('/api/builtin-agents'),
+    update: (key: string, body: object) =>
+      request<BuiltinAgent>(`/api/builtin-agents/${key}`, json('PUT', body)),
   },
   models: {
     list: () => request<ModelRecord[]>('/api/models'),

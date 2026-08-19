@@ -17,7 +17,7 @@ from . import browser_control, config
 # Specialist agents are reached through LangGraph handoffs. These functions
 # remain defensive fallbacks for direct tool invocation.
 def delegate_to_knowledge(task: str) -> str:
-    """Hand a knowledge-folder change to the knowledge agent; returns its report."""
+    """Hand a knowledge-folder lookup or change to the knowledge agent."""
     from . import db
     if not db.is_builtin_agent_enabled("knowledge"):
         return "The Knowledge agent is inactive and cannot be used."
@@ -25,10 +25,10 @@ def delegate_to_knowledge(task: str) -> str:
     return run(task)
 
 def delegate_to_media(task: str) -> str:
-    """Ask the media agent to read an image, PDF, audio clip, or video."""
+    """Delegate every local file or media operation to Files and Media."""
     from . import db
     if not db.is_builtin_agent_enabled("media"):
-        return "The Media agent is inactive and cannot be used."
+        return "Files and Media is inactive and cannot be used."
     from .specialists.media import run
     return run(task)
 
@@ -42,16 +42,6 @@ def delegate_to_system(task: str) -> str:
     return run(task)
 
 
-# The supervisor runs on a small, local model with a modest context window, and
-# reads files only incidentally (a note, a config, a path the user mentions).
-# Keep a read to a quick glance the model can digest; it pages for more with
-# start_line.
-MAX_READ_LINES = 300    # lines per read when no range is given
-MAX_READ_CHARS = 12000  # hard char ceiling so one read can't flood the context
-
-# Files the model has read this process. edit_file refuses to touch a file that
-# wasn't read first, so it never blind-edits text it hasn't actually seen.
-_files_read: set[str] = set()
 # bash: default timeout (s) to kill a hung command, a hard ceiling the model
 # can't exceed, and an output cap so a chatty command can't flood the context.
 BASH_DEFAULT_TIMEOUT = 30
@@ -64,13 +54,14 @@ def _resolve(path: str) -> Path:
     return Path(path).expanduser()
 
 
-def _knowledge_guard(p: Path) -> str | None:
+def write_path_block_reason(path: str | Path) -> str | None:
     """Refuse writes inside the knowledge folder — that's the knowledge agent's job.
 
     The prompt already forbids it, but a rule the model can ignore isn't a
     rule: writing there directly would desync index.md, which only the
     knowledge agent's tools keep in sync. Reading stays allowed.
     """
+    p = Path(path).expanduser()
     try:
         inside = p.resolve().is_relative_to(config.KNOWLEDGE_DIR.resolve())
     except OSError:
@@ -82,106 +73,6 @@ def _knowledge_guard(p: Path) -> str | None:
             "with what to store or change instead."
         )
     return None
-
-
-def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
-    """Read a text file with line numbers (like `cat -n`), optionally a line range.
-
-    Line numbers let you copy an exact block straight into edit_file. Reads up to
-    MAX_READ_LINES lines from start_line by default; pass start_line/end_line to
-    page through or read a narrow slice of a large file.
-    """
-    p = _resolve(path)
-    try:
-        if not p.is_file():
-            return f"No such file: {p}"
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception as exc:
-        return f"Could not read {p}: {exc}"
-    if not lines:
-        _files_read.add(str(p))
-        return "(file is empty)"
-
-    total = len(lines)
-    start = max(1, start_line)
-    if start > total:
-        return f"{p} has {total} lines; start_line {start} is past the end."
-    # Default to a page of MAX_READ_LINES rather than the whole file.
-    end = min(total, start + MAX_READ_LINES - 1) if end_line is None else min(total, end_line)
-
-    body = "\n".join(f"{start + i:>5}\t{line}" for i, line in enumerate(lines[start - 1:end]))
-    if len(body) > MAX_READ_CHARS:
-        body = body[:MAX_READ_CHARS] + "\n… [truncated — read a narrower line range]"
-    more = f"\n… {total - end} more line(s) below — read again with start_line={end + 1}." if end < total else ""
-    _files_read.add(str(p))
-    return f"{p} (lines {start}-{end} of {total}):\n{body}{more}"
-
-
-def write_file(path: str, content: str) -> str:
-    """Write text to a file, creating parent folders. Overwrites if it exists."""
-    p = _resolve(path)
-    blocked = _knowledge_guard(p)
-    if blocked:
-        return blocked
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-    except Exception as exc:
-        return f"Could not write {p}: {exc}"
-    _files_read.add(str(p))  # we just wrote it, so it counts as "seen" for edit_file
-    return f"Wrote {len(content)} characters to {p}."
-
-
-def edit_file(path: str, old_str: str, new_str: str, replace_all: bool = False) -> str:
-    """Surgically replace exact text in a file, without rewriting the whole thing.
-
-    old_str must match EXACTLY (whitespace included). It must be unique unless
-    replace_all is set. Read the file first to copy the exact text.
-    """
-    p = _resolve(path)
-    blocked = _knowledge_guard(p)
-    if blocked:
-        return blocked
-    if not p.is_file():
-        return f"No such file: {p}"
-    if str(p) not in _files_read:
-        return f"Read {p} with read_file before editing it, so you edit its real current text."
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception as exc:
-        return f"Could not read {p}: {exc}"
-
-    count = text.count(old_str)
-    if count == 0:
-        return f"Text not found in {p}. Read the file to copy the exact text."
-    if count > 1 and not replace_all:
-        return (
-            f"Found {count} matches in {p} — too ambiguous. Make old_str more "
-            f"specific (add surrounding lines), or set replace_all to change all."
-        )
-
-    new_text = text.replace(old_str, new_str) if replace_all else text.replace(old_str, new_str, 1)
-    try:
-        p.write_text(new_text, encoding="utf-8")
-    except Exception as exc:
-        return f"Could not write {p}: {exc}"
-    return f"Edited {p} — replaced {count if replace_all else 1} occurrence(s)."
-
-
-def list_directory(path: str = ".") -> str:
-    """List a directory's entries (folders shown with a trailing slash)."""
-    p = _resolve(path)
-    try:
-        if not p.is_dir():
-            return f"Not a directory: {p}"
-        entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name.lower()))
-    except Exception as exc:
-        return f"Could not list {p}: {exc}"
-    if not entries:
-        return f"{p} is empty."
-    lines = [f"Contents of {p}:"]
-    lines += [f"  {e.name}/" if e.is_dir() else f"  {e.name}" for e in entries]
-    return "\n".join(lines)
 
 
 def _default_confirm(action: str) -> bool:
@@ -393,48 +284,6 @@ def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: b
     return result
 
 
-@tool("read_file")
-def read_file_tool(
-    path: Annotated[str, "Text-file path; ~ is allowed."],
-    start_line: Annotated[int, "First line, starting at 1."] = 1,
-    end_line: Annotated[int | None, "Optional inclusive final line."] = None,
-) -> str:
-    """Read a bounded text-file range with line numbers."""
-
-    return read_file(path, start_line, end_line)
-
-
-@tool("write_file")
-def write_file_tool(
-    path: Annotated[str, "Destination path; ~ is allowed."],
-    content: Annotated[str, "Complete text to write."],
-) -> str:
-    """Create or overwrite a text file and its missing parent directories."""
-
-    return write_file(path, content)
-
-
-@tool("edit_file")
-def edit_file_tool(
-    path: Annotated[str, "Existing file path."],
-    old_str: Annotated[str, "Exact text previously read from the file."],
-    new_str: Annotated[str, "Replacement text."],
-    replace_all: Annotated[bool, "Replace every occurrence."] = False,
-) -> str:
-    """Surgically replace exact text in a file that was read first."""
-
-    return edit_file(path, old_str, new_str, replace_all)
-
-
-@tool("list_directory")
-def list_directory_tool(
-    path: Annotated[str, "Directory to list."] = ".",
-) -> str:
-    """List files and folders before choosing what to read."""
-
-    return list_directory(path)
-
-
 @tool("open_browser")
 def open_browser_tool(
     url: Annotated[str, "Optional URL or site."] = "",
@@ -482,9 +331,9 @@ def bash_tool(
 
 @tool("delegate_to_knowledge")
 def delegate_to_knowledge_tool(
-    task: Annotated[str, "Exact facts to remember, update, or forget."],
+    task: Annotated[str, "Knowledge to find, remember, update, or forget."],
 ) -> str:
-    """Delegate changes to curated long-term knowledge; do not use for lookup."""
+    """Search or change curated long-term knowledge through its sole owner."""
 
     return delegate_to_knowledge(task)
 
@@ -500,18 +349,17 @@ def delegate_to_system_tool(
 
 @tool("delegate_to_media")
 def delegate_to_media_tool(
-    task: Annotated[str, "Media path and the question to answer about it."],
+    task: Annotated[
+        str,
+        "Complete file/media request with known names, location hints, and exact paths if available.",
+    ],
 ) -> str:
-    """Delegate analysis of images, PDFs, audio, or video files."""
+    """Find, list, read, create, edit, append, convert, or generate any local file or media."""
 
     return delegate_to_media(task)
 
 
 GENERAL_TOOLS = [
-    read_file_tool,
-    write_file_tool,
-    edit_file_tool,
-    list_directory_tool,
     open_browser_tool,
     close_browser_tool,
     play_on_youtube_tool,

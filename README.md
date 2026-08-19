@@ -54,7 +54,7 @@ Mounir ships with a useful core and becomes broader as capabilities are attached
 | Conversation | Streaming text chat, persistent history, CLI, web, Telegram, and WhatsApp |
 | Voice | Browser speech input, standalone push-to-talk, wake word mode, STT, and TTS |
 | Desktop | Volume, brightness, media, Wi-Fi, Bluetooth, power, browser, and approved shell actions |
-| Media | Inspect and transform images, PDFs, audio, and video |
+| Files and media | Read and create documents, spreadsheets, images, audio, video, and presentations |
 | Knowledge | Search and maintain local knowledge files and contacts |
 | MCP | Discover tools from connected servers and turn them into dynamic specialists |
 | Models | Manage local and cloud model profiles, providers, endpoints, and credentials |
@@ -219,10 +219,16 @@ Mounir includes focused specialists that work even before custom MCP agents are
 added. Each specialist has a readable capability page, an activation control, and
 a selectable saved model in Agent Studio.
 
-### Media
+### Files and Media
 
-Works with images, PDFs, audio, and video. It can inspect files, extract content,
-convert formats, and coordinate media-oriented tools.
+Replaces the supervisor's direct file tools with six focused operations: read,
+create, and edit files; load and generate media; and find local artifacts. Path
+discovery uses configured XDG folders, case-insensitive traversal, and bounded
+fuzzy search instead of assuming literal English folder paths. It supports PDFs,
+spreadsheets, Word documents, text data, images, audio, sampled-and-transcribed
+video, and PowerPoint presentations. Image generation uses a separately selected
+OpenAI-compatible image model or Mistral's built-in image-generation tool; video
+generation remains adapter-dependent.
 
 ### Knowledge
 
@@ -250,7 +256,7 @@ jobs.
 |---|---|
 | Supervisor | Saved Mistral, Groq, or Ollama profiles |
 | Dynamic MCP specialists | OpenAI-compatible chat-completions endpoints with tool calling |
-| Media and System | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
+| Files/Media and System | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
 | Knowledge | Configurable Gemini/OpenAI-compatible profile |
 | Speech to text | Faster Whisper-compatible local models in CTranslate2 format, or provider-neutral OpenAI-compatible transcription APIs |
 | Text to speech | Local Piper, local MOSS-TTS-Nano ONNX, provider-neutral OpenAI-compatible speech APIs, or Google Cloud TTS |

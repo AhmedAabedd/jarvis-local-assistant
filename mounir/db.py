@@ -41,6 +41,7 @@ MCP_TRANSPORTS = {"stdio", "streamable_http", "sse"}
 MCP_CREDENTIAL_FILE_LIMIT = 2 * 1024 * 1024
 MCP_CREDENTIAL_FILE_COUNT = 10
 MAX_SUBAGENT_DEPTH = 4
+_UNSET = object()
 HEARTBEAT_DEFAULT_INSTRUCTIONS = (
     "Check my connected services for new items that genuinely need my attention. "
     "Ignore routine or unchanged information."
@@ -410,6 +411,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             agent_key TEXT PRIMARY KEY,
             model TEXT NOT NULL,
             model_id INTEGER REFERENCES models(id),
+            generation_model_id INTEGER REFERENCES models(id),
+            connected INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1)),
             enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
             updated_at TEXT NOT NULL
         );
@@ -701,6 +704,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         "models": {"model": "TEXT"},
         "builtin_agent_settings": {
             "model_id": "INTEGER REFERENCES models(id)",
+            "generation_model_id": "INTEGER REFERENCES models(id)",
+            "connected": "INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1))",
             "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
         },
         "mcp_servers": {
@@ -2169,7 +2174,33 @@ def get_builtin_agent_runtime(
     }
 
 
-def list_builtin_agents() -> list[dict]:
+def get_builtin_agent_generation_runtime(agent_key: str) -> dict | None:
+    """Resolve the optional saved generation model for a built-in specialist."""
+    key = str(agent_key or "").removeprefix("builtin:").strip()
+    try:
+        with _connect() as conn:
+            selected = conn.execute(
+                """
+                SELECT m.model, m.provider, m.base_url, m.api_key
+                FROM builtin_agent_settings s
+                JOIN models m ON m.id = s.generation_model_id
+                WHERE s.agent_key = ?
+                """,
+                (key,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        selected = None
+    if selected is None:
+        return None
+    return {
+        "model": selected["model"],
+        "provider": selected["provider"],
+        "base_url": selected["base_url"],
+        "api_key": _resolve_key(selected["api_key"] or ""),
+    }
+
+
+def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
     capabilities = {
         item["builtin_key"]: item for item in builtin_agents.capabilities()
     }
@@ -2188,44 +2219,62 @@ def list_builtin_agents() -> list[dict]:
         with _connect() as conn:
             setting = conn.execute(
                 """
-                SELECT s.model_id, s.enabled,
-                       COALESCE(m.model, s.model) AS model
+                SELECT s.model_id, s.generation_model_id, s.connected, s.enabled,
+                       COALESCE(m.model, s.model) AS model,
+                       gm.model AS generation_model
                 FROM builtin_agent_settings s
                 LEFT JOIN models m ON m.id = s.model_id
+                LEFT JOIN models gm ON gm.id = s.generation_model_id
                 WHERE s.agent_key = ?
                 """,
                 (key,),
             ).fetchone()
         capability = capabilities[key]
+        default_prompt = builtin_agents.system_prompt(key)
         result.append(
             {
                 **definition,
+                "system_prompt": default_prompt,
                 "model_id": setting["model_id"] if setting else None,
                 "model": (
                     setting["model"] if setting else definition["default_model"]
                 ),
+                "generation_model_id": (
+                    setting["generation_model_id"] if setting else None
+                ) if key == "media" else None,
+                "generation_model": (
+                    setting["generation_model"] if setting else None
+                ) if key == "media" else None,
+                "generation_model_options": options if key == "media" else [],
                 "enabled": bool(setting["enabled"]) if setting else True,
+                "connected": bool(setting["connected"]) if setting else True,
                 "model_options": options,
                 "tools": capability["tools"],
             }
         )
-    return result
+    return [agent for agent in result if agent["connected"]] if connected_only else result
 
 
 def update_builtin_agent(
     agent_key: str,
     *,
-    model_id: int | None = None,
+    model_id: int | None | object = _UNSET,
+    generation_model_id: int | None | object = _UNSET,
+    connected: bool | None = None,
     enabled: bool | None = None,
 ) -> dict:
     definition = builtin_agents.definition(agent_key)
     if definition is None:
         raise ValueError("built-in specialist was not found")
-    if model_id is None and enabled is None:
-        raise ValueError("provide a model or availability change")
+    if (
+        model_id is _UNSET and generation_model_id is _UNSET
+        and connected is None and enabled is None
+    ):
+        raise ValueError("provide a configuration change")
+    model_requested = model_id is not _UNSET
     selected = None
     requested_id = None
-    if model_id is not None:
+    if model_requested and model_id is not None:
         try:
             requested_id = int(model_id)
         except (TypeError, ValueError) as exc:
@@ -2233,18 +2282,56 @@ def update_builtin_agent(
         selected = get_model(requested_id)
         if selected is None:
             raise ValueError("choose a configured model")
+    generation_requested = generation_model_id is not _UNSET
+    requested_generation_id = None
+    if generation_requested:
+        if definition["key"] != "media":
+            raise ValueError("only Files and Media supports a generation model")
+        if generation_model_id is not None:
+            try:
+                requested_generation_id = int(generation_model_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("choose a generation model") from exc
+            if get_model(requested_generation_id) is None:
+                raise ValueError("choose a configured generation model")
     normalized_enabled = (
         int(_bool(enabled, "enabled")) if enabled is not None else None
     )
+    normalized_connected = (
+        int(_bool(connected, "connected")) if connected is not None else None
+    )
     with _connect() as conn:
-        if selected is not None:
+        if model_requested:
             conn.execute(
                 """
                 UPDATE builtin_agent_settings
                 SET model = ?, model_id = ?, updated_at = ?
                 WHERE agent_key = ?
                 """,
-                (selected["model"], requested_id, _now(), definition["key"]),
+                (
+                    selected["model"] if selected else definition["default_model"],
+                    requested_id,
+                    _now(),
+                    definition["key"],
+                ),
+            )
+        if generation_requested:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET generation_model_id = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (requested_generation_id, _now(), definition["key"]),
+            )
+        if normalized_connected is not None:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET connected = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (normalized_connected, _now(), definition["key"]),
             )
         if normalized_enabled is not None:
             conn.execute(
@@ -2271,10 +2358,10 @@ def is_builtin_agent_enabled(agent_key: str) -> bool:
     key = str(agent_key or "").removeprefix("builtin:").strip()
     with _connect() as conn:
         row = conn.execute(
-            "SELECT enabled FROM builtin_agent_settings WHERE agent_key = ?",
+            "SELECT enabled, connected FROM builtin_agent_settings WHERE agent_key = ?",
             (key,),
         ).fetchone()
-    return bool(row and row["enabled"])
+    return bool(row and row["enabled"] and row["connected"])
 
 
 def enabled_builtin_agent_keys() -> set[str]:
@@ -2282,7 +2369,8 @@ def enabled_builtin_agent_keys() -> set[str]:
         return {
             str(row["agent_key"])
             for row in conn.execute(
-                "SELECT agent_key FROM builtin_agent_settings WHERE enabled = 1"
+                """SELECT agent_key FROM builtin_agent_settings
+                   WHERE enabled = 1 AND connected = 1"""
             )
         }
 
@@ -3675,6 +3763,20 @@ def delete_model_result(model_id: int) -> DeletionResult:
                 f"the {definition['name']} built-in agent"
                 if definition
                 else f"the {row['agent_key']} built-in agent"
+            )
+        generation_rows = conn.execute(
+            """
+            SELECT agent_key FROM builtin_agent_settings
+            WHERE generation_model_id = ? ORDER BY agent_key
+            """,
+            (model_id,),
+        ).fetchall()
+        for row in generation_rows:
+            definition = builtin_agents.definition(row["agent_key"])
+            dependencies.append(
+                f"the {definition['name']} built-in agent's generation capability"
+                if definition
+                else f"the {row['agent_key']} built-in agent's generation capability"
             )
         agent_rows = conn.execute(
             "SELECT name FROM subagents WHERE model_id = ? ORDER BY name", (model_id,)
