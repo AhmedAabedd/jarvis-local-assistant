@@ -343,6 +343,13 @@ was typed or recorded. `/status`, `/reset`, and `/help` are also registered in
 Telegram's command menu. Voice replies use the configured text-to-speech provider
 and fall back to text if speech generation is unavailable.
 
+Incoming photos, videos, video notes, animations, and documents are downloaded to
+Mounir's private attachment directory and passed to the Files and Media specialist
+with their exact local path and optional Telegram caption. Attachments remain
+available for follow-up turns. The directory and download ceiling can be customized
+with `MOUNIR_TELEGRAM_ATTACHMENT_DIR` and
+`MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES`.
+
 Web and Telegram maintain **separate conversation histories**. Tool execution is
 serialized across both channels so simultaneous requests cannot race while acting
 on shared tools, accounts, services, or devices. Confirmations return to their
@@ -587,6 +594,8 @@ edited in Agent Studio and take precedence after their initial import.
 | `MOUNIR_THINK` | `false` | Enable supported model thinking mode |
 | `MOUNIR_MAX_HISTORY` | `20` | Bounded recent-message prompt window |
 | `MOUNIR_DATA_DIR` | `~/.mounir` | SQLite database, conversations, and local voice data |
+| `MOUNIR_TELEGRAM_ATTACHMENT_DIR` | `<data dir>/telegram/attachments` | Persistent incoming Telegram photos, videos, and files |
+| `MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES` | `20971520` | Maximum Telegram attachment download size |
 | `MOUNIR_MCP_TOOL_TIMEOUT` | `60` | Maximum seconds for one MCP tool call |
 | `MOUNIR_MCP_AGENT_TIMEOUT` | `300` | Maximum seconds for one delegated MCP task |
 | `NVIDIA_API_KEY` | unset | Initial Media and System provider credential |

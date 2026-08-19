@@ -257,6 +257,17 @@ TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ENABLED: bool = os.environ.get("MOUNIR_TELEGRAM_ENABLED", "true").lower() in (
     "1", "true", "yes", "on"
 )
+# Incoming photos, videos, and documents are retained here so later Telegram
+# turns can still refer to them. Both values remain installation-configurable.
+TELEGRAM_ATTACHMENT_DIR: Path = Path(
+    os.environ.get(
+        "MOUNIR_TELEGRAM_ATTACHMENT_DIR",
+        str(DATA_DIR / "telegram" / "attachments"),
+    )
+)
+TELEGRAM_MAX_ATTACHMENT_BYTES: int = int(
+    os.environ.get("MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
+)
 
 
 # --- Groq ---------------------------------------------------------------

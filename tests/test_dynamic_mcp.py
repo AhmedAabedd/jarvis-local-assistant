@@ -4344,6 +4344,174 @@ class InterfaceRoutingTests(unittest.TestCase):
         self.assertEqual(fake_agent.requests, ["hello"])
         self.assertEqual(fake_bot.sent[-1][1], "Voice-note reply")
 
+    def test_telegram_photos_videos_and_files_are_saved_and_delegated(self):
+        db.init()
+
+        class FakeBot:
+            def __init__(self):
+                self.handlers = []
+                self.requested_file_ids = []
+                self.downloaded_paths = []
+                self.sent = []
+
+            def register_message_handler(self, handler, **filters):
+                self.handlers.append((handler, filters))
+
+            def get_file(self, file_id):
+                self.requested_file_ids.append(file_id)
+                return SimpleNamespace(file_path=f"incoming/{file_id}")
+
+            def download_file(self, file_path):
+                self.downloaded_paths.append(file_path)
+                return f"payload:{file_path}".encode()
+
+            def send_chat_action(self, *_args, **_kwargs):
+                return None
+
+            def reply_to(self, message, text):
+                self.sent.append((message.chat.id, text))
+
+        fake_bot = FakeBot()
+        with tempfile.TemporaryDirectory() as attachment_dir:
+            bridge = TelegramBridge(
+                token="123:abc",
+                chat_id="42",
+                bot_factory=lambda _token: fake_bot,
+                attachment_dir=attachment_dir,
+            )
+            delegated = []
+            bridge._answer = lambda chat_id, prompt: delegated.append((chat_id, prompt))
+
+            messages = [
+                SimpleNamespace(
+                    chat=SimpleNamespace(id=42),
+                    message_id=101,
+                    caption="What is shown here?",
+                    photo=[
+                        SimpleNamespace(file_id="small-photo", file_size=10),
+                        SimpleNamespace(file_id="large-photo", file_size=20),
+                    ],
+                ),
+                SimpleNamespace(
+                    chat=SimpleNamespace(id=42),
+                    message_id=102,
+                    caption="Summarize this clip",
+                    video=SimpleNamespace(
+                        file_id="video-id",
+                        file_size=30,
+                        file_name="demo.mp4",
+                        mime_type="video/mp4",
+                    ),
+                ),
+                SimpleNamespace(
+                    chat=SimpleNamespace(id=42),
+                    message_id=103,
+                    caption="Extract the totals",
+                    document=SimpleNamespace(
+                        file_id="document-id",
+                        file_size=40,
+                        file_name="../../quarterly.xlsx",
+                        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                ),
+            ]
+
+            for message in messages:
+                bridge._handle_attachment(message)
+
+            self.assertEqual(
+                fake_bot.requested_file_ids,
+                ["large-photo", "video-id", "document-id"],
+            )
+            self.assertEqual(len(delegated), 3)
+            saved_files = sorted(Path(attachment_dir).glob("42/*"))
+            self.assertEqual(len(saved_files), 3)
+            self.assertTrue(all(path.is_file() for path in saved_files))
+            self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in saved_files))
+            self.assertTrue(any(path.name.endswith("quarterly.xlsx") for path in saved_files))
+            self.assertFalse(any(".." in path.name for path in saved_files))
+            self.assertIn("What is shown here?", delegated[0][1])
+            self.assertIn("Summarize this clip", delegated[1][1])
+            self.assertIn("Extract the totals", delegated[2][1])
+            self.assertTrue(
+                all("Local attachment path:" in prompt for _chat_id, prompt in delegated)
+            )
+            self.assertTrue(
+                any(
+                    filters.get("content_types")
+                    == ["photo", "video", "video_note", "animation", "document"]
+                    for _handler, filters in fake_bot.handlers
+                )
+            )
+
+    def test_telegram_attachment_size_limit_is_checked_before_download(self):
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+                self.get_file_called = False
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def get_file(self, _file_id):
+                self.get_file_called = True
+                raise AssertionError("oversized attachment should not be downloaded")
+
+            def reply_to(self, message, text):
+                self.sent.append((message.chat.id, text))
+
+        fake_bot = FakeBot()
+        bridge = TelegramBridge(
+            token="123:abc",
+            chat_id="42",
+            max_attachment_bytes=100,
+            bot_factory=lambda _token: fake_bot,
+        )
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=42),
+            message_id=1,
+            caption="",
+            document=SimpleNamespace(
+                file_id="large-file", file_size=101, file_name="large.pdf"
+            ),
+        )
+
+        bridge._handle_attachment(message)
+
+        self.assertFalse(fake_bot.get_file_called)
+        self.assertIn("too large", fake_bot.sent[-1][1])
+
+    def test_telegram_attachment_from_another_chat_is_not_downloaded(self):
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def get_file(self, _file_id):
+                raise AssertionError("unauthorized attachment should not be downloaded")
+
+            def reply_to(self, message, text):
+                self.sent.append((message.chat.id, text))
+
+        fake_bot = FakeBot()
+        bridge = TelegramBridge(
+            token="123:abc",
+            chat_id="42",
+            bot_factory=lambda _token: fake_bot,
+        )
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=99),
+            message_id=1,
+            caption="",
+            photo=[SimpleNamespace(file_id="private-photo", file_size=1)],
+        )
+
+        bridge._handle_attachment(message)
+
+        self.assertIn("private assistant", fake_bot.sent[-1][1])
+
     def test_telegram_commands_persist_reply_mode_and_control_typed_replies(self):
         db.init()
         db.update_telegram_settings(reply_mode="text")
