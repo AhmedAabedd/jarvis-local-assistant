@@ -20,7 +20,7 @@ from pathlib import Path
 
 import telebot
 
-from . import config, db, stt, tools, trace, tts
+from . import chat_attachments, config, db, stt, tools, trace, tts
 from .agent import Agent
 
 MAX_MESSAGE_CHARS = 4096
@@ -415,7 +415,9 @@ class TelegramBridge:
             raise RuntimeError(detail or "unsupported audio format")
         return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
-    def _answer(self, chat_id: int, text: str) -> None:
+    def _answer(
+        self, chat_id: int, text: str, attachments: list[dict] | None = None
+    ) -> None:
         """Run one authorized Telegram turn using the saved output mode."""
         reply_mode = self.reply_mode
         with self.turn_lock:
@@ -428,10 +430,13 @@ class TelegramBridge:
             typing.start()
             try:
                 with tools.use_confirmation_handler(self._telegram_confirm):
+                    attachment_args = (
+                        {"attachments": attachments} if attachments else {}
+                    )
                     response = (
-                        self.agent.respond(text, voice=True)
+                        self.agent.respond(text, voice=True, **attachment_args)
                         if reply_mode == "voice"
-                        else self.agent.respond(text)
+                        else self.agent.respond(text, **attachment_args)
                     )
                     reply = "".join(response).strip()
             except Exception as exc:
@@ -629,6 +634,9 @@ class TelegramBridge:
             if media is None:
                 continue
             mime_type = str(getattr(media, "mime_type", "") or "")
+            if attribute == "document" and mime_type.startswith("image/"):
+                kind = "image"
+                default_extension = mimetypes.guess_extension(mime_type) or ".jpg"
             extension = mimetypes.guess_extension(mime_type) or default_extension
             fallback = f"telegram-{kind}-{message_id}{extension}"
             return kind, media, fallback
@@ -694,12 +702,17 @@ class TelegramBridge:
                 raise ValueError(
                     f"attachment exceeds the configured {limit_mib:g} MiB limit"
                 )
-            saved_path = self._store_attachment(
-                raw,
-                chat_id=chat_id,
-                message_id=getattr(message, "message_id", ""),
-                filename=original_name,
-            )
+            if kind == "image":
+                attachment = chat_attachments.save(raw, original_name)
+                saved_path = Path(chat_attachments.resolve(attachment["id"])["path"])
+            else:
+                attachment = None
+                saved_path = self._store_attachment(
+                    raw,
+                    chat_id=chat_id,
+                    message_id=getattr(message, "message_id", ""),
+                    filename=original_name,
+                )
         except Exception as exc:
             trace.kv("telegram attachment", f"download failed: {exc}")
             bot.reply_to(
@@ -711,6 +724,10 @@ class TelegramBridge:
 
         caption = str(getattr(message, "caption", "") or "").strip()
         request = caption or f"Analyze and describe this {kind}."
+        if attachment is not None:
+            trace.kv("telegram attachment", f"saved image: {saved_path}")
+            self._answer(chat_id, request, attachments=[attachment])
+            return
         prompt = (
             f"The user sent a Telegram {kind} attachment.\n"
             f"Local attachment path: {saved_path}\n"

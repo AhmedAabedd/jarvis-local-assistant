@@ -524,12 +524,18 @@ class Agent:
         self.use_tools = use_tools
         self.scoped_targets = scoped_targets
 
-    def respond(self, user_input: str, *, voice: bool = False) -> Iterator[str]:
+    def respond(
+        self,
+        user_input: str,
+        *,
+        voice: bool = False,
+        attachments: list[dict] | None = None,
+    ) -> Iterator[str]:
         """Run and stream one complete LangGraph turn."""
 
         if self._profile_managed_prompt:
             self.conversation.system_prompt = cfg.build_system_prompt(db.get_profile())
-        self.conversation.add_user(user_input)
+        self.conversation.add_user(user_input, attachments=attachments)
         messages = self.conversation.to_messages()
         dynamic_specs = None
         if self.use_tools:

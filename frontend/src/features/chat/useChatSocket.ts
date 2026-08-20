@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ChatMessage } from '../../api/types'
+import type { ChatAttachment, ChatMessage } from '../../api/types'
 
 type Connection = 'connecting' | 'online' | 'offline'
 interface Confirmation {
@@ -85,13 +85,21 @@ export function useChatSocket(onHeartbeat: (text: string, title?: string) => voi
 
   const streamingRef = useRef(false)
   const send = useCallback(
-    (text: string) => {
+    (text: string, attachments: ChatAttachment[] = []) => {
       const value = text.trim()
-      if (!value || connection !== 'online' || streamingRef.current) return false
-      setMessages((current) => [...current, { role: 'user', content: value }])
+      if ((!value && !attachments.length) || connection !== 'online' || streamingRef.current)
+        return false
+      const prompt = value || 'Describe this image.'
+      setMessages((current) => [...current, { role: 'user', content: prompt, attachments }])
       setStreaming(true)
       streamingRef.current = true
-      socket.current?.send(JSON.stringify({ type: 'user', text: value }))
+      socket.current?.send(
+        JSON.stringify({
+          type: 'user',
+          text: prompt,
+          attachments: attachments.map((attachment) => attachment.id),
+        }),
+      )
       return true
     },
     [connection],

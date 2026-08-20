@@ -1,6 +1,7 @@
 import type {
   AgentOverview,
   BuiltinAgent,
+  ChatAttachment,
   HeartbeatSettings,
   HeartbeatTask,
   McpServer,
@@ -50,6 +51,13 @@ const json = (method: string, body?: unknown): RequestInit => ({
 })
 
 export const api = {
+  chat: {
+    uploadAttachment: (file: File) => {
+      const body = new FormData()
+      body.append('file', file)
+      return request<ChatAttachment>('/api/chat/attachments', { method: 'POST', body })
+    },
+  },
   profile: {
     get: () => request<Profile>('/api/profile'),
     update: (body: Partial<Profile>) => request<Profile>('/api/profile', json('PUT', body)),
@@ -112,8 +120,7 @@ export const api = {
       parent_node_id: number | null
       workflow_id?: number
       position?: number
-    }) =>
-      request<SubagentNode>('/api/subagent-nodes', json('POST', body)),
+    }) => request<SubagentNode>('/api/subagent-nodes', json('POST', body)),
     get: (id: number) => request<SubagentNode>(`/api/subagent-nodes/${id}`),
     update: (id: number, body: { enabled_tools: string[] | null }) =>
       request<SubagentNode>(`/api/subagent-nodes/${id}`, json('PUT', body)),

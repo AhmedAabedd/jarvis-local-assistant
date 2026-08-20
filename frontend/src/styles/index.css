@@ -3900,7 +3900,7 @@ button.resource-header-action {
 }
 .composer {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
   gap: 9px;
   align-items: end;
   padding: 7px;
@@ -3908,6 +3908,77 @@ button.resource-header-action {
   border-radius: 15px;
   background: var(--surface);
   box-shadow: 0 15px 45px rgb(0 0 0 / 25%);
+}
+.composer-file-input {
+  display: none;
+}
+.composer-attachment {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 440px;
+  margin: 0 0 8px 7px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.composer-attachment img {
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  border-radius: 8px;
+  object-fit: cover;
+}
+.composer-attachment span {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+}
+.composer-attachment strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-attachment small,
+.composer-error {
+  color: var(--muted);
+  font-size: 9px;
+}
+.composer-attachment button {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.composer-attachment button:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.composer-error {
+  margin: 0 0 8px 7px;
+  color: var(--danger);
+}
+.message__attachment {
+  display: block;
+  width: min(100%, 360px);
+  max-height: 360px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+  object-fit: contain;
+}
+.spin {
+  animation: spin 0.7s linear infinite;
+}
+.message__bubble span {
+  white-space: pre-wrap;
 }
 .composer textarea {
   max-height: 120px;
@@ -3925,6 +3996,14 @@ button.resource-header-action {
   color: var(--muted);
   border-color: var(--line);
   background: var(--surface-2);
+}
+.composer .composer-attachment-button {
+  color: var(--muted);
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+.composer .composer-attachment-button:hover:not(:disabled) {
+  color: var(--accent);
 }
 .composer .composer-voice:hover:not(:disabled) {
   color: var(--accent);

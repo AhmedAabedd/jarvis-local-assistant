@@ -3696,6 +3696,52 @@ class AdminApiTests(TemporaryDatabaseTest):
 
         asyncio.run(exercise_api())
 
+    def test_web_chat_image_upload_is_private_and_visible_in_history(self):
+        import server as web_server
+
+        class Upload:
+            def __init__(self, filename: str, data: bytes):
+                self.filename = filename
+                self.data = data
+
+            async def read(self, size: int = -1) -> bytes:
+                return self.data if size < 0 else self.data[:size]
+
+        image = io.BytesIO()
+        from PIL import Image
+
+        Image.new("RGB", (3, 2), "green").save(image, format="PNG")
+
+        async def exercise_api():
+            with tempfile.TemporaryDirectory() as directory:
+                with patch.object(
+                    config, "CHAT_ATTACHMENT_DIR", Path(directory) / "attachments"
+                ):
+                    record = await web_server.upload_chat_attachment(
+                        Upload("screen.png", image.getvalue())
+                    )
+                    self.assertEqual(record["filename"], "screen.png")
+                    self.assertNotIn("path", record)
+
+                    preview = await web_server.chat_attachment_content(record["id"])
+                    self.assertEqual(preview.media_type, "image/png")
+                    self.assertEqual(Path(preview.path).read_bytes(), image.getvalue())
+
+                    rejected = await web_server.upload_chat_attachment(
+                        Upload("fake.png", b"not an image")
+                    )
+                    self.assertEqual(rejected.status_code, 400)
+
+                    web_server.agent.conversation.reset()
+                    web_server.agent.conversation.add_user(
+                        "Inspect this", attachments=[record]
+                    )
+                    history = await web_server.conversation_history()
+                    self.assertEqual(history["messages"][0]["attachments"], [record])
+                    web_server.agent.conversation.reset()
+
+        asyncio.run(exercise_api())
+
     def test_generic_mcp_setup_actions_are_driven_by_saved_configuration(self):
         import httpx
         import server as web_server
@@ -4372,7 +4418,14 @@ class InterfaceRoutingTests(unittest.TestCase):
                 self.sent.append((message.chat.id, text))
 
         fake_bot = FakeBot()
-        with tempfile.TemporaryDirectory() as attachment_dir:
+        with (
+            tempfile.TemporaryDirectory() as attachment_dir,
+            patch.object(
+                config,
+                "CHAT_ATTACHMENT_DIR",
+                Path(attachment_dir) / "conversation-images",
+            ),
+        ):
             bridge = TelegramBridge(
                 token="123:abc",
                 chat_id="42",
@@ -4380,7 +4433,9 @@ class InterfaceRoutingTests(unittest.TestCase):
                 attachment_dir=attachment_dir,
             )
             delegated = []
-            bridge._answer = lambda chat_id, prompt: delegated.append((chat_id, prompt))
+            bridge._answer = lambda chat_id, prompt, attachments=None: delegated.append(
+                (chat_id, prompt, attachments)
+            )
 
             messages = [
                 SimpleNamespace(
@@ -4416,6 +4471,17 @@ class InterfaceRoutingTests(unittest.TestCase):
                 ),
             ]
 
+            image_bytes = io.BytesIO()
+            from PIL import Image
+
+            Image.new("RGB", (3, 3), "blue").save(image_bytes, format="JPEG")
+            original_download = fake_bot.download_file
+            fake_bot.download_file = lambda path: (
+                image_bytes.getvalue()
+                if path.endswith("large-photo")
+                else original_download(path)
+            )
+
             for message in messages:
                 bridge._handle_attachment(message)
 
@@ -4425,16 +4491,22 @@ class InterfaceRoutingTests(unittest.TestCase):
             )
             self.assertEqual(len(delegated), 3)
             saved_files = sorted(Path(attachment_dir).glob("42/*"))
-            self.assertEqual(len(saved_files), 3)
+            self.assertEqual(len(saved_files), 2)
             self.assertTrue(all(path.is_file() for path in saved_files))
             self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in saved_files))
             self.assertTrue(any(path.name.endswith("quarterly.xlsx") for path in saved_files))
             self.assertFalse(any(".." in path.name for path in saved_files))
-            self.assertIn("What is shown here?", delegated[0][1])
+            self.assertEqual("What is shown here?", delegated[0][1])
+            self.assertEqual(len(delegated[0][2]), 1)
             self.assertIn("Summarize this clip", delegated[1][1])
+            self.assertIsNone(delegated[1][2])
             self.assertIn("Extract the totals", delegated[2][1])
+            self.assertIsNone(delegated[2][2])
             self.assertTrue(
-                all("Local attachment path:" in prompt for _chat_id, prompt in delegated)
+                all(
+                    "Local attachment path:" in prompt
+                    for _chat_id, prompt, _attachments in delegated[1:]
+                )
             )
             self.assertTrue(
                 any(

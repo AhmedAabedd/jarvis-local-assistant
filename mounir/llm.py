@@ -57,14 +57,94 @@ def _json_arguments(value) -> str:
     return json.dumps(value or {})
 
 
-def _compatible_messages(messages: list[dict]) -> list[dict]:
+def _compatible_content(content, provider: str | None):
+    """Adapt common multimodal blocks only where a provider's wire shape differs."""
+    if not isinstance(content, list) or str(provider or "").casefold() != "mistral":
+        return content
+    normalized = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "image_url":
+            normalized.append(part)
+            continue
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict) and image_url.get("url"):
+            normalized.append({**part, "image_url": image_url["url"]})
+        else:
+            normalized.append(part)
+    return normalized
+
+
+def _portable_tool_content(content) -> tuple[object, list[dict]]:
+    """Split visual output from a tool's portable textual response.
+
+    The common chat-completions contract represents tool results as text, while
+    image inputs belong to a multimodal user message.  LangChain can preserve
+    image blocks inside ``ToolMessage`` objects, so move those blocks at the
+    transport boundary instead of making individual tools provider-aware.
+    """
+    if not isinstance(content, list):
+        return content, []
+
+    text_parts: list[str] = []
+    images: list[dict] = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "image_url":
+            images.append(part)
+            continue
+        if isinstance(part, dict) and part.get("type") == "text":
+            text = str(part.get("text") or "").strip()
+            if text:
+                text_parts.append(text)
+            continue
+        if isinstance(part, str) and part.strip():
+            text_parts.append(part.strip())
+
+    if not images:
+        return content, []
+    return "\n".join(text_parts) or "Tool completed and returned visual media.", images
+
+
+def _compatible_messages(
+    messages: list[dict], provider: str | None = None
+) -> list[dict]:
     """Keep history within the common OpenAI chat-completions contract."""
     normalized: list[dict] = []
+    pending_visuals: list[dict] = []
+
+    def flush_visuals() -> None:
+        if not pending_visuals:
+            return
+        normalized.append(
+            {
+                "role": "user",
+                "content": _compatible_content(
+                    [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Visual media returned by the preceding tool "
+                                "results. Use it together with those results."
+                            ),
+                        },
+                        *pending_visuals,
+                    ],
+                    provider,
+                ),
+            }
+        )
+        pending_visuals.clear()
+
     for message in messages:
         role = str(message.get("role") or "user")
+        if role != "tool":
+            flush_visuals()
+        content = message.get("content") or ""
+        if role == "tool":
+            content, images = _portable_tool_content(content)
+            pending_visuals.extend(images)
         entry: dict = {
             "role": role,
-            "content": message.get("content") or "",
+            "content": _compatible_content(content, provider),
         }
         if message.get("name"):
             entry["name"] = message["name"]
@@ -85,6 +165,7 @@ def _compatible_messages(messages: list[dict]) -> list[dict]:
                 for index, call in enumerate(message["tool_calls"])
             ]
         normalized.append(entry)
+    flush_visuals()
     return normalized
 
 
@@ -96,13 +177,14 @@ def _payload(
     stream: bool,
     temperature: float | None,
     max_tokens: int,
+    provider: str | None = None,
 ) -> dict:
     selected_model = str(model or "").strip()
     if not selected_model:
         raise OllamaError("A model ID is required.")
     body = {
         "model": selected_model,
-        "messages": _compatible_messages(messages),
+        "messages": _compatible_messages(messages, provider),
         "stream": stream,
         "max_tokens": max_tokens,
     }
@@ -220,6 +302,7 @@ def openai_chat(
                 stream=False,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                provider=provider,
             ),
             stream=False,
             timeout=180,
@@ -275,6 +358,7 @@ def chat_stream(
                 stream=True,
                 temperature=None,
                 max_tokens=8192,
+                provider=provider,
             ),
             stream=True,
             timeout=180,

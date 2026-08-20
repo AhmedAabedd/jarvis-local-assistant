@@ -1,4 +1,16 @@
-import { Bell, Bot, Check, History, Inbox, Mic, Send, Settings2, X } from 'lucide-react'
+import {
+  Bell,
+  Bot,
+  Check,
+  History,
+  ImagePlus,
+  Inbox,
+  LoaderCircle,
+  Mic,
+  Send,
+  Settings2,
+  X,
+} from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import type { Notification } from '../../api/types'
@@ -57,6 +69,10 @@ export function ChatPage() {
   )
   const chat = useChatSocket(addHeartbeat)
   const [text, setText] = useState('')
+  const [pendingImage, setPendingImage] = useState<{ file: File; preview: string } | null>(null)
+  const [attachmentError, setAttachmentError] = useState('')
+  const [uploadingImage, setUploadingImage] = useState(false)
+  const imageInput = useRef<HTMLInputElement | null>(null)
   const [voiceState, setVoiceState] = useState<VoiceState>('ready')
   const [voiceStream, setVoiceStream] = useState<MediaStream | null>(null)
   const recorder = useRef<MediaRecorder | null>(null)
@@ -77,6 +93,12 @@ export function ChatPage() {
       if (notificationToastTimer.current) window.clearTimeout(notificationToastTimer.current)
     },
     [],
+  )
+  useEffect(
+    () => () => {
+      if (pendingImage) URL.revokeObjectURL(pendingImage.preview)
+    },
+    [pendingImage],
   )
   useEffect(() => {
     if (!notificationsOpen) return
@@ -105,8 +127,34 @@ export function ChatPage() {
   const readNotifications = notifications.filter((item) => item.read_at)
   const visibleNotifications = showNotificationHistory ? readNotifications : unreadNotifications
 
-  const submit = () => {
-    if (chat.send(text)) setText('')
+  const submit = async () => {
+    if (uploadingImage || chat.streaming || chat.connection !== 'online') return
+    const prompt = text.trim()
+    if (!prompt && !pendingImage) return
+    setAttachmentError('')
+    setUploadingImage(Boolean(pendingImage))
+    try {
+      const attachment = pendingImage ? await api.chat.uploadAttachment(pendingImage.file) : null
+      if (chat.send(prompt, attachment ? [attachment] : [])) {
+        setText('')
+        setPendingImage(null)
+      }
+    } catch (error) {
+      setAttachmentError(
+        error instanceof Error ? error.message : 'The image could not be uploaded.',
+      )
+    } finally {
+      setUploadingImage(false)
+    }
+  }
+  const selectImage = (file?: File) => {
+    if (!file) return
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setAttachmentError('Choose a JPEG, PNG, or WebP image.')
+      return
+    }
+    setAttachmentError('')
+    setPendingImage({ file, preview: URL.createObjectURL(file) })
   }
   const toggleVoice = async () => {
     if (voiceState === 'listening') {
@@ -224,7 +272,17 @@ export function ChatPage() {
               key={index}
               className={`message message--${message.role} ${chat.streaming && message.role === 'assistant' && index === chat.messages.length - 1 ? 'message--streaming' : ''}`}
             >
-              <div className="message__bubble">{message.content}</div>
+              <div className="message__bubble">
+                {message.attachments?.map((attachment) => (
+                  <img
+                    className="message__attachment"
+                    src={attachment.url}
+                    alt={attachment.filename}
+                    key={attachment.id}
+                  />
+                ))}
+                {message.content && <span>{message.content}</span>}
+              </div>
             </div>
           ))}
           <div ref={bottom} />
@@ -237,7 +295,34 @@ export function ChatPage() {
               onDeny={() => chat.answerConfirmation(false)}
             />
           )}
+          {pendingImage && (
+            <div className="composer-attachment">
+              <img src={pendingImage.preview} alt={pendingImage.file.name} />
+              <span>
+                <strong>{pendingImage.file.name}</strong>
+                <small>{(pendingImage.file.size / (1024 * 1024)).toFixed(2)} MiB</small>
+              </span>
+              <button
+                type="button"
+                aria-label="Remove image attachment"
+                onClick={() => setPendingImage(null)}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          )}
+          {attachmentError && <div className="composer-error">{attachmentError}</div>}
           <div className="composer">
+            <input
+              ref={imageInput}
+              className="composer-file-input"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={(event) => {
+                selectImage(event.target.files?.[0])
+                event.target.value = ''
+              }}
+            />
             <textarea
               value={text}
               rows={1}
@@ -246,11 +331,20 @@ export function ChatPage() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
-                  submit()
+                  void submit()
                 }
               }}
               disabled={chat.streaming}
             />
+            <button
+              className="icon-button composer-attachment-button"
+              type="button"
+              onClick={() => imageInput.current?.click()}
+              disabled={chat.streaming || uploadingImage}
+              aria-label="Attach image"
+            >
+              <ImagePlus size={17} />
+            </button>
             <button
               className="icon-button composer-voice"
               onClick={toggleVoice}
@@ -261,11 +355,16 @@ export function ChatPage() {
             </button>
             <button
               className="icon-button"
-              onClick={submit}
-              disabled={!text.trim() || chat.streaming || chat.connection !== 'online'}
+              onClick={() => void submit()}
+              disabled={
+                (!text.trim() && !pendingImage) ||
+                chat.streaming ||
+                uploadingImage ||
+                chat.connection !== 'online'
+              }
               aria-label="Send"
             >
-              <Send size={17} />
+              {uploadingImage ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />}
             </button>
           </div>
         </div>

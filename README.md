@@ -286,11 +286,16 @@ actual compatibility.
 The dashboard keeps the conversation at the center of the experience:
 
 - **Left:** voice orb, speech controls, and entry to Agent Studio
-- **Center:** full-height text conversation and composer
+- **Center:** full-height multimodal conversation and composer
 - **Right:** persistent Heartbeat notifications and live activity
 
 Messages stream over WebSocket, conversation history survives refreshes, and tool
-approval requests appear in the same interface that initiated the action.
+approval requests appear in the same interface that initiated the action. The image
+button accepts JPEG, PNG, and WebP uploads. Uploaded images are stored privately as
+opaque conversation attachments and sent directly to a vision-capable supervisor;
+their pixels remain available to follow-up turns while the originating message is in
+the bounded conversation context. Image paths typed as text remain Files and Media
+operations and are not treated as uploads.
 
 ### Voice
 
@@ -343,12 +348,14 @@ was typed or recorded. `/status`, `/reset`, and `/help` are also registered in
 Telegram's command menu. Voice replies use the configured text-to-speech provider
 and fall back to text if speech generation is unavailable.
 
-Incoming photos, videos, video notes, animations, and documents are downloaded to
-Mounir's private attachment directory and passed to the Files and Media specialist
-with their exact local path and optional Telegram caption. Attachments remain
-available for follow-up turns. The directory and download ceiling can be customized
-with `MOUNIR_TELEGRAM_ATTACHMENT_DIR` and
-`MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES`.
+Incoming photos and image documents become multimodal conversation attachments, so
+the supervisor can inspect their pixels directly and retain them for follow-up turns.
+Videos, video notes, animations, and ordinary documents are downloaded to Mounir's
+private Telegram attachment directory and passed to Files and Media with their exact
+local path and optional caption. The Telegram directory and download ceiling can be
+customized with `MOUNIR_TELEGRAM_ATTACHMENT_DIR` and
+`MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES`; direct chat images use the shared chat
+attachment settings below.
 
 Web and Telegram maintain **separate conversation histories**. Tool execution is
 serialized across both channels so simultaneous requests cannot race while acting
@@ -594,7 +601,9 @@ edited in Agent Studio and take precedence after their initial import.
 | `MOUNIR_THINK` | `false` | Enable supported model thinking mode |
 | `MOUNIR_MAX_HISTORY` | `20` | Bounded recent-message prompt window |
 | `MOUNIR_DATA_DIR` | `~/.mounir` | SQLite database, conversations, and local voice data |
-| `MOUNIR_TELEGRAM_ATTACHMENT_DIR` | `<data dir>/telegram/attachments` | Persistent incoming Telegram photos, videos, and files |
+| `MOUNIR_CHAT_ATTACHMENT_DIR` | `<data dir>/chat/attachments` | Persistent images attached through web or messaging conversations |
+| `MOUNIR_CHAT_ATTACHMENT_MAX_BYTES` | `10485760` | Maximum size of one directly attached conversation image |
+| `MOUNIR_TELEGRAM_ATTACHMENT_DIR` | `<data dir>/telegram/attachments` | Persistent incoming Telegram videos and ordinary files |
 | `MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES` | `20971520` | Maximum Telegram attachment download size |
 | `MOUNIR_MCP_TOOL_TIMEOUT` | `60` | Maximum seconds for one MCP tool call |
 | `MOUNIR_MCP_AGENT_TIMEOUT` | `300` | Maximum seconds for one delegated MCP task |

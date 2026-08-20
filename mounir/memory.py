@@ -28,10 +28,17 @@ class Conversation:
 
     # --- mutation -----------------------------------------------------------
 
-    def add_user(self, content: str) -> None:
+    def add_user(self, content: str, attachments: list[dict] | None = None) -> None:
         now = datetime.datetime.now().strftime("%A, %d %B %Y, %H:%M:%S")
         stamped = f"[{now}]\n{content}"
-        self._messages.append({"role": "user", "content": stamped})
+        message = {"role": "user", "content": stamped}
+        if attachments:
+            from . import chat_attachments
+
+            message["attachments"] = [
+                chat_attachments.reference(item) for item in attachments
+            ]
+        self._messages.append(message)
 
     def add_assistant(self, content: str) -> None:
         self._messages.append({"role": "assistant", "content": content})
@@ -47,7 +54,9 @@ class Conversation:
 
     def to_messages(self) -> list[dict]:
         """Build the message list sent to Ollama: system prompt + OS context + window."""
-        window = _ensure_tool_call_pairs(self._messages[-self.max_messages :])
+        window = _hydrate_attachments(
+            _ensure_tool_call_pairs(self._messages[-self.max_messages :])
+        )
         base = []
         if self.system_prompt:
             base.append({"role": "system", "content": self.system_prompt})
@@ -66,9 +75,9 @@ class Conversation:
     def __len__(self) -> int:
         return len(self._messages)
 
-    def display_messages(self) -> list[dict[str, str]]:
+    def display_messages(self) -> list[dict]:
         """Return user-visible turns without system context or tool internals."""
-        visible: list[dict[str, str]] = []
+        visible: list[dict] = []
         # Snapshot first so a web refresh can read safely while a worker appends.
         for message in list(self._messages):
             role = message.get("role")
@@ -80,7 +89,21 @@ class Conversation:
                 continue
             if role == "user":
                 content = re.sub(r"^\[[^\n]+\]\n", "", content, count=1)
-            visible.append({"role": role, "content": content})
+            rendered = {"role": role, "content": content}
+            if role == "user" and message.get("attachments"):
+                from . import chat_attachments
+
+                attachments = []
+                for item in message["attachments"]:
+                    try:
+                        attachments.append(
+                            chat_attachments.public(chat_attachments.resolve(item["id"]))
+                        )
+                    except (KeyError, OSError, ValueError):
+                        continue
+                if attachments:
+                    rendered["attachments"] = attachments
+            visible.append(rendered)
         return visible
 
     # --- persistence --------------------------------------------------------
@@ -147,6 +170,34 @@ def _ensure_tool_call_pairs(window: list[dict]) -> list[dict]:
         else:
             out.append(m)
     return out
+
+
+def _hydrate_attachments(window: list[dict]) -> list[dict]:
+    """Turn durable image references into multimodal content for this model call."""
+    from . import chat_attachments
+
+    hydrated: list[dict] = []
+    for message in window:
+        attachments = message.get("attachments") or []
+        if message.get("role") != "user" or not attachments:
+            hydrated.append(message)
+            continue
+        copy = {key: value for key, value in message.items() if key != "attachments"}
+        parts = [{"type": "text", "text": str(message.get("content") or "")}]
+        unavailable = []
+        for item in attachments:
+            try:
+                parts.append(chat_attachments.image_part(item))
+            except (OSError, ValueError):
+                unavailable.append(str(item.get("filename") or "image"))
+        if unavailable:
+            parts[0]["text"] += (
+                "\n\nUnavailable conversation attachment(s): "
+                + ", ".join(unavailable)
+            )
+        copy["content"] = parts
+        hydrated.append(copy)
+    return hydrated
 
 
 def _default_path() -> Path:

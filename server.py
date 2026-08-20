@@ -4,6 +4,7 @@ FastAPI backend for the Mounir web UI.
 Serves:
   - GET  / and /admin      -> the compiled React application
   - WS   /ws/chat          -> text chat, streams Mounir's reply token by token
+  - POST /api/chat/attachments -> upload an image for multimodal web chat
   - POST /api/voice        -> upload audio, returns transcript + spoken reply (base64 wav)
 
 Also owns the heartbeat scheduler, Telegram long-polling bridge, and signed
@@ -44,7 +45,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from mounir.agent import Agent
-from mounir import config as cfg, db, llm, mcp_oauth, trace
+from mounir import chat_attachments, config as cfg, db, llm, mcp_oauth, trace
 from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
 from mounir.heartbeat import HeartbeatService
@@ -368,12 +369,38 @@ async def conversation_history():
     return {"messages": agent.conversation.display_messages()}
 
 
+@app.post("/api/chat/attachments")
+async def upload_chat_attachment(file: UploadFile = File(...)):
+    """Validate and store one image for the web conversation."""
+    try:
+        raw = await file.read(cfg.CHAT_ATTACHMENT_MAX_BYTES + 1)
+        record = chat_attachments.save(raw, file.filename or "image")
+        return chat_attachments.public(record)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/api/chat/attachments/{attachment_id}")
+async def chat_attachment_content(attachment_id: str):
+    """Serve a private conversation image to the local chat interface."""
+    try:
+        record = chat_attachments.resolve(attachment_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return FileResponse(
+        record["path"],
+        media_type=record["mime_type"],
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 @app.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket):
     """Text chat + tool confirmation over one WebSocket.
 
     Client -> server:
       {"type": "user", "text": "..."}                   a chat message
+      {"type": "user", "text": "...", "attachments": [id]} image chat
       {"type": "confirm_response", "id": "..", "approved": bool}
     Server -> client:
       {"type": "chunk", "text": "..."}                  partial reply token
@@ -407,11 +434,11 @@ async def ws_chat(ws: WebSocket):
 
     sender_task = asyncio.create_task(sender())
 
-    def produce(text: str):
+    def produce(text: str, attachments: list[dict]):
         try:
             with _agent_lock:
                 with tools.use_confirmation_handler(_web_confirm):
-                    for chunk in agent.respond(text):
+                    for chunk in agent.respond(text, attachments=attachments):
                         loop.call_soon_threadsafe(
                             out.put_nowait, {"type": "chunk", "text": chunk}
                         )
@@ -433,8 +460,27 @@ async def ws_chat(ws: WebSocket):
             elif kind == "user":
                 if busy["flag"]:
                     continue  # one turn at a time (shared conversation)
+                text = str(data.get("text") or "").strip()
+                raw_attachment_ids = data.get("attachments") or []
+                if not isinstance(raw_attachment_ids, list) or len(raw_attachment_ids) > 1:
+                    await out.put(
+                        {"type": "error", "message": "Send one image attachment at a time."}
+                    )
+                    continue
+                try:
+                    attachments = [
+                        chat_attachments.resolve(str(attachment_id))
+                        for attachment_id in raw_attachment_ids
+                    ]
+                except ValueError as exc:
+                    await out.put({"type": "error", "message": str(exc)})
+                    continue
+                if not text and attachments:
+                    text = "Describe this image."
+                if not text:
+                    continue
                 busy["flag"] = True
-                loop.run_in_executor(None, produce, data.get("text", ""))
+                loop.run_in_executor(None, produce, text, attachments)
     except WebSocketDisconnect:
         pass
     finally:

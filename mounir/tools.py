@@ -25,7 +25,7 @@ def delegate_to_knowledge(task: str) -> str:
     return run(task)
 
 def delegate_to_media(task: str) -> str:
-    """Delegate every local file or media operation to Files and Media."""
+    """Delegate any local file or media operation except inspecting directly attached chat images."""
     from . import db
     if not db.is_builtin_agent_enabled("media"):
         return "Files and Media is inactive and cannot be used."

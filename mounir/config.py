@@ -74,7 +74,10 @@ def build_system_prompt(profile: dict | None = None) -> str:
         "changed, prices, docs, comparisons — use an available web or research "
         "specialist tool. If none is supplied, say that lookup capability is unavailable. "
         "Never answer a potentially stale lookup from memory.\n"
-        "3. For EVERY local file or media operation — finding or listing paths; "
+        "3. Images directly attached to a conversation message are already in your "
+        "visual context: answer questions about those attached pixels yourself and "
+        "do not delegate merely to inspect them. For EVERY other local file or media "
+        "operation — finding or listing paths; "
         "reading, creating, editing, appending, or converting files; and analyzing "
         "or generating documents, data, presentations, images, audio, or video — "
         "you MUST delegate to the available Files and Media specialist. Pass every "
@@ -267,6 +270,19 @@ TELEGRAM_ATTACHMENT_DIR: Path = Path(
 )
 TELEGRAM_MAX_ATTACHMENT_BYTES: int = int(
     os.environ.get("MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
+)
+
+# Images uploaded through chat channels are stored as opaque conversation
+# attachments. The supervisor receives them through the common multimodal Chat
+# Completions content format; filesystem paths remain owned by Files and Media.
+CHAT_ATTACHMENT_DIR: Path = Path(
+    os.environ.get(
+        "MOUNIR_CHAT_ATTACHMENT_DIR",
+        str(DATA_DIR / "chat" / "attachments"),
+    )
+)
+CHAT_ATTACHMENT_MAX_BYTES: int = int(
+    os.environ.get("MOUNIR_CHAT_ATTACHMENT_MAX_BYTES", str(10 * 1024 * 1024))
 )
 
 

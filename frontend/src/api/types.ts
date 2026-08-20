@@ -352,6 +352,13 @@ export interface SetupActionResult {
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  attachments?: ChatAttachment[]
+}
+export interface ChatAttachment {
+  id: string
+  filename: string
+  mime_type: string
+  url: string
 }
 export interface Notification {
   id?: number
