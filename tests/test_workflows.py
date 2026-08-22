@@ -133,20 +133,31 @@ class WorkflowDatabaseTests(unittest.TestCase):
         agent = self._agent()
         db.add_subagent_node(agent["id"], workflow_id=workflow["id"])
         db.add_subagent_node(agent["id"], workflow_id=workflow["id"])
+        db.add_subagent_node(agent["id"], workflow_id=workflow["id"])
         calls = []
 
         def run_step(task, spec, *_args, **_kwargs):
             calls.append((spec["node_id"], task))
+            if len(calls) == 1:
+                return "first complete report\nwith every detail"
             return f"result-{len(calls)}"
 
         with patch.object(workflow_runtime, "run_mcp_agent", run_step):
             result = workflow_runtime.run(workflow["id"], "prepare release")
 
-        self.assertEqual(result, "result-2")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(result, "result-3")
+        self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0][1], "prepare release")
         self.assertIn("Original workflow request:\nprepare release", calls[1][1])
-        self.assertIn("Previous step output:\nresult-1", calls[1][1])
+        self.assertIn(
+            "1. Workflow helper\nfirst complete report\nwith every detail",
+            calls[1][1],
+        )
+        self.assertIn(
+            "1. Workflow helper\nfirst complete report\nwith every detail",
+            calls[2][1],
+        )
+        self.assertIn("2. Workflow helper\nresult-2", calls[2][1])
 
     def test_agentic_workflow_orchestrator_can_delegate_to_root_node(self):
         agent = self._agent()

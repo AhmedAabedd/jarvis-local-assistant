@@ -186,12 +186,16 @@ def _subagent_delegate_tool(
     )
 
 
-def _step_task(request: str, previous: Any) -> str:
-    if previous in (None, ""):
+def _step_task(request: str, completed: list[dict]) -> str:
+    if not completed:
         return request
+    history = "\n\n".join(
+        f"{index}. {item['name']}\n{str(item['result'])}"
+        for index, item in enumerate(completed, start=1)
+    )
     return (
         f"Original workflow request:\n{request}\n\n"
-        f"Previous step output:\n{str(previous)}"
+        f"Completed workflow steps:\n{history}"
     )
 
 
@@ -245,7 +249,7 @@ def _run_direct(
                     )
                 else:
                     report = run_mcp_agent(
-                        _step_task(state["request"], state.get("output")),
+                        _step_task(state["request"], state.get("completed", [])),
                         selected_spec,
                         protected_attempts,
                         all_specs=specs,
@@ -269,7 +273,7 @@ def _run_direct(
                     return {}
                 report = run(
                     int(selected_step["child_workflow_id"]),
-                    _step_task(state["request"], state.get("output")),
+                    _step_task(state["request"], state.get("completed", [])),
                     protected_attempts=protected_attempts,
                     lineage=lineage,
                 )
