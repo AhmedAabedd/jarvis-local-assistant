@@ -698,15 +698,10 @@ def _atomic_create(path: Path, writer: Callable[[Path], None]) -> None:
 
 
 def create_file(path: str, content: str) -> str:
-    from .. import tools
-
     resolution = path_search.resolve_output(path)
     if resolution.path is None:
         return resolution.message
     destination = resolution.path
-    blocked = tools.write_path_block_reason(destination)
-    if blocked:
-        return blocked
     extension = destination.suffix.lower()
     writers: dict[str, Callable[[Path], None]] = {
         ".pdf": lambda target: _write_pdf(target, content),
@@ -738,15 +733,10 @@ def edit_file(
     replace_all: bool = False,
 ) -> str:
     """Append to or exactly replace text in a file that the agent has read."""
-    from .. import tools
-
     resolution = path_search.resolve_existing(path, "file")
     if resolution.path is None:
         return resolution.message
     target = resolution.path
-    blocked = tools.write_path_block_reason(target)
-    if blocked:
-        return blocked
     if kind(target) != "text" and not _looks_like_text(target):
         return f"{target} is not an editable text file."
     key = str(target.resolve())
@@ -908,15 +898,10 @@ def _generate_image(destination: Path, prompt: str) -> None:
 
 
 def generate_media(path: str, prompt: str, specification: str = "") -> str:
-    from .. import tools
-
     resolution = path_search.resolve_output(path)
     if resolution.path is None:
         return resolution.message
     destination = resolution.path
-    blocked = tools.write_path_block_reason(destination)
-    if blocked:
-        return blocked
     extension = destination.suffix.lower()
     if extension in PRESENTATION_EXT:
         writer = lambda target: _write_presentation(target, specification or prompt)

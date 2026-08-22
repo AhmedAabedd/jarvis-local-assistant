@@ -16,24 +16,40 @@ import {
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
-import type { BuiltinAgent, McpServer, ModelRecord, Subagent } from '../../api/types'
+import type {
+  BuiltinAgent,
+  EmbeddingModelRecord,
+  McpServer,
+  ModelRecord,
+  Subagent,
+} from '../../api/types'
 import { McpIcon } from '../../components/icons/McpIcon'
 import { Button } from '../../components/ui/Button'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
 import { Loading } from '../../components/ui/Loading'
 import { Status } from '../../components/ui/Status'
-import { useAgents, useBuiltins, useModels, useServers, keys } from '../../hooks/useStudioData'
+import {
+  useAgents,
+  useBuiltins,
+  useEmbeddingModels,
+  useModels,
+  useServers,
+  keys,
+} from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 import { AgentForm } from './AgentForm'
 import { BuiltinAgentDetails } from './BuiltinAgentDetails'
+import { EmbeddingModelDetails } from './EmbeddingModelDetails'
+import { EmbeddingModelForm } from './EmbeddingModelForm'
 import { ModelForm } from './ModelForm'
 import { ResourceDetails } from './ResourceDetails'
 import { ServerForm } from './ServerForm'
 
 type Kind = 'models' | 'servers' | 'agents'
-type Item = ModelRecord | McpServer | Subagent | BuiltinAgent
-type AgentMode = 'built-in' | 'dynamic'
+type Item = ModelRecord | EmbeddingModelRecord | McpServer | Subagent | BuiltinAgent
+type ResourceMode = 'built-in' | 'dynamic'
+type ModelMode = 'language' | 'embedding'
 
 const meta = {
   models: {
@@ -59,26 +75,42 @@ function transportLabel(transport: McpServer['transport']) {
   return 'Server-sent events'
 }
 
+function readableEmbeddingAdapter(adapter: EmbeddingModelRecord['adapter']) {
+  return adapter === 'ollama' ? 'Ollama' : 'OpenAI-compatible'
+}
+
 export function ResourcesPage({ kind }: { kind: Kind }) {
   const client = useQueryClient()
   const [params, setParams] = useSearchParams()
   const location = useLocation()
   const models = useModels()
+  const embeddingModels = useEmbeddingModels()
   const servers = useServers()
   const agents = useAgents()
   const builtins = useBuiltins()
-  const [agentMode, setAgentMode] = useState<AgentMode>(
-    params.get('view') === 'built-in' ? 'built-in' : 'dynamic',
-  )
-  const isBuiltins = kind === 'agents' && agentMode === 'built-in'
+  const resourceMode: ResourceMode = params.get('view') === 'built-in' ? 'built-in' : 'dynamic'
+  const modelMode: ModelMode = params.get('view') === 'embedding' ? 'embedding' : 'language'
+  const hasTypePicker = kind === 'agents' || kind === 'servers'
+  const isEmbeddingMode = kind === 'models' && modelMode === 'embedding'
+  const isBuiltins = kind === 'agents' && resourceMode === 'built-in'
+  const isBuiltinServerMode = kind === 'servers' && resourceMode === 'built-in'
   const query = isBuiltins
     ? builtins
-    : kind === 'models'
-      ? models
-      : kind === 'servers'
-        ? servers
-        : agents
-  const data = (query.data || []) as Item[]
+    : isEmbeddingMode
+      ? embeddingModels
+      : kind === 'models'
+        ? models
+        : kind === 'servers'
+          ? servers
+          : agents
+  const queryData = (query.data || []) as Item[]
+  const data = useMemo(
+    () =>
+      kind === 'servers'
+        ? queryData.filter((item) => Boolean((item as McpServer).managed) === isBuiltinServerMode)
+        : queryData,
+    [isBuiltinServerMode, kind, queryData],
+  )
   const [selected, setSelected] = useState<Item | null>(null)
   const [editing, setEditing] = useState<Item | null | undefined>(undefined)
   const [deleting, setDeleting] = useState(false)
@@ -86,9 +118,9 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const formId = `${kind}-form`
   const info = meta[kind]
   const selectedAgentPlacements =
-    kind === 'agents' && !isBuiltins
-      ? ((selected as Subagent | null)?.placement_count ?? 0)
-      : 0
+    kind === 'agents' && !isBuiltins ? ((selected as Subagent | null)?.placement_count ?? 0) : 0
+  const selectedIsManagedServer =
+    kind === 'servers' && Boolean((selected as McpServer | null)?.managed)
 
   useEffect(() => {
     if ((location.state as { resetResourceList?: boolean } | null)?.resetResourceList) {
@@ -98,17 +130,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     }
   }, [location.key, location.state])
 
-  useEffect(() => {
-    if (kind !== 'agents') return
-    const requested = params.get('view')
-    if ((requested === 'built-in' || requested === 'dynamic') && requested !== agentMode) {
-      setAgentMode(requested)
-      setEditing(undefined)
-      setSelected(null)
-    }
-  }, [agentMode, kind, params])
-
-  useEffect(() => setSearch(''), [agentMode, kind])
+  useEffect(() => setSearch(''), [resourceMode, modelMode, kind])
 
   useEffect(() => {
     if (isBuiltins) {
@@ -127,6 +149,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const refresh = async () =>
     Promise.all([
       client.invalidateQueries({ queryKey: keys[kind] }),
+      client.invalidateQueries({ queryKey: keys.embeddingModels }),
       client.invalidateQueries({ queryKey: keys.builtins }),
       client.invalidateQueries({ queryKey: keys.overview }),
       client.invalidateQueries({ queryKey: keys.agentNodes }),
@@ -137,6 +160,12 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       if (isBuiltins) {
         if (!editing) throw new Error('No built-in subagent is selected.')
         return api.builtins.update((editing as BuiltinAgent).key, body)
+      }
+      if (isEmbeddingMode) {
+        if (editing) {
+          return api.embeddingModels.update((editing as EmbeddingModelRecord).id, body)
+        }
+        return api.embeddingModels.create(body)
       }
       if (editing) {
         return api[kind].update((editing as ModelRecord | McpServer | Subagent).id, body)
@@ -153,17 +182,27 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           ? { view: 'built-in', builtin: (item as BuiltinAgent).key }
           : kind === 'agents'
             ? { view: 'dynamic', open: String((item as Subagent).id) }
-            : { open: String((item as ModelRecord | McpServer).id) },
+            : kind === 'servers'
+              ? { view: resourceMode, open: String((item as McpServer).id) }
+              : {
+                  ...(isEmbeddingMode ? { view: 'embedding' } : {}),
+                  open: String((item as ModelRecord | EmbeddingModelRecord).id),
+                },
       )
     },
   })
   const remove = useMutation({
     mutationFn: () => {
       if (!selected || isBuiltins) return Promise.resolve()
+      if (isEmbeddingMode) {
+        return api.embeddingModels.remove((selected as EmbeddingModelRecord).id)
+      }
       return api[kind].remove((selected as ModelRecord | McpServer | Subagent).id)
     },
     onSuccess: async () => {
-      setParams({})
+      setParams(
+        hasTypePicker ? { view: resourceMode } : isEmbeddingMode ? { view: 'embedding' } : {},
+      )
       await refresh()
       setSelected(null)
       setDeleting(false)
@@ -191,10 +230,17 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       setSelected(saved)
     },
   })
-  const builtinModels = useMutation<
+  const builtinConfig = useMutation<
     BuiltinAgent,
     Error,
-    { model_id: number | null; generation_model_id?: number | null }
+    {
+      model_id: number | null
+      generation_model_id?: number | null
+      mcp_server_id?: number | null
+      embedding_enabled?: boolean
+      embedding_model_id?: number | null
+      confirm_tools?: string[]
+    }
   >({
     mutationFn: (body) => {
       if (!selected || !isBuiltins) throw new Error('No built-in subagent is selected.')
@@ -230,8 +276,29 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           }
         }
         const model = item as ModelRecord
+        const embedding = item as EmbeddingModelRecord
         const server = item as McpServer
         const agent = item as Subagent
+        if (isEmbeddingMode)
+          return {
+            title: embedding.name,
+            subtitle: '',
+            facts: [
+              {
+                value: readableEmbeddingAdapter(embedding.adapter),
+                title: `Connection: ${readableEmbeddingAdapter(embedding.adapter)}`,
+                icon: Layers3,
+              },
+              {
+                value: embedding.dimensions
+                  ? `${embedding.model} · ${embedding.dimensions}d`
+                  : embedding.model,
+                title: `Model: ${embedding.model}`,
+                icon: Cpu,
+              },
+            ],
+            status: embedding.connection_status,
+          }
         if (kind === 'models')
           return {
             title: model.name,
@@ -286,7 +353,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           status: undefined,
         }
       }),
-    [data, isBuiltins, kind],
+    [data, isBuiltins, isEmbeddingMode, kind],
   )
   const listed = useMemo(() => {
     const term = search.trim().toLocaleLowerCase()
@@ -311,27 +378,28 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const openList = () => {
     setEditing(undefined)
     setSelected(null)
-    setParams(kind === 'agents' ? { view: agentMode } : {})
+    setParams(hasTypePicker ? { view: resourceMode } : isEmbeddingMode ? { view: 'embedding' } : {})
   }
   const openCreate = () => {
     setSelected(null)
     setEditing(null)
-    setParams(kind === 'agents' ? { view: 'dynamic' } : {})
+    setParams(hasTypePicker ? { view: 'dynamic' } : isEmbeddingMode ? { view: 'embedding' } : {})
   }
   const cancelForm = () => {
     setEditing(undefined)
-    if (!selected) setParams(kind === 'agents' ? { view: agentMode } : {})
+    if (!selected)
+      setParams(
+        hasTypePicker ? { view: resourceMode } : isEmbeddingMode ? { view: 'embedding' } : {},
+      )
   }
   const submit = async (body: object) => {
     await save.mutateAsync(
-      kind === 'agents' && !isBuiltins && !editing
-        ? { ...body, connect_to_workflow: false }
-        : body,
+      kind === 'agents' && !isBuiltins && !editing ? { ...body, connect_to_workflow: false } : body,
     )
   }
 
-  const switchAgentMode = (mode: AgentMode) => {
-    setAgentMode(mode)
+  const switchResourceMode = (mode: ResourceMode) => {
+    if (mode === resourceMode) return
     setEditing(undefined)
     setSelected(null)
     setDeleting(false)
@@ -339,7 +407,23 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     setParams({ view: mode })
   }
 
-  const singular = isBuiltins ? 'built-in subagent' : info.singular
+  const switchModelMode = (mode: ModelMode) => {
+    if (mode === modelMode) return
+    setEditing(undefined)
+    setSelected(null)
+    setDeleting(false)
+    setSearch('')
+    setParams(mode === 'embedding' ? { view: 'embedding' } : {})
+  }
+
+  const singular = isBuiltins
+    ? 'built-in subagent'
+    : isBuiltinServerMode
+      ? 'built-in MCP server'
+      : isEmbeddingMode
+        ? 'embedding model'
+        : info.singular
+  const collectionTitle = isEmbeddingMode ? 'Embedding models' : info.title
 
   const inForm = editing !== undefined
   const headerTitle = inForm
@@ -378,10 +462,10 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         className="resource-header-action"
         icon={<ChevronLeft size={15} />}
         onClick={openList}
-        aria-label={`Back to ${info.title.toLowerCase()}`}
-        title={`Back to ${info.title.toLowerCase()}`}
+        aria-label={`Back to ${collectionTitle.toLowerCase()}`}
+        title={`Back to ${collectionTitle.toLowerCase()}`}
       />
-      {!isBuiltins && (
+      {!isBuiltins && !selectedIsManagedServer && (
         <Button
           className="resource-header-action"
           icon={<Trash2 size={15} />}
@@ -389,54 +473,82 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
             remove.reset()
             setDeleting(true)
           }}
-          aria-label={`Delete ${info.singular}`}
-          title={`Delete ${info.singular}`}
+          aria-label={`Delete ${singular}`}
+          title={`Delete ${singular}`}
         />
       )}
-      {!isBuiltins && (
+      {!isBuiltins && !selectedIsManagedServer && (
         <Button
           className="resource-header-action"
           variant="primary"
           icon={<Edit3 size={15} />}
           onClick={() => setEditing(selected)}
-          aria-label={`Edit ${info.singular}`}
-          title={`Edit ${info.singular}`}
+          aria-label={`Edit ${singular}`}
+          title={`Edit ${singular}`}
         />
       )}
     </div>
-  ) : (
-    !isBuiltins ? (
-      <Button variant="primary" icon={<Plus size={15} />} onClick={openCreate}>
-        Add {info.singular}
-      </Button>
-    ) : null
-  )
+  ) : !isBuiltins && !isBuiltinServerMode ? (
+    <Button variant="primary" icon={<Plus size={15} />} onClick={openCreate}>
+      Add {singular}
+    </Button>
+  ) : null
 
   return (
     <>
       <PageHeader title={headerTitle} description={headerDescription} actions={headerActions} />
-      <div className={`page-content ${kind === 'agents' ? 'stack' : ''}`}>
-        {kind === 'agents' && (
-          <div className="model-location-picker" role="tablist" aria-label="Subagent type">
+      <div className={`page-content ${hasTypePicker || kind === 'models' ? 'stack' : ''}`}>
+        {kind === 'models' && !inForm && !selected && (
+          <div className="model-location-picker" role="tablist" aria-label="Model type">
             <span
-              className={`model-location-picker__indicator ${agentMode === 'built-in' ? 'is-local' : ''}`}
+              className={`model-location-picker__indicator ${modelMode === 'embedding' ? 'is-local' : ''}`}
               aria-hidden="true"
             />
             <button
               type="button"
               role="tab"
-              className={agentMode === 'dynamic' ? 'is-active' : ''}
-              aria-selected={agentMode === 'dynamic'}
-              onClick={() => switchAgentMode('dynamic')}
+              className={modelMode === 'language' ? 'is-active' : ''}
+              aria-selected={modelMode === 'language'}
+              onClick={() => switchModelMode('language')}
+            >
+              Language
+            </button>
+            <button
+              type="button"
+              role="tab"
+              className={modelMode === 'embedding' ? 'is-active' : ''}
+              aria-selected={modelMode === 'embedding'}
+              onClick={() => switchModelMode('embedding')}
+            >
+              Embeddings
+            </button>
+          </div>
+        )}
+        {hasTypePicker && !inForm && !selected && (
+          <div
+            className="model-location-picker"
+            role="tablist"
+            aria-label={kind === 'agents' ? 'Subagent type' : 'MCP server type'}
+          >
+            <span
+              className={`model-location-picker__indicator ${resourceMode === 'built-in' ? 'is-local' : ''}`}
+              aria-hidden="true"
+            />
+            <button
+              type="button"
+              role="tab"
+              className={resourceMode === 'dynamic' ? 'is-active' : ''}
+              aria-selected={resourceMode === 'dynamic'}
+              onClick={() => switchResourceMode('dynamic')}
             >
               Dynamic
             </button>
             <button
               type="button"
               role="tab"
-              className={agentMode === 'built-in' ? 'is-active' : ''}
-              aria-selected={agentMode === 'built-in'}
-              onClick={() => switchAgentMode('built-in')}
+              className={resourceMode === 'built-in' ? 'is-active' : ''}
+              aria-selected={resourceMode === 'built-in'}
+              onClick={() => switchResourceMode('built-in')}
             >
               Built-in
             </button>
@@ -445,9 +557,16 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         {inForm ? (
           <section className="card resource-workspace resource-workspace--form">
             <div className="card__body">
-              {kind === 'models' && (
+              {kind === 'models' && !isEmbeddingMode && (
                 <ModelForm
                   item={editing as ModelRecord | undefined}
+                  formId={formId}
+                  onSubmit={submit}
+                />
+              )}
+              {isEmbeddingMode && (
+                <EmbeddingModelForm
+                  item={editing as EmbeddingModelRecord | undefined}
                   formId={formId}
                   onSubmit={submit}
                 />
@@ -459,18 +578,16 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                   onSubmit={submit}
                 />
               )}
-              {kind === 'agents' && (
-                !isBuiltins && (
-                  <AgentForm
-                    key={(editing as Subagent | undefined)?.id || 'new-agent'}
-                    item={editing as Subagent | undefined}
-                    models={models.data || []}
-                    servers={servers.data || []}
-                    formId={formId}
-                    busy={save.isPending}
-                    onSubmit={submit}
-                  />
-                )
+              {kind === 'agents' && !isBuiltins && (
+                <AgentForm
+                  key={(editing as Subagent | undefined)?.id || 'new-agent'}
+                  item={editing as Subagent | undefined}
+                  models={models.data || []}
+                  servers={servers.data || []}
+                  formId={formId}
+                  busy={save.isPending}
+                  onSubmit={submit}
+                />
               )}
             </div>
           </section>
@@ -481,17 +598,23 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                 key={(selected as BuiltinAgent).key}
                 item={selected as BuiltinAgent}
                 models={models.data || []}
-                saving={builtinModels.isPending}
+                embeddingModels={embeddingModels.data || []}
+                saving={builtinConfig.isPending}
                 connecting={builtinConnect.isPending}
                 error={
-                  builtinModels.error instanceof Error
-                    ? builtinModels.error.message
+                  builtinConfig.error instanceof Error
+                    ? builtinConfig.error.message
                     : builtinConnect.error instanceof Error
                       ? builtinConnect.error.message
                       : ''
                 }
                 onConnect={(connected) => builtinConnect.mutate(connected)}
-                onSave={(body) => builtinModels.mutateAsync(body)}
+                onSave={(body) => builtinConfig.mutateAsync(body)}
+              />
+            ) : isEmbeddingMode ? (
+              <EmbeddingModelDetails
+                item={selected as EmbeddingModelRecord}
+                onTested={(saved) => setSelected(saved)}
               />
             ) : (
               <ResourceDetails
@@ -508,7 +631,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         ) : query.error ? (
           <Feedback message={(query.error as Error).message} />
         ) : !data.length ? (
-          <div className="card empty-state">No {info.title.toLowerCase()} saved yet.</div>
+          <div className="card empty-state">No {collectionTitle.toLowerCase()} saved yet.</div>
         ) : (
           <div className="resource-browser">
             <label className="resource-search">
@@ -517,8 +640,8 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder={`Search ${info.title.toLowerCase()}…`}
-                aria-label={`Search ${info.title.toLowerCase()}`}
+                placeholder={`Search ${collectionTitle.toLowerCase()}…`}
+                aria-label={`Search ${collectionTitle.toLowerCase()}`}
               />
             </label>
             {listed.length ? (
@@ -537,8 +660,14 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                           isBuiltins
                             ? { view: 'built-in', builtin: (item as BuiltinAgent).key }
                             : {
-                                ...(kind === 'agents' ? { view: 'dynamic' } : {}),
-                                open: String((item as ModelRecord | McpServer | Subagent).id),
+                                ...(hasTypePicker ? { view: resourceMode } : {}),
+                                ...(isEmbeddingMode ? { view: 'embedding' } : {}),
+                                open: String(
+                                  (
+                                    item as
+                                      ModelRecord | EmbeddingModelRecord | McpServer | Subagent
+                                  ).id,
+                                ),
                               },
                         )
                       }}
@@ -575,7 +704,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
               </div>
             ) : (
               <div className="card empty-state resource-search-empty">
-                No {info.title.toLowerCase()} match “{search.trim()}”.
+                No {collectionTitle.toLowerCase()} match “{search.trim()}”.
               </div>
             )}
           </div>
@@ -583,7 +712,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       </div>
       <ConfirmDialog
         open={deleting}
-        title={`Delete ${info.singular}?`}
+        title={`Delete ${singular}?`}
         message={
           kind === 'agents'
             ? `Permanently delete “${selected?.name || ''}”? Its ${selectedAgentPlacements} workflow placement${selectedAgentPlacements === 1 ? '' : 's'}, including nested branches, will be disconnected. Other saved subagents will remain available.`

@@ -86,9 +86,10 @@ def build_system_prompt(profile: dict | None = None) -> str:
         "say that local artifact capability is unavailable.\n"
         "4. For anything that changes long-term knowledge — \"remember this\", a "
         "new contact, a preference, a template, or forgetting/cleaning stored "
-        "knowledge — use an available knowledge specialist with what to read, store, "
-        "or remove. If none is supplied, say that knowledge capability is unavailable. "
-        "Never manipulate files in the knowledge folder through another specialist.\n"
+        "knowledge — use an available knowledge specialist with what to recall, store, "
+        "update, or forget. If none is supplied, say that knowledge capability is "
+        "unavailable. Never bypass it by storing durable memory through an unrelated "
+        "specialist.\n"
         "5. When you don't know something, say so straight instead of making it up."
     )
 
@@ -175,19 +176,6 @@ VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
 # Hard cap on a single utterance.
 VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
 
-# Mounir's "knowledge" folder: plain files the assistant reads for context.
-# contacts.md is the address book — the model reads it to turn a spoken name
-# into the real address before delegating a send to a mail agent (so a
-# misheard name can't reach the mailbox).
-KNOWLEDGE_DIR: Path = Path(
-    os.environ.get("MOUNIR_KNOWLEDGE_DIR", Path(__file__).resolve().parent.parent / "knowledge")
-)
-CONTACTS_FILE: Path = KNOWLEDGE_DIR / "contacts.md"
-# index.md is the always-loaded "menu" of the knowledge folder: it lists every
-# knowledge file and when to open it. Only this small index rides in context;
-# the supervisor delegates a specific lookup to the Knowledge specialist.
-INDEX_FILE: Path = KNOWLEDGE_DIR / "index.md"
-
 LOCATION: str = DEFAULT_LOCATION
 
 
@@ -211,15 +199,6 @@ def build_context_message(profile: dict | None = None) -> str:
     ]
     for key, path in sorted(path_search.xdg_user_directories().items()):
         lines.append(f"{key.title()}: {path}")
-    # Append the knowledge index (the "menu") so Mounir always knows what
-    # knowledge files exist and when to read one. Kept small on purpose.
-    try:
-        index = INDEX_FILE.read_text(encoding="utf-8", errors="replace").strip()
-        if index:
-            lines.append("\nKnowledge available (delegate a lookup when needed):")
-            lines.append(index)
-    except OSError:
-        pass
     return "\n".join(lines)
 
 
@@ -235,7 +214,7 @@ USE_GEMINI: bool = os.environ.get("USE_GEMINI", "false").lower() in ("1", "true"
 GEMINI_BASE_URL: str = os.environ.get(
     "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
 )
-# Powers the knowledge agent specialist (knowledge-folder curator).
+# Powers the knowledge specialist's analysis and tool-selection loop.
 KNOWLEDGE_MODEL: str = os.environ.get("KNOWLEDGE_MODEL", GEMINI_MODEL)
 # Powers the system specialist (volume/brightness/media/power) — on NVIDIA,
 # like the researcher/media. The free tiers elsewhere couldn't sustain it:

@@ -6,6 +6,7 @@ export const keys = {
   overview: ['overview'] as const,
   builtins: ['builtins'] as const,
   models: ['models'] as const,
+  embeddingModels: ['embedding-models'] as const,
   servers: ['servers'] as const,
   agents: ['agents'] as const,
   agentNodes: ['agent-nodes'] as const,
@@ -28,6 +29,9 @@ export function useBuiltins() {
 }
 export function useModels() {
   return useQuery({ queryKey: keys.models, queryFn: api.models.list })
+}
+export function useEmbeddingModels() {
+  return useQuery({ queryKey: keys.embeddingModels, queryFn: api.embeddingModels.list })
 }
 export function useServers() {
   return useQuery({ queryKey: keys.servers, queryFn: api.servers.list })

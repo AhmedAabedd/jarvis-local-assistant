@@ -64,7 +64,7 @@ def _system_prompt(custom_prompt: str = "", profile: dict | None = None) -> str:
     return "\n\n".join(sections)
 
 
-def _result_text(result) -> str:
+def _result_text(result, max_chars: int | None = MAX_RESULT_CHARS) -> str:
     """Flatten text and structured MCP results for a text-only model."""
     parts = [c.text for c in result.content if getattr(c, "type", "") == "text"]
     structured = getattr(result, "structuredContent", None)
@@ -82,8 +82,8 @@ def _result_text(result) -> str:
     text = "\n".join(parts).strip() or "(empty result)"
     if getattr(result, "isError", False):
         text = f"Tool failed: {text}"
-    if len(text) > MAX_RESULT_CHARS:
-        text = text[:MAX_RESULT_CHARS] + "\n[... truncated]"
+    if max_chars is not None and len(text) > max_chars:
+        text = text[:max_chars] + "\n[... truncated]"
     return text
 
 
@@ -120,6 +120,7 @@ async def _call(
     namespace: str = "",
     dedupe_tools: set[str] | None = None,
     tool_timeout_seconds: float = MCP_TOOL_TIMEOUT_SECONDS,
+    max_result_chars: int | None = MAX_RESULT_CHARS,
 ) -> tuple[str, bool]:
     """Call one tool and block configured exact-duplicate requests.
 
@@ -153,7 +154,7 @@ async def _call(
         result = await asyncio.wait_for(
             session.call_tool(name, args), timeout=tool_timeout_seconds
         )
-        return _result_text(result), True
+        return _result_text(result, max_result_chars), True
     except TimeoutError:
         return (
             f"Tool {name} timed out after {tool_timeout_seconds:g} seconds. "

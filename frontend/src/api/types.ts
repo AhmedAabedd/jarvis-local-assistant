@@ -17,6 +17,21 @@ export interface ModelRecord {
   api_key_configured?: boolean
 }
 
+export interface EmbeddingModelRecord {
+  id: Id
+  name: string
+  location: 'cloud' | 'local'
+  adapter: 'openai_compatible' | 'ollama'
+  model: string
+  base_url: string
+  api_key?: string
+  api_key_configured?: boolean
+  dimensions?: number | null
+  connection_status: 'untested' | 'connected' | 'stale' | 'failed'
+  last_tested_at?: string | null
+  last_error?: string
+}
+
 export interface ToolInfo {
   name: string
   label?: string
@@ -50,6 +65,7 @@ export interface McpServer {
   env_configured?: boolean
   credentials_configured?: boolean
   setup_configured?: boolean
+  managed?: boolean
   credential_files?: McpCredentialFile[]
   connection_status?: string
   tool_count?: number
@@ -189,9 +205,25 @@ export interface BuiltinAgent {
   model_id?: Id | null
   generation_model?: string | null
   generation_model_id?: Id | null
+  mcp_server_id?: Id | null
+  mcp_server_name?: string | null
+  mcp_server_transport?: McpServer['transport'] | null
+  mcp_server_status?: string | null
+  knowledge_protocol?: string | null
+  knowledge_protocol_compatible?: boolean | null
+  knowledge_protocol_missing_tools?: string[]
+  embedding_enabled?: boolean | null
+  embedding_model_id?: Id | null
+  embedding_model_options?: Array<{
+    id: Id
+    label: string
+    status: EmbeddingModelRecord['connection_status']
+    dimensions?: number | null
+  }>
   provider?: string
   enabled: boolean
   connected: boolean
+  confirm_tools?: string[] | string
   tools?: ToolInfo[]
   model_options?: Array<{ id: Id; model: string; label: string }>
   generation_model_options?: Array<{ id: Id; model: string; label: string }>

@@ -8,9 +8,8 @@ for screen brightness (no root, shows the on-screen slider), UPower D-Bus for
 the keyboard backlight, MPRIS D-Bus for media players (the same protocol
 playerctl wraps), nmcli/rfkill for radios — so there is nothing to install.
 
-Destructive actions are gated: suspend asks the user for confirmation through
-the same shared confirmation flow MCP tools use, so it works from the terminal and
-the Telegram bridge alike.
+Actions selected for confirmation use the same shared approval flow as MCP
+tools, so approval works from the terminal, web interface, and Telegram alike.
 """
 
 from __future__ import annotations
@@ -39,8 +38,7 @@ RULES
   When the task asks for a change, ALWAYS call the tool — never answer that
   it is "already done" from the snapshot or from memory.
 - Only touch Wi-Fi, Bluetooth, the lock screen, or suspend when the task
-  explicitly asks for them. suspend asks the user to confirm by itself; if it
-  reports "cancelled", relay that, don't retry.
+  explicitly asks for them. If an action is declined, stop and do not retry it.
 - If a tool errors, report the error honestly. Never claim a change you did
   not see succeed.
 
@@ -293,14 +291,7 @@ def lock_screen() -> str:
 
 
 def suspend() -> str:
-    """Suspend the laptop — asks the user to confirm first."""
-    from .. import tools as _tools  # confirm flow is owned by the tools module
-
-    if not _tools.request_confirmation(
-        "Suspend the laptop? It stops responding (Telegram too) until "
-        "someone wakes it up physically."
-    ):
-        return "Suspend cancelled — the user did not confirm."
+    """Suspend the laptop."""
     ok, out = _run(["systemctl", "suspend"])
     return "Suspending now." if ok else f"Suspend failed: {out}"
 
@@ -373,7 +364,7 @@ def lock_screen_tool() -> str:
 
 @tool("suspend")
 def suspend_tool() -> str:
-    """Suspend the laptop after obtaining user confirmation."""
+    """Suspend the laptop."""
 
     return suspend()
 
@@ -442,6 +433,7 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     )
 
     selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
+    confirmation_tools = db.get_builtin_confirmation_tools("system")
 
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
@@ -478,4 +470,5 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
         finalizer=lambda content: re.sub(
             r"(?i)^\s*final report:?\s*", "", content.strip()
         ),
+        confirmation_tools=confirmation_tools,
     )

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from mounir import config, db, path_search, tools as mounir_tools
+from mounir import db, path_search, tools as mounir_tools
 from mounir.specialists import artifacts, media
 
 
@@ -113,14 +113,6 @@ class MediaArtifactTests(unittest.TestCase):
         self.assertNotIn("photo.png", files)
         self.assertIn("photo.png", media_files)
         self.assertNotIn("report.pdf", media_files)
-
-    def test_generated_artifacts_respect_knowledge_folder_guard(self):
-        knowledge = self.root / "knowledge"
-        target = knowledge / "report.pdf"
-        with patch.object(config, "KNOWLEDGE_DIR", knowledge):
-            result = artifacts.create_file(str(target), "blocked")
-        self.assertIn("only the knowledge agent may change", result)
-        self.assertFalse(target.exists())
 
     def test_edit_file_preserves_read_before_edit_and_supports_append(self):
         target = self.root / "notes.py"

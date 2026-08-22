@@ -6,6 +6,7 @@ import type {
   HeartbeatTask,
   McpServer,
   ModelRecord,
+  EmbeddingModelRecord,
   Notification,
   Profile,
   ServerToolsState,
@@ -79,6 +80,18 @@ export const api = {
     update: (id: number, body: object) =>
       request<ModelRecord>(`/api/models/${id}`, json('PUT', body)),
     remove: (id: number) => request(`/api/models/${id}`, json('DELETE')),
+  },
+  embeddingModels: {
+    list: () => request<EmbeddingModelRecord[]>('/api/embedding-models'),
+    create: (body: object) =>
+      request<EmbeddingModelRecord>('/api/embedding-models', json('POST', body)),
+    update: (id: number, body: object) =>
+      request<EmbeddingModelRecord>(`/api/embedding-models/${id}`, json('PUT', body)),
+    remove: (id: number) => request(`/api/embedding-models/${id}`, json('DELETE')),
+    test: (id: number) =>
+      request<EmbeddingModelRecord>(`/api/embedding-models/${id}/test`, json('POST')),
+    discover: (body: object) =>
+      request<{ models: string[] }>('/api/embedding-models/discover', json('POST', body)),
   },
   servers: {
     list: () => request<McpServer[]>('/api/mcp-servers'),

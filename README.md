@@ -55,7 +55,7 @@ Mounir ships with a useful core and becomes broader as capabilities are attached
 | Voice | Browser speech input, standalone push-to-talk, wake word mode, STT, and TTS |
 | Desktop | Volume, brightness, media, Wi-Fi, Bluetooth, power, browser, and approved shell actions |
 | Files and media | Read and create documents, spreadsheets, images, audio, video, and presentations |
-| Knowledge | Search and maintain local knowledge files and contacts |
+| Knowledge | Recall and maintain durable memory through Mounir's built-in local GBrain service |
 | MCP | Discover tools from connected servers and turn them into dynamic specialists |
 | Models | Manage local and cloud model profiles, providers, endpoints, and credentials |
 | Automation | Scheduled Heartbeat checks with safe tool selection and duplicate suppression |
@@ -217,7 +217,9 @@ Both values can be changed with `MOUNIR_MCP_TOOL_TIMEOUT` and
 
 Mounir includes focused specialists that work even before custom MCP agents are
 added. Each specialist has a readable capability page, an activation control, and
-a selectable saved model in Agent Studio.
+a selectable saved model in Agent Studio. Its Security page lets the user choose
+whether every action, selected actions, or no actions require approval; those
+rules are stored per built-in specialist and enforced before a tool executes.
 
 ### Files and Media
 
@@ -232,8 +234,29 @@ generation remains adapter-dependent.
 
 ### Knowledge
 
-Searches and updates the local knowledge directory, including contacts and
-user-maintained reference files.
+Uses a required local GBrain MCP server. Mounir creates the managed server entry
+automatically, binds Knowledge to it, installs and initializes GBrain when
+needed, and discovers its live tool schemas at startup. Its PGLite data is
+isolated under Mounir's data directory, so unrelated global GBrain settings do
+not affect Knowledge. The managed connection cannot be replaced, edited, or
+deleted.
+
+Mounir exposes a focused subset of GBrain's native page and recall tools rather
+than inventing tools before connection. Page writes, deletion, and restoration
+require action confirmation by default. Knowledge exposes no tools until the
+real local server connects and advertises the required native interface. Memory
+is consulted only when the supervisor delegates a knowledge task—it is not
+injected into every conversation turn. The former repository `knowledge/`
+directory remains untouched so its content can be migrated manually.
+
+Semantic search is optional and disabled on a fresh installation. Embedding
+connections are configured separately under **Models → Embeddings** using either
+the OpenAI-compatible embedding API or Ollama. The model catalog can be discovered
+from the configured service, and a connection test records the vector dimensions
+returned by the selected model. Knowledge only accepts tested models. Enabling or
+changing one uses GBrain's supported migration command to index existing memories;
+disabling it keeps memory storage and text-based search available without making
+embedding requests.
 
 ### System
 
@@ -457,7 +480,7 @@ channels, visually distinct from supervisor-to-specialist delegation.
 | Models | Provider, model name, base URL, API key, and local/cloud compatibility |
 | MCP Servers | Transport, command or URL, authentication, status, and cached tools |
 | Subagents | Identity, parent, icon, instructions, model, MCP server, confirmations, dedupe, and active state |
-| Built-in agents | Purpose, capabilities, model, and active state |
+| Built-in agents | Purpose, capabilities, model, confirmation rules, and active state |
 | Supervisor | Model selection, identity, and direct non-delegation tools |
 | Voice | STT and TTS providers, models, voices, endpoints, languages, and keys |
 | Telegram | Token lifecycle, connection testing, pairing, activation, and status |
@@ -607,6 +630,9 @@ edited in Agent Studio and take precedence after their initial import.
 | `MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES` | `20971520` | Maximum Telegram attachment download size |
 | `MOUNIR_MCP_TOOL_TIMEOUT` | `60` | Maximum seconds for one MCP tool call |
 | `MOUNIR_MCP_AGENT_TIMEOUT` | `300` | Maximum seconds for one delegated MCP task |
+| `MOUNIR_KNOWLEDGE_TOOL_TIMEOUT` | `300` | Maximum seconds for one knowledge MCP verb |
+| `MOUNIR_KNOWLEDGE_AGENT_TIMEOUT` | `600` | Maximum seconds for one delegated Knowledge task |
+| `MOUNIR_GBRAIN_HOME` | `<MOUNIR_DATA_DIR>/gbrain` | Parent directory for the isolated built-in GBrain instance |
 | `NVIDIA_API_KEY` | unset | Initial Media and System provider credential |
 | `GEMINI_API_KEY` | unset | Initial Knowledge provider credential |
 | `USE_MISTRAL` | `false` | Import the Mistral supervisor configuration |

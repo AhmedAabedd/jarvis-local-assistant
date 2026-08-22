@@ -12,12 +12,12 @@ from typing import Annotated, Callable, Iterator
 
 from langchain_core.tools import tool
 
-from . import browser_control, config
+from . import browser_control
 
 # Specialist agents are reached through LangGraph handoffs. These functions
 # remain defensive fallbacks for direct tool invocation.
 def delegate_to_knowledge(task: str) -> str:
-    """Hand a knowledge-folder lookup or change to the knowledge agent."""
+    """Hand a durable-memory lookup or change to the Knowledge agent."""
     from . import db
     if not db.is_builtin_agent_enabled("knowledge"):
         return "The Knowledge agent is inactive and cannot be used."
@@ -52,27 +52,6 @@ BASH_MAX_OUTPUT = 4000
 def _resolve(path: str) -> Path:
     """Expand ~ and make paths predictable before touching the filesystem."""
     return Path(path).expanduser()
-
-
-def write_path_block_reason(path: str | Path) -> str | None:
-    """Refuse writes inside the knowledge folder — that's the knowledge agent's job.
-
-    The prompt already forbids it, but a rule the model can ignore isn't a
-    rule: writing there directly would desync index.md, which only the
-    knowledge agent's tools keep in sync. Reading stays allowed.
-    """
-    p = Path(path).expanduser()
-    try:
-        inside = p.resolve().is_relative_to(config.KNOWLEDGE_DIR.resolve())
-    except OSError:
-        return None
-    if inside:
-        return (
-            f"{p} is inside the knowledge folder, which only the knowledge agent may "
-            "change (it keeps index.md in sync). Call delegate_to_knowledge "
-            "with what to store or change instead."
-        )
-    return None
 
 
 def _default_confirm(action: str) -> bool:
@@ -333,7 +312,7 @@ def bash_tool(
 def delegate_to_knowledge_tool(
     task: Annotated[str, "Knowledge to find, remember, update, or forget."],
 ) -> str:
-    """Search or change curated long-term knowledge through its sole owner."""
+    """Recall or change durable memory through its sole owner."""
 
     return delegate_to_knowledge(task)
 

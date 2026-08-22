@@ -30,6 +30,7 @@ from mounir import (
     db,
     graph_runtime,
     heartbeat as heartbeat_mod,
+    knowledge_protocol,
     langgraph_agent,
     llm as llm_mod,
     mcp_agents,
@@ -750,6 +751,92 @@ class DatabaseTests(TemporaryDatabaseTest):
             )
         )
 
+    def test_builtin_confirmation_rules_are_persisted_and_drive_safety(self):
+        db.init()
+        media = next(
+            agent for agent in db.list_builtin_agents() if agent["key"] == "media"
+        )
+        self.assertEqual(
+            set(media["confirm_tools"]),
+            {"create_file", "edit_file", "generate_media"},
+        )
+        self.assertTrue(
+            next(tool for tool in media["tools"] if tool["name"] == "create_file")[
+                "requires_confirmation"
+            ]
+        )
+
+        saved = db.update_builtin_agent(
+            "media", confirm_tools=["read_file", "generate_media"]
+        )
+        self.assertEqual(saved["confirm_tools"], ["generate_media", "read_file"])
+        db.init()
+        reloaded = next(
+            agent for agent in db.list_builtin_agents() if agent["key"] == "media"
+        )
+        self.assertEqual(reloaded["confirm_tools"], ["generate_media", "read_file"])
+
+        heartbeat_tools = {
+            tool["name"]: tool
+            for agent in db.get_heartbeat_capabilities()
+            if agent["key"] == "builtin:media"
+            for tool in agent["tools"]
+        }
+        self.assertTrue(heartbeat_tools["read_file"]["requires_confirmation"])
+        self.assertFalse(heartbeat_tools["create_file"]["requires_confirmation"])
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            db.update_builtin_agent("media", confirm_tools=["made_up_tool"])
+
+    def test_builtin_system_stops_before_a_declined_configured_action(self):
+        db.init()
+        declined_response = {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "suspend_1",
+                    "function": {"name": "suspend", "arguments": "{}"},
+                }
+            ],
+        }
+        observed_prompts = []
+        with (
+            patch.object(system_agent, "_context", return_value="TEST DEVICE"),
+            patch.object(system_agent, "_run", return_value=(True, "")) as execute,
+            patch.object(
+                system_agent.llm, "openai_chat", return_value=declined_response
+            ) as model,
+            mounir_tools.use_confirmation_handler(
+                lambda prompt: observed_prompts.append(prompt) or False
+            ),
+        ):
+            report = system_agent.run("Suspend the laptop")
+
+        self.assertIsInstance(report, action_decline.Signal)
+        self.assertEqual(model.call_count, 1)
+        execute.assert_not_called()
+        self.assertEqual(len(observed_prompts), 1)
+        self.assertIn("suspend", observed_prompts[0])
+
+        db.update_builtin_agent("system", confirm_tools=[])
+        responses = iter(
+            [
+                declined_response,
+                {"content": "The laptop is suspending.", "tool_calls": []},
+            ]
+        )
+        with (
+            patch.object(system_agent, "_context", return_value="TEST DEVICE"),
+            patch.object(system_agent, "_run", return_value=(True, "")) as execute,
+            patch.object(system_agent.llm, "openai_chat", side_effect=responses),
+            mounir_tools.use_confirmation_handler(
+                lambda _prompt: self.fail("unprotected action requested confirmation")
+            ),
+        ):
+            report = system_agent.run("Suspend the laptop")
+
+        self.assertEqual(report, "The laptop is suspending.")
+        execute.assert_called_once_with(["systemctl", "suspend"])
+
     def test_builtin_agent_model_selection_accepts_every_configured_provider(self):
         db.init()
         nvidia = db.add_model(
@@ -809,7 +896,14 @@ class DatabaseTests(TemporaryDatabaseTest):
     def test_fresh_database_keeps_user_registry_empty(self):
         db.init()
         self.assertEqual(db.list_models(), [])
-        self.assertEqual(db.list_servers(), [])
+        servers = db.list_servers()
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(
+            servers[0]["setup_type"], knowledge_protocol.BUILTIN_SETUP_TYPE
+        )
+        self.assertEqual(
+            servers[0]["connection"], knowledge_protocol.BUILTIN_SERVER_COMMAND
+        )
         self.assertEqual(db.list_subagents(), [])
         self.assertIsNone(db.get_supervisor_config()["model_id"])
         self.assertEqual(db.get_supervisor_config()["model_options"], [])
@@ -832,24 +926,33 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(
             [item["name"] for item in db.list_models()], ["User model"]
         )
-        self.assertEqual(db.list_servers(), [])
+        self.assertEqual(
+            [item["setup_type"] for item in db.list_servers()],
+            [knowledge_protocol.BUILTIN_SETUP_TYPE],
+        )
         self.assertEqual(
             [item["name"] for item in db.list_subagents()], ["Helper"]
         )
 
-    def test_existing_empty_database_does_not_seed_dynamic_resources(self):
+    def test_existing_empty_database_only_seeds_required_builtin_resources(self):
         # Existing databases follow the same user-owned registry policy as new
-        # installations; application startup must never invent resources.
+        # installations. Only the required managed GBrain service is seeded.
         with db._connect() as conn:
             db._init_schema(conn)
 
         db.init()
         self.assertEqual(db.list_models(), [])
-        self.assertEqual(db.list_servers(), [])
+        self.assertEqual(
+            [item["setup_type"] for item in db.list_servers()],
+            [knowledge_protocol.BUILTIN_SETUP_TYPE],
+        )
         self.assertEqual(db.list_subagents(), [])
         db.init()
         self.assertEqual(db.list_models(), [])
-        self.assertEqual(db.list_servers(), [])
+        self.assertEqual(
+            [item["setup_type"] for item in db.list_servers()],
+            [knowledge_protocol.BUILTIN_SETUP_TYPE],
+        )
         self.assertEqual(db.list_subagents(), [])
 
     def test_legacy_gmail_setup_marker_is_removed_without_deleting_server(self):
@@ -870,7 +973,11 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(server["setup_type"], "")
         db.init()
         self.assertEqual(db.list_models(), [])
-        self.assertEqual([item["id"] for item in db.list_servers()], [server_id])
+        servers = db.list_servers()
+        self.assertEqual(
+            {item["id"] for item in servers},
+            {server_id, db.get_builtin_gbrain_server()["id"]},
+        )
         self.assertEqual(db.list_subagents(), [])
 
     def test_private_mcp_files_are_masked_materialized_and_removable(self):
@@ -2939,6 +3046,28 @@ class TransportTests(unittest.TestCase):
 
 
 class AdminApiTests(TemporaryDatabaseTest):
+    def test_builtin_api_saves_action_confirmation_rules(self):
+        import httpx
+        import server as web_server
+
+        db.init()
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                response = await client.put(
+                    "/api/builtin-agents/system",
+                    json={"confirm_tools": ["set_wifi", "suspend"]},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json()["confirm_tools"], ["set_wifi", "suspend"]
+                )
+
+        asyncio.run(exercise_api())
+
     def test_tts_voice_catalog_api_reads_the_requested_model(self):
         import httpx
         import server as web_server
@@ -3999,6 +4128,9 @@ class InterfaceRoutingTests(unittest.TestCase):
         def telegram_stop():
             events.append("telegram-stop")
 
+        async def prepare_gbrain():
+            return None
+
         async def exercise_lifespan():
             with (
                 patch.object(
@@ -4008,6 +4140,7 @@ class InterfaceRoutingTests(unittest.TestCase):
                 ),
                 patch.object(web_server.heartbeat_service, "start", heartbeat_start),
                 patch.object(web_server.heartbeat_service, "stop", heartbeat_stop),
+                patch.object(web_server, "_prepare_builtin_gbrain", prepare_gbrain),
                 patch.object(web_server.telegram_service, "start_background", telegram_start),
                 patch.object(web_server.telegram_service, "stop", telegram_stop),
             ):

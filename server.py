@@ -45,7 +45,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from mounir.agent import Agent
-from mounir import chat_attachments, config as cfg, db, llm, mcp_oauth, trace
+from mounir import chat_attachments, config as cfg, db, embedding_models, llm, mcp_oauth, trace
 from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
 from mounir.heartbeat import HeartbeatService
@@ -87,6 +87,37 @@ class _OAuthSetupRun:
 
 
 _oauth_setup_runs: dict[int, _OAuthSetupRun] = {}
+
+
+async def _prepare_builtin_gbrain() -> None:
+    """Install, initialize, and discover the required local Knowledge service."""
+    from mounir import knowledge_protocol
+    from mounir.setup_gbrain import ensure_local_gbrain
+
+    server = db.get_builtin_gbrain_server()
+    if server is None:
+        return
+    server_id = int(server["id"])
+    try:
+        await asyncio.to_thread(ensure_local_gbrain)
+        spec = db.build_server_spec(server_id)
+        if spec is None:
+            raise RuntimeError("The built-in GBrain server configuration is missing.")
+        discovered = await asyncio.wait_for(discover_tools(spec), timeout=60)
+        names = {str(tool.get("name") or "") for tool in discovered}
+        missing = knowledge_protocol.missing_tools(names)
+        if missing:
+            raise RuntimeError(
+                "GBrain did not advertise its required local interface. Missing: "
+                + ", ".join(missing)
+            )
+        db.save_server_tools(server_id, discovered)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        from mounir.specialists.mcp_agent import _exc_detail
+
+        db.record_server_test_failure(server_id, _exc_detail(exc))
 
 # Ensure the SQLite DB exists and the legacy JSON file is migrated.
 db.init()
@@ -300,6 +331,7 @@ def _safe_whatsapp_error(exc: Exception, settings: dict | None = None) -> str:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    gbrain_setup = asyncio.create_task(_prepare_builtin_gbrain())
     await heartbeat_service.start()
     saved = db.get_telegram_settings(include_secret=True)
     if saved["enabled"] and saved["bot_token"]:
@@ -308,6 +340,9 @@ async def _lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        if not gbrain_setup.done():
+            gbrain_setup.cancel()
+        await asyncio.gather(gbrain_setup, return_exceptions=True)
         oauth_tasks = [
             run.task
             for run in _oauth_setup_runs.values()
@@ -983,12 +1018,60 @@ async def update_builtin_agent(agent_key: str, req: dict):
             changes["model_id"] = req.get("model_id")
         if "generation_model_id" in req:
             changes["generation_model_id"] = req.get("generation_model_id")
+        if "mcp_server_id" in req:
+            changes["mcp_server_id"] = req.get("mcp_server_id")
         if "connected" in req:
             changes["connected"] = req.get("connected")
         if "enabled" in req:
             changes["enabled"] = req.get("enabled")
+        if "embedding_enabled" in req:
+            changes["embedding_enabled"] = req.get("embedding_enabled")
+        if "embedding_model_id" in req:
+            changes["embedding_model_id"] = req.get("embedding_model_id")
+        if "confirm_tools" in req:
+            changes["confirm_tools"] = req.get("confirm_tools")
+        if agent_key == "knowledge" and (
+            "embedding_enabled" in req or "embedding_model_id" in req
+        ):
+            current = next(
+                item for item in db.list_builtin_agents() if item["key"] == "knowledge"
+            )
+            next_enabled = db._bool(
+                req.get("embedding_enabled")
+                if "embedding_enabled" in req
+                else current.get("embedding_enabled"),
+                "embedding enabled",
+            )
+            if "embedding_model_id" in req:
+                requested_embedding_id = req.get("embedding_model_id")
+                next_model_id = (
+                    int(requested_embedding_id)
+                    if requested_embedding_id is not None else None
+                )
+            else:
+                next_model_id = current.get("embedding_model_id")
+            changed = (
+                next_enabled != bool(current.get("embedding_enabled"))
+                or next_model_id != current.get("embedding_model_id")
+            )
+            if changed and (next_enabled or current.get("embedding_enabled")):
+                runtime = (
+                    db.get_embedding_model_runtime(int(next_model_id))
+                    if next_model_id is not None else None
+                )
+                if next_enabled and (
+                    runtime is None
+                    or runtime.get("connection_status") != "connected"
+                    or not runtime.get("dimensions")
+                ):
+                    raise ValueError("test the embedding model before enabling it")
+                await asyncio.to_thread(
+                    embedding_models.apply_to_gbrain,
+                    next_enabled,
+                    runtime,
+                )
         return db.update_builtin_agent(agent_key, **changes)
-    except (TypeError, ValueError) as exc:
+    except (RuntimeError, TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
@@ -1046,6 +1129,106 @@ def _restricted_delete_response(result: db.DeletionResult, resource: str):
 @app.delete("/api/models/{model_id}")
 async def delete_model(model_id: int):
     return _restricted_delete_response(db.delete_model_result(model_id), "Model")
+
+
+@app.get("/api/embedding-models")
+async def list_embedding_models():
+    return [
+        db.embedding_model_for_api(model)
+        for model in db.list_embedding_models()
+    ]
+
+
+@app.post("/api/embedding-models")
+async def create_embedding_model(req: dict):
+    try:
+        model = db.add_embedding_model(
+            req.get("name", ""),
+            req.get("location", "cloud"),
+            req.get("adapter", "openai_compatible"),
+            req.get("model", ""),
+            req.get("base_url", ""),
+            req.get("api_key", ""),
+        )
+        return db.embedding_model_for_api(model)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/embedding-models/{model_id}")
+async def update_embedding_model(model_id: int, req: dict):
+    try:
+        model = db.update_embedding_model(model_id, **req)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if model is None:
+        return JSONResponse({"error": "Embedding model not found."}, status_code=404)
+    return db.embedding_model_for_api(model)
+
+
+@app.delete("/api/embedding-models/{model_id}")
+async def delete_embedding_model(model_id: int):
+    return _restricted_delete_response(
+        db.delete_embedding_model_result(model_id), "Embedding model"
+    )
+
+
+@app.post("/api/embedding-models/discover")
+async def discover_embedding_models(req: dict):
+    try:
+        saved = None
+        if req.get("id") is not None:
+            saved = db.get_embedding_model_runtime(int(req["id"]))
+            if saved is None:
+                return JSONResponse(
+                    {"error": "Embedding model not found."}, status_code=404
+                )
+        _, adapter, base_url = db._normalize_embedding_connection(
+            req.get("location", (saved or {}).get("location", "cloud")),
+            req.get("adapter", (saved or {}).get("adapter", "openai_compatible")),
+            req.get("base_url", (saved or {}).get("base_url", "")),
+        )
+        models = await asyncio.to_thread(
+            embedding_models.discover_models,
+            {
+                "adapter": adapter,
+                "base_url": base_url,
+                "api_key": req.get("api_key") or (saved or {}).get("api_key", ""),
+            },
+        )
+        return {"models": models}
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/embedding-models/{model_id}/test")
+async def test_embedding_model(model_id: int):
+    runtime = db.get_embedding_model_runtime(model_id)
+    if runtime is None:
+        return JSONResponse({"error": "Embedding model not found."}, status_code=404)
+    try:
+        dimensions = await asyncio.to_thread(
+            embedding_models.test_connection, runtime
+        )
+    except ValueError as exc:
+        db.save_embedding_test(model_id, error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    active = db.get_knowledge_embedding_runtime()
+    if (
+        active is not None
+        and int(active["id"]) == model_id
+        and active.get("dimensions")
+        and int(active["dimensions"]) != dimensions
+    ):
+        error = (
+            f"The provider now returns {dimensions} dimensions, but GBrain is indexed at "
+            f"{active['dimensions']}. Disable Knowledge embeddings before reconfiguring this model."
+        )
+        db.save_embedding_test(model_id, error=error)
+        return JSONResponse({"error": error}, status_code=409)
+    return db.embedding_model_for_api(
+        db.save_embedding_test(model_id, dimensions=dimensions)
+    )
 
 
 @app.get("/api/mcp-servers")

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import operator
+import threading
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated
 
@@ -32,7 +33,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 
-from . import action_decline, trace
+from . import action_decline, trace, tools as mounir_tools
 
 ModelCall = Callable[[list[dict], list[dict] | None], dict]
 AsyncModelCall = Callable[[list[dict], list[dict] | None], Awaitable[dict]]
@@ -154,6 +155,7 @@ def run_tool_agent(
     exhausted_response: str,
     error_formatter: ErrorFormatter,
     finalizer: Finalizer | None = None,
+    confirmation_tools: Sequence[str] | None = None,
 ) -> str:
     """Run a bounded model -> tools -> model workflow with LangGraph.
 
@@ -165,6 +167,9 @@ def run_tool_agent(
 
     available_tools = list(tools)
     schemas = tool_schemas(available_tools)
+    confirmation_rules = {str(name) for name in confirmation_tools or []}
+    tool_lock = threading.Lock()
+    declined_signal: dict[str, dict | None] = {"value": None}
 
     def call_model(state: ToolAgentState) -> dict | Command:
         try:
@@ -198,15 +203,82 @@ def run_tool_agent(
     def fixed_message(content: str) -> Callable[[ToolAgentState], dict]:
         return lambda _state: {"messages": [AIMessage(content=content)]}
 
+    def find_decline(state: ToolAgentState) -> dict | None:
+        for message in reversed(state["messages"]):
+            if isinstance(message, AIMessage):
+                break
+            if isinstance(message, ToolMessage):
+                outcome = action_decline.from_artifact(
+                    getattr(message, "artifact", None)
+                )
+                if outcome is not None:
+                    return outcome
+        return None
+
+    def after_tools(state: ToolAgentState) -> str:
+        if find_decline(state):
+            return "declined"
+        return (
+            "exhausted"
+            if state.get("model_rounds", 0) >= max_rounds
+            else "model"
+        )
+
+    def declined(state: ToolAgentState) -> dict:
+        outcome = find_decline(state) or declined_signal["value"]
+        return {
+            "messages": [AIMessage(content=action_decline.encode(outcome or {}))]
+        }
+
+    def execute_sequentially(request, execute):
+        """Confirm configured calls and stop the remaining batch on refusal."""
+        with tool_lock:
+            if declined_signal["value"]:
+                return ToolMessage(
+                    content="Skipped — an earlier action was declined.",
+                    name=request.tool_call["name"],
+                    tool_call_id=request.tool_call["id"],
+                )
+            name = str(request.tool_call["name"])
+            if "*" in confirmation_rules or name in confirmation_rules:
+                arguments = dict(request.tool_call.get("args") or {})
+                summary = f"{name} {json.dumps(arguments, ensure_ascii=False)[:400]}"
+                if not mounir_tools.request_confirmation(summary):
+                    signal = action_decline.create(name)
+                    outcome = action_decline.parse(signal) or {}
+                    declined_signal["value"] = outcome
+                    return ToolMessage(
+                        content=action_decline.MESSAGE,
+                        name=name,
+                        tool_call_id=request.tool_call["id"],
+                        artifact=action_decline.artifact(outcome),
+                    )
+            result = execute(request)
+            if isinstance(result, ToolMessage):
+                outcome = action_decline.from_artifact(
+                    getattr(result, "artifact", None)
+                )
+                if outcome is not None:
+                    declined_signal["value"] = outcome
+            return result
+
+    tool_node = (
+        ToolNode(
+            available_tools,
+            handle_tool_errors=True,
+            wrap_tool_call=execute_sequentially,
+        )
+        if confirmation_tools is not None
+        else ToolNode(available_tools, handle_tool_errors=True)
+    )
+
     graph = StateGraph(ToolAgentState)
     graph.add_node("model", call_model)
-    graph.add_node(
-        "tools",
-        ToolNode(available_tools, handle_tool_errors=True),
-    )
+    graph.add_node("tools", tool_node)
     graph.add_node("failure", failure)
     graph.add_node("empty", fixed_message(empty_response))
     graph.add_node("exhausted", fixed_message(exhausted_response))
+    graph.add_node("declined", declined)
     graph.add_edge(START, "model")
     graph.add_conditional_edges(
         "model",
@@ -215,14 +287,13 @@ def run_tool_agent(
     )
     graph.add_conditional_edges(
         "tools",
-        lambda state: (
-            "exhausted" if state.get("model_rounds", 0) >= max_rounds else "model"
-        ),
-        {"model": "model", "exhausted": "exhausted"},
+        after_tools,
+        {"model": "model", "declined": "declined", "exhausted": "exhausted"},
     )
     graph.add_edge("failure", END)
     graph.add_edge("empty", END)
     graph.add_edge("exhausted", END)
+    graph.add_edge("declined", END)
 
     initial = {
         "messages": convert_to_messages(list(messages)),
@@ -243,6 +314,8 @@ def run_tool_agent(
         ),
         empty_response,
     )
+    if declined_signal["value"] is not None:
+        return action_decline.Signal(final.strip())
     return finalizer(final) if finalizer else final.strip()
 
 

@@ -3,6 +3,7 @@
 Core tables include:
 
 - ``models``       reusable LLM presets (name, provider, base_url, api_key)
+- ``embedding_models`` reusable embedding connections used by knowledge systems
 - ``mcp_servers``  reusable MCP server connections (transport + command/URL)
 - ``subagents``    reusable specialist configurations (prompt, model, MCP, tools)
 - ``subagent_connections`` legacy compatibility projection
@@ -33,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import builtin_agents, config as cfg
+from . import builtin_agents, config as cfg, knowledge_protocol
 
 DB_PATH: Path = cfg.DATA_DIR / "mounir.db"
 LEGACY_REGISTRY: Path = cfg.DATA_DIR / "mcp_agents.json"
@@ -193,6 +194,25 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             base_url TEXT NOT NULL,
             api_key TEXT,
             created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS embedding_models (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            location TEXT NOT NULL DEFAULT 'cloud'
+                CHECK (location IN ('cloud', 'local')),
+            adapter TEXT NOT NULL DEFAULT 'openai_compatible'
+                CHECK (adapter IN ('openai_compatible', 'ollama')),
+            model TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            api_key TEXT NOT NULL DEFAULT '',
+            dimensions INTEGER,
+            connection_status TEXT NOT NULL DEFAULT 'untested'
+                CHECK (connection_status IN ('untested', 'connected', 'stale', 'failed')),
+            last_tested_at TEXT,
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -412,6 +432,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             model TEXT NOT NULL,
             model_id INTEGER REFERENCES models(id),
             generation_model_id INTEGER REFERENCES models(id),
+            mcp_server_id INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT,
+            embedding_enabled INTEGER NOT NULL DEFAULT 0
+                CHECK (embedding_enabled IN (0, 1)),
+            embedding_model_id INTEGER REFERENCES embedding_models(id) ON DELETE RESTRICT,
+            confirm_tools TEXT NOT NULL DEFAULT '[]',
             connected INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1)),
             enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
             updated_at TEXT NOT NULL
@@ -705,6 +730,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         "builtin_agent_settings": {
             "model_id": "INTEGER REFERENCES models(id)",
             "generation_model_id": "INTEGER REFERENCES models(id)",
+            "mcp_server_id": "INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT",
+            "embedding_enabled": "INTEGER NOT NULL DEFAULT 0 CHECK (embedding_enabled IN (0, 1))",
+            "embedding_model_id": "INTEGER REFERENCES embedding_models(id) ON DELETE RESTRICT",
+            "confirm_tools": "TEXT NOT NULL DEFAULT '[]'",
             "connected": "INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1))",
             "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
         },
@@ -1117,6 +1146,31 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         {confirmation_filter}
         """
     )
+    builtin_confirmation_migration = "builtin_confirmation_defaults_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?",
+        (builtin_confirmation_migration,),
+    ).fetchone() is None:
+        for definition in builtin_agents.definitions():
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET confirm_tools = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (
+                    json.dumps(
+                        builtin_agents.default_confirmation_tools(definition["key"]),
+                        ensure_ascii=False,
+                    ),
+                    _now(),
+                    definition["key"],
+                ),
+            )
+        conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+            (builtin_confirmation_migration, _now()),
+        )
     # Normalize values accepted by the earlier UI: a full completions URL and
     # Ollama's native /api/chat URL were commonly pasted into "Base URL".
     for row in conn.execute("SELECT id, base_url FROM models"):
@@ -1129,7 +1183,91 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 "UPDATE models SET base_url = ? WHERE id = ?",
                 (normalized, row["id"]),
             )
+    _ensure_builtin_gbrain(conn)
     conn.commit()
+
+
+def _ensure_builtin_gbrain(conn: sqlite3.Connection) -> int:
+    """Seed and enforce Knowledge's required local GBrain MCP connection."""
+    managed_env = json.dumps(
+        {"GBRAIN_HOME": str(knowledge_protocol.local_home_parent())},
+        sort_keys=True,
+    )
+    row = conn.execute(
+        "SELECT id FROM mcp_servers WHERE setup_type = ?",
+        (knowledge_protocol.BUILTIN_SETUP_TYPE,),
+    ).fetchone()
+    if row is None:
+        desired_name = knowledge_protocol.BUILTIN_SERVER_NAME
+        collision = conn.execute(
+            "SELECT 1 FROM mcp_servers WHERE lower(name) = lower(?)",
+            (desired_name,),
+        ).fetchone()
+        name = f"{desired_name} (built-in)" if collision else desired_name
+        cursor = conn.execute(
+            """
+            INSERT INTO mcp_servers
+                (name, description, setup_type, transport, connection, headers, env,
+                 auth_scheme, setup_command, connection_status, last_error, created_at)
+            VALUES (?, ?, ?, 'stdio', ?, '{}', ?, '', ?, 'untested', '', ?)
+            """,
+            (
+                name,
+                knowledge_protocol.BUILTIN_SERVER_DESCRIPTION,
+                knowledge_protocol.BUILTIN_SETUP_TYPE,
+                knowledge_protocol.BUILTIN_SERVER_COMMAND,
+                managed_env,
+                knowledge_protocol.BUILTIN_SETUP_COMMAND,
+                _now(),
+            ),
+        )
+        server_id = int(cursor.lastrowid)
+    else:
+        server_id = int(row["id"])
+        current = conn.execute(
+            """
+            SELECT transport, connection, setup_command, env
+            FROM mcp_servers WHERE id = ?
+            """,
+            (server_id,),
+        ).fetchone()
+        changed = bool(
+            current
+            and (
+                current["transport"] != "stdio"
+                or current["connection"] != knowledge_protocol.BUILTIN_SERVER_COMMAND
+                or current["setup_command"] != knowledge_protocol.BUILTIN_SETUP_COMMAND
+                or current["env"] != managed_env
+            )
+        )
+        conn.execute(
+            """
+            UPDATE mcp_servers
+            SET description = ?, transport = 'stdio', connection = ?,
+                headers = '{}', env = ?, auth_scheme = '', setup_command = ?,
+                connection_status = CASE WHEN ? THEN 'stale' ELSE connection_status END,
+                last_error = CASE WHEN ? THEN '' ELSE last_error END
+            WHERE id = ?
+            """,
+            (
+                knowledge_protocol.BUILTIN_SERVER_DESCRIPTION,
+                knowledge_protocol.BUILTIN_SERVER_COMMAND,
+                managed_env,
+                knowledge_protocol.BUILTIN_SETUP_COMMAND,
+                int(changed),
+                int(changed),
+                server_id,
+            ),
+        )
+    conn.execute(
+        """
+        UPDATE builtin_agent_settings
+        SET mcp_server_id = ?, updated_at = ?
+        WHERE agent_key = 'knowledge'
+        """,
+        (server_id, _now()),
+    )
+    return server_id
 
 
 def _required(value, field: str) -> str:
@@ -1270,6 +1408,9 @@ def server_for_api(server: dict | None) -> dict | None:
     if server is None:
         return None
     result = dict(server)
+    result["managed"] = (
+        result.get("setup_type") == knowledge_protocol.BUILTIN_SETUP_TYPE
+    )
     result.pop("setup_type", None)
     result["headers"], headers_configured = _masked_json_object(result.get("headers"))
     result["env"], env_configured = _masked_json_object(result.get("env"))
@@ -1381,7 +1522,7 @@ def _active_supervisor_model_defaults() -> dict:
 
 
 def init() -> None:
-    """Create tables and migrate only configuration the user already owns."""
+    """Create tables, migrate user data, and ensure required built-in services."""
     with _connect() as conn:
         _init_schema(conn)
         _migrate_legacy(conn)
@@ -2200,9 +2341,82 @@ def get_builtin_agent_generation_runtime(agent_key: str) -> dict | None:
     }
 
 
+def get_knowledge_embedding_runtime() -> dict | None:
+    """Resolve the enabled embedding connection without exposing it to the API."""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT e.*
+                FROM builtin_agent_settings s
+                JOIN embedding_models e ON e.id = s.embedding_model_id
+                WHERE s.agent_key = 'knowledge' AND s.embedding_enabled = 1
+                """
+            ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is None:
+        return None
+    result = dict(row)
+    result["api_key"] = _resolve_key(result.get("api_key") or "")
+    return result
+
+
+def get_builtin_confirmation_tools(agent_key: str) -> list[str]:
+    """Return the persisted confirmation rules for one built-in specialist."""
+    key = str(agent_key or "").removeprefix("builtin:").strip()
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT confirm_tools FROM builtin_agent_settings
+                WHERE agent_key = ?
+                """,
+                (key,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is None:
+        return builtin_agents.default_confirmation_tools(key)
+    try:
+        parsed = json.loads(row["confirm_tools"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return builtin_agents.default_confirmation_tools(key)
+    return [str(item) for item in parsed if str(item)] if isinstance(parsed, list) else []
+
+
+def _builtin_capabilities_with_confirmation() -> list[dict]:
+    """Overlay saved confirmation policy on the shipped built-in tool catalog."""
+    result = builtin_agents.capabilities()
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT agent_key, confirm_tools FROM builtin_agent_settings"
+            ).fetchall()
+        stored = {str(row["agent_key"]): row["confirm_tools"] for row in rows}
+    except sqlite3.OperationalError:
+        stored = {}
+    for agent in result:
+        raw_rules = stored.get(agent["builtin_key"])
+        try:
+            rules = (
+                set(json.loads(raw_rules or "[]"))
+                if raw_rules is not None
+                else set(builtin_agents.default_confirmation_tools(agent["builtin_key"]))
+            )
+        except (json.JSONDecodeError, TypeError):
+            rules = set(builtin_agents.default_confirmation_tools(agent["builtin_key"]))
+        for tool in agent["tools"]:
+            tool["requires_confirmation"] = (
+                "*" in rules or tool["name"] in rules
+            )
+        agent["confirm_tools"] = sorted(rules)
+    return result
+
+
 def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
     capabilities = {
-        item["builtin_key"]: item for item in builtin_agents.capabilities()
+        item["builtin_key"]: item for item in _builtin_capabilities_with_confirmation()
     }
     models = list_models()
     result = []
@@ -2219,18 +2433,47 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
         with _connect() as conn:
             setting = conn.execute(
                 """
-                SELECT s.model_id, s.generation_model_id, s.connected, s.enabled,
+                SELECT s.model_id, s.generation_model_id, s.mcp_server_id,
+                       s.embedding_enabled, s.embedding_model_id,
+                       s.confirm_tools, s.connected, s.enabled,
                        COALESCE(m.model, s.model) AS model,
-                       gm.model AS generation_model
+                       gm.model AS generation_model,
+                       server.name AS mcp_server_name,
+                       server.transport AS mcp_server_transport,
+                       server.connection_status AS mcp_server_status
                 FROM builtin_agent_settings s
                 LEFT JOIN models m ON m.id = s.model_id
                 LEFT JOIN models gm ON gm.id = s.generation_model_id
+                LEFT JOIN mcp_servers server ON server.id = s.mcp_server_id
                 WHERE s.agent_key = ?
                 """,
                 (key,),
             ).fetchone()
         capability = capabilities[key]
         default_prompt = builtin_agents.system_prompt(key)
+        server_id = (
+            int(setting["mcp_server_id"])
+            if setting and setting["mcp_server_id"] is not None
+            else None
+        )
+        protocol_missing: list[str] = []
+        exposed_tools = capability["tools"]
+        if key == "knowledge" and server_id is not None:
+            state = get_server_tools_state(server_id)
+            protocol_missing = knowledge_protocol.missing_tools(
+                tool["name"] for tool in ((state or {}).get("tools") or [])
+            )
+            advertised_names = {
+                tool["name"] for tool in ((state or {}).get("tools") or [])
+            }
+            exposed_tools = (
+                [
+                    tool for tool in capability["tools"]
+                    if tool["name"] in advertised_names
+                ]
+                if (state or {}).get("status") == "connected"
+                else []
+            )
         result.append(
             {
                 **definition,
@@ -2246,10 +2489,51 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                     setting["generation_model"] if setting else None
                 ) if key == "media" else None,
                 "generation_model_options": options if key == "media" else [],
+                "mcp_server_id": server_id if key == "knowledge" else None,
+                "mcp_server_name": (
+                    setting["mcp_server_name"] if setting else None
+                ) if key == "knowledge" else None,
+                "mcp_server_transport": (
+                    setting["mcp_server_transport"] if setting else None
+                ) if key == "knowledge" else None,
+                "mcp_server_status": (
+                    setting["mcp_server_status"] if setting else None
+                ) if key == "knowledge" else None,
+                "knowledge_protocol": (
+                    f"{knowledge_protocol.PROTOCOL_NAME} v{knowledge_protocol.PROTOCOL_VERSION}"
+                    if key == "knowledge" else None
+                ),
+                "knowledge_protocol_compatible": (
+                    server_id is not None
+                    and setting["mcp_server_status"] == "connected"
+                    and not protocol_missing
+                ) if key == "knowledge" else None,
+                "knowledge_protocol_missing_tools": (
+                    protocol_missing if key == "knowledge" else []
+                ),
+                "embedding_enabled": (
+                    bool(setting["embedding_enabled"]) if setting else False
+                ) if key == "knowledge" else None,
+                "embedding_model_id": (
+                    setting["embedding_model_id"] if setting else None
+                ) if key == "knowledge" else None,
+                "embedding_model_options": (
+                    [
+                        {
+                            "id": embedding["id"],
+                            "label": f"{embedding['name']} — {embedding['model']}",
+                            "status": embedding["connection_status"],
+                            "dimensions": embedding["dimensions"],
+                        }
+                        for embedding in list_embedding_models()
+                    ]
+                    if key == "knowledge" else []
+                ),
                 "enabled": bool(setting["enabled"]) if setting else True,
                 "connected": bool(setting["connected"]) if setting else True,
                 "model_options": options,
-                "tools": capability["tools"],
+                "confirm_tools": capability["confirm_tools"],
+                "tools": exposed_tools,
             }
         )
     return [agent for agent in result if agent["connected"]] if connected_only else result
@@ -2260,6 +2544,10 @@ def update_builtin_agent(
     *,
     model_id: int | None | object = _UNSET,
     generation_model_id: int | None | object = _UNSET,
+    mcp_server_id: int | None | object = _UNSET,
+    embedding_enabled: bool | None = None,
+    embedding_model_id: int | None | object = _UNSET,
+    confirm_tools: list[str] | str | object = _UNSET,
     connected: bool | None = None,
     enabled: bool | None = None,
 ) -> dict:
@@ -2268,6 +2556,9 @@ def update_builtin_agent(
         raise ValueError("built-in specialist was not found")
     if (
         model_id is _UNSET and generation_model_id is _UNSET
+        and mcp_server_id is _UNSET and embedding_model_id is _UNSET
+        and confirm_tools is _UNSET
+        and embedding_enabled is None
         and connected is None and enabled is None
     ):
         raise ValueError("provide a configuration change")
@@ -2294,6 +2585,88 @@ def update_builtin_agent(
                 raise ValueError("choose a generation model") from exc
             if get_model(requested_generation_id) is None:
                 raise ValueError("choose a configured generation model")
+    server_requested = mcp_server_id is not _UNSET
+    requested_server_id = None
+    if server_requested:
+        if definition["key"] != "knowledge":
+            raise ValueError("only Knowledge supports a knowledge MCP server")
+        managed = get_builtin_gbrain_server()
+        if managed is None:
+            raise ValueError("the built-in GBrain server is unavailable")
+        try:
+            requested_server_id = int(mcp_server_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Knowledge must use its built-in GBrain server") from exc
+        if requested_server_id != int(managed["id"]):
+            raise ValueError("Knowledge must use its built-in GBrain server")
+    embedding_requested = embedding_model_id is not _UNSET
+    requested_embedding_id = None
+    if embedding_requested:
+        if definition["key"] != "knowledge":
+            raise ValueError("only Knowledge supports an embedding model")
+        if embedding_model_id is not None:
+            try:
+                requested_embedding_id = int(embedding_model_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("choose an embedding model") from exc
+            selected_embedding = get_embedding_model(requested_embedding_id)
+            if selected_embedding is None:
+                raise ValueError("choose a configured embedding model")
+    normalized_embedding_enabled = (
+        int(_bool(embedding_enabled, "embedding enabled"))
+        if embedding_enabled is not None else None
+    )
+    if normalized_embedding_enabled is not None and definition["key"] != "knowledge":
+        raise ValueError("only Knowledge supports embeddings")
+    confirmation_requested = confirm_tools is not _UNSET
+    normalized_confirm_tools = None
+    if confirmation_requested:
+        normalized_confirm_tools = _json_string_list(
+            confirm_tools, "confirmation tools"
+        )
+        rules = set(json.loads(normalized_confirm_tools))
+        known_tools = {
+            tool["name"]
+            for capability in builtin_agents.capabilities()
+            if capability["builtin_key"] == definition["key"]
+            for tool in capability["tools"]
+        }
+        unknown = rules - {"*"} - known_tools
+        if unknown:
+            raise ValueError(
+                "one or more confirmation tools are unavailable for this built-in subagent"
+            )
+    if embedding_requested or normalized_embedding_enabled is not None:
+        with _connect() as conn:
+            current_embedding = conn.execute(
+                """
+                SELECT embedding_enabled, embedding_model_id
+                FROM builtin_agent_settings WHERE agent_key = 'knowledge'
+                """
+            ).fetchone()
+        effective_enabled = (
+            bool(normalized_embedding_enabled)
+            if normalized_embedding_enabled is not None
+            else bool(current_embedding and current_embedding["embedding_enabled"])
+        )
+        effective_embedding_id = (
+            requested_embedding_id
+            if embedding_requested
+            else current_embedding["embedding_model_id"] if current_embedding else None
+        )
+    else:
+        effective_enabled = False
+        effective_embedding_id = None
+    if effective_enabled:
+        if effective_embedding_id is None:
+            raise ValueError("choose an embedding model before enabling embeddings")
+        effective_embedding = get_embedding_model(int(effective_embedding_id))
+        if (
+            effective_embedding is None
+            or effective_embedding["connection_status"] != "connected"
+            or not effective_embedding["dimensions"]
+        ):
+            raise ValueError("test the embedding model before enabling it")
     normalized_enabled = (
         int(_bool(enabled, "enabled")) if enabled is not None else None
     )
@@ -2323,6 +2696,42 @@ def update_builtin_agent(
                 WHERE agent_key = ?
                 """,
                 (requested_generation_id, _now(), definition["key"]),
+            )
+        if server_requested:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET mcp_server_id = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (requested_server_id, _now(), definition["key"]),
+            )
+        if embedding_requested:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET embedding_model_id = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (requested_embedding_id, _now(), definition["key"]),
+            )
+        if normalized_embedding_enabled is not None:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET embedding_enabled = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (normalized_embedding_enabled, _now(), definition["key"]),
+            )
+        if confirmation_requested:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET confirm_tools = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (normalized_confirm_tools, _now(), definition["key"]),
             )
         if normalized_connected is not None:
             conn.execute(
@@ -2570,7 +2979,7 @@ def update_heartbeat_settings(
             }
             active_builtin_keys = enabled_builtin_agent_keys()
             builtin_capabilities = [
-                agent for agent in builtin_agents.capabilities()
+                agent for agent in _builtin_capabilities_with_confirmation()
                 if agent["builtin_key"] in active_builtin_keys
             ]
             for agent in builtin_capabilities:
@@ -2691,7 +3100,7 @@ def _heartbeat_agent_catalog(conn: sqlite3.Connection) -> dict[str, dict]:
         }
 
     enabled_builtins = enabled_builtin_agent_keys()
-    for agent in builtin_agents.capabilities():
+    for agent in _builtin_capabilities_with_confirmation():
         if agent["builtin_key"] not in enabled_builtins:
             continue
         catalog[agent["key"]] = {
@@ -3134,7 +3543,7 @@ def get_heartbeat_capabilities() -> list[dict]:
         )
     active_builtin_keys = enabled_builtin_agent_keys()
     builtins = [
-        agent for agent in builtin_agents.capabilities()
+        agent for agent in _builtin_capabilities_with_confirmation()
         if agent["builtin_key"] in active_builtin_keys
     ]
     for agent in builtins:
@@ -3205,7 +3614,7 @@ def get_heartbeat_targets(task_id: int | None = None) -> list[dict]:
                 lookup[f"{tool['server_id']}:{tool['tool_name']}"] = resolved
     targets = []
     active_builtin_keys = enabled_builtin_agent_keys()
-    for agent in builtin_agents.capabilities():
+    for agent in _builtin_capabilities_with_confirmation():
         if agent["builtin_key"] not in active_builtin_keys:
             continue
         chosen = selected_builtins.get(agent["key"], [])
@@ -3795,6 +4204,215 @@ def delete_model_result(model_id: int) -> DeletionResult:
 
 
 # -----------------------------------------------------------------------------
+# Embedding models
+# -----------------------------------------------------------------------------
+
+EMBEDDING_ADAPTERS = {"openai_compatible", "ollama"}
+EMBEDDING_LOCATIONS = {"cloud", "local"}
+
+
+def _normalize_embedding_connection(
+    location,
+    adapter,
+    base_url,
+) -> tuple[str, str, str]:
+    normalized_location = str(location or "cloud").strip().lower()
+    if normalized_location not in EMBEDDING_LOCATIONS:
+        raise ValueError("location must be cloud or local.")
+    normalized_adapter = str(adapter or "openai_compatible").strip().lower()
+    if normalized_adapter not in EMBEDDING_ADAPTERS:
+        raise ValueError("adapter must be OpenAI-compatible or Ollama.")
+    normalized_url = _normalize_model_base_url(base_url)
+    if not normalized_url:
+        raise ValueError("base URL is required.")
+    if normalized_url.endswith("/embeddings"):
+        normalized_url = normalized_url.removesuffix("/embeddings")
+    return normalized_location, normalized_adapter, normalized_url
+
+
+def add_embedding_model(
+    name: str,
+    location: str,
+    adapter: str,
+    model: str,
+    base_url: str,
+    api_key: str = "",
+) -> dict:
+    normalized = _normalize_embedding_connection(location, adapter, base_url)
+    now = _now()
+    with _connect() as conn:
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO embedding_models
+                    (name, location, adapter, model, base_url, api_key,
+                     connection_status, last_error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'untested', '', ?, ?)
+                """,
+                (
+                    _required(name, "name"),
+                    normalized[0],
+                    normalized[1],
+                    _required(model, "model ID"),
+                    normalized[2],
+                    api_key or "",
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+        return get_embedding_model(int(cur.lastrowid))
+
+
+def get_embedding_model(model_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM embedding_models WHERE id = ?", (model_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_embedding_model_runtime(model_id: int) -> dict | None:
+    model = get_embedding_model(model_id)
+    if model is None:
+        return None
+    return {
+        **model,
+        "api_key": _resolve_key(model.get("api_key") or ""),
+    }
+
+
+def list_embedding_models() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM embedding_models ORDER BY name").fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_embedding_model(model_id: int, **kwargs) -> dict | None:
+    allowed = {"name", "location", "adapter", "model", "base_url", "api_key"}
+    fields = {key: value for key, value in kwargs.items() if key in allowed and value is not None}
+    with _connect() as conn:
+        current = conn.execute(
+            "SELECT * FROM embedding_models WHERE id = ?", (model_id,)
+        ).fetchone()
+        if current is None:
+            return None
+        if not fields:
+            return dict(current)
+        if "name" in fields:
+            fields["name"] = _required(fields["name"], "name")
+        if "model" in fields:
+            fields["model"] = _required(fields["model"], "model ID")
+        location, adapter, base_url = _normalize_embedding_connection(
+            fields.get("location", current["location"]),
+            fields.get("adapter", current["adapter"]),
+            fields.get("base_url", current["base_url"]),
+        )
+        fields.update(location=location, adapter=adapter, base_url=base_url)
+        connection_changed = any(
+            fields.get(key, current[key]) != current[key]
+            for key in ("location", "adapter", "model", "base_url", "api_key")
+        )
+        if connection_changed:
+            active = conn.execute(
+                """
+                SELECT 1 FROM builtin_agent_settings
+                WHERE agent_key = 'knowledge' AND embedding_enabled = 1
+                  AND embedding_model_id = ?
+                """,
+                (model_id,),
+            ).fetchone()
+            if active:
+                raise ValueError(
+                    "Disable Knowledge embeddings before changing this connection."
+                )
+            fields.update(
+                dimensions=None,
+                connection_status="stale",
+                last_tested_at=None,
+                last_error="",
+            )
+        fields["updated_at"] = _now()
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        try:
+            conn.execute(
+                f"UPDATE embedding_models SET {sets} WHERE id = ?",
+                (*fields.values(), model_id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+    return get_embedding_model(model_id)
+
+
+def save_embedding_test(
+    model_id: int,
+    *,
+    dimensions: int | None = None,
+    error: str = "",
+) -> dict | None:
+    status = "connected" if dimensions else "failed"
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE embedding_models
+            SET dimensions = COALESCE(?, dimensions), connection_status = ?, last_tested_at = ?,
+                last_error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (dimensions, status, _now(), str(error or "")[:2000], _now(), model_id),
+        )
+        conn.commit()
+    return get_embedding_model(model_id)
+
+
+def delete_embedding_model_result(model_id: int) -> DeletionResult:
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            "SELECT 1 FROM embedding_models WHERE id = ?", (model_id,)
+        ).fetchone() is None:
+            conn.rollback()
+            return DeletionResult("not_found")
+        knowledge = conn.execute(
+            """
+            SELECT 1 FROM builtin_agent_settings
+            WHERE agent_key = 'knowledge' AND embedding_model_id = ?
+              AND embedding_enabled = 1
+            """,
+            (model_id,),
+        ).fetchone()
+        if knowledge:
+            conn.rollback()
+            return DeletionResult("in_use", ("the Knowledge built-in agent",))
+        try:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET embedding_model_id = NULL, updated_at = ?
+                WHERE agent_key = 'knowledge' AND embedding_model_id = ?
+                """,
+                (_now(), model_id),
+            )
+            conn.execute("DELETE FROM embedding_models WHERE id = ?", (model_id,))
+            conn.commit()
+            return DeletionResult("deleted")
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return DeletionResult("in_use", ("another saved configuration",))
+
+
+def embedding_model_for_api(model: dict | None) -> dict | None:
+    if model is None:
+        return None
+    result = dict(model)
+    result["api_key_configured"] = bool(result.pop("api_key", ""))
+    return result
+
+
+# -----------------------------------------------------------------------------
 # MCP servers
 # -----------------------------------------------------------------------------
 
@@ -4103,6 +4721,24 @@ def get_server(server_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def get_builtin_gbrain_server() -> dict | None:
+    """Return the required managed server backing the Knowledge specialist."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM mcp_servers WHERE setup_type = ?",
+            (knowledge_protocol.BUILTIN_SETUP_TYPE,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def is_managed_server(server_id: int) -> bool:
+    server = get_server(server_id)
+    return bool(
+        server
+        and server.get("setup_type") == knowledge_protocol.BUILTIN_SETUP_TYPE
+    )
+
+
 def list_servers() -> list[dict]:
     with _connect() as conn:
         cur = conn.execute("SELECT * FROM mcp_servers ORDER BY name")
@@ -4110,6 +4746,8 @@ def list_servers() -> list[dict]:
 
 
 def update_server(server_id: int, **kwargs) -> dict | None:
+    if is_managed_server(server_id):
+        raise ValueError("This built-in MCP server is managed by Mounir.")
     allowed = {
         "name",
         "connection",
@@ -4214,6 +4852,12 @@ def delete_server_result(server_id: int) -> DeletionResult:
         ).fetchone() is None:
             conn.rollback()
             return DeletionResult("not_found")
+        managed = conn.execute(
+            "SELECT setup_type FROM mcp_servers WHERE id = ?", (server_id,)
+        ).fetchone()
+        if managed and managed["setup_type"] == knowledge_protocol.BUILTIN_SETUP_TYPE:
+            conn.rollback()
+            return DeletionResult("in_use", ("the built-in Knowledge subagent",))
         agent_rows = conn.execute(
             """
             SELECT DISTINCT subagents.name
@@ -4225,6 +4869,15 @@ def delete_server_result(server_id: int) -> DeletionResult:
             (server_id,),
         ).fetchall()
         dependencies = tuple(f"the {row['name']} subagent" for row in agent_rows)
+        knowledge_setting = conn.execute(
+            """
+            SELECT 1 FROM builtin_agent_settings
+            WHERE agent_key = 'knowledge' AND mcp_server_id = ?
+            """,
+            (server_id,),
+        ).fetchone()
+        if knowledge_setting:
+            dependencies += ("the Knowledge built-in subagent",)
         if dependencies:
             conn.rollback()
             return DeletionResult("in_use", dependencies)
@@ -5986,6 +6639,12 @@ def build_server_spec(server_id: int) -> dict | None:
         return None
     env = _resolved_json_object(server.get("env") or "{}")
     env.update(_materialized_server_file_env(server_id))
+    if server.get("setup_type") == knowledge_protocol.BUILTIN_SETUP_TYPE:
+        embedding = get_knowledge_embedding_runtime()
+        if embedding is not None:
+            from .embedding_models import gbrain_provider_environment
+
+            env.update(gbrain_provider_environment(embedding))
     return {
         "server_id": server_id,
         "name": server["name"],
@@ -5997,6 +6656,26 @@ def build_server_spec(server_id: int) -> dict | None:
         "oauth_redirect_uri": server.get("oauth_redirect_uri") or "",
         "setup_command": server.get("setup_command") or "",
     }
+
+
+def get_builtin_agent_server_spec(agent_key: str) -> dict | None:
+    """Resolve the MCP server selected for a built-in specialist."""
+    key = str(agent_key or "").removeprefix("builtin:").strip()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT mcp_server_id
+            FROM builtin_agent_settings
+            WHERE agent_key = ?
+            """,
+            (key,),
+        ).fetchone()
+    if row is None or row["mcp_server_id"] is None:
+        return None
+    spec = build_server_spec(int(row["mcp_server_id"]))
+    if spec is None:
+        return None
+    return {**spec, "server_name": spec["name"]}
 
 
 def build_specs(workflow_id: int | None = None) -> list[dict]:

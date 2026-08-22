@@ -28,8 +28,11 @@ _BUILTINS = {
         "module": "mounir.specialists.knowledge",
         "provider": "Gemini",
         "default_model": config.KNOWLEDGE_MODEL,
-        "description": "Reads and maintains Mounir's structured long-term knowledge.",
-        "safe_tools": {"list_knowledge", "read_knowledge", "search_knowledge"},
+        "description": (
+            "Reads and maintains durable memory through Mounir's built-in "
+            "local GBrain MCP service."
+        ),
+        "safe_tools": {"recall", "search", "get_page", "list_pages"},
     },
     "system": {
         "name": "System",
@@ -117,8 +120,23 @@ def capabilities() -> list[dict]:
     return result
 
 
+def default_confirmation_tools(key: str) -> list[str]:
+    """Return the shipped safety defaults for one built-in specialist."""
+    normalized = str(key or "").removeprefix("builtin:").strip()
+    item = next(
+        (agent for agent in capabilities() if agent["builtin_key"] == normalized),
+        None,
+    )
+    if item is None:
+        raise ValueError(f"unknown built-in specialist: {key}")
+    return [
+        tool["name"] for tool in item["tools"]
+        if tool["requires_confirmation"]
+    ]
+
+
 def run(key: str, task: str, allowed_tools: list[str]) -> str:
-    """Run one built-in specialist with a code-enforced tool allowlist."""
+    """Run one built-in specialist with an approval-free tool allowlist."""
     normalized = str(key or "").removeprefix("builtin:").strip()
     definition = _BUILTINS.get(normalized)
     if definition is None:
@@ -127,7 +145,15 @@ def run(key: str, task: str, allowed_tools: list[str]) -> str:
     from . import db
     if not db.is_builtin_agent_enabled(normalized):
         raise ValueError(f"{definition['name']} agent is inactive")
-    safe = definition["safe_tools"]
+    capability = next(
+        agent for agent in capabilities() if agent["builtin_key"] == normalized
+    )
+    confirmation_rules = set(db.get_builtin_confirmation_tools(normalized))
+    safe = {
+        tool["name"]
+        for tool in capability["tools"]
+        if "*" not in confirmation_rules and tool["name"] not in confirmation_rules
+    }
     selected = [name for name in allowed_tools if name in safe]
     if not selected:
         raise ValueError(f"no safe tools selected for {definition['name']}")

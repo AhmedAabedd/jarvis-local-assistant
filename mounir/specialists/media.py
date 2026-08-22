@@ -171,6 +171,7 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
         fallback_provider="NVIDIA",
     )
     selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
+    confirmation_tools = db.get_builtin_confirmation_tools("media")
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
         {"role": "user", "content": task},
@@ -190,4 +191,5 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
         empty_response="Nothing to report.",
         exhausted_response="Files and Media reached max tool rounds — partial result only.",
         error_formatter=lambda _executed, error: f"Files and Media failed: {error}",
+        confirmation_tools=confirmation_tools,
     )
