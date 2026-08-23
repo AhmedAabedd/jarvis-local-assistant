@@ -10,6 +10,7 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
 import { Loading } from '../../components/ui/Loading'
+import { SectionTabs } from '../../components/ui/SectionTabs'
 import { Status } from '../../components/ui/Status'
 import { Switch } from '../../components/ui/Switch'
 import { keys } from '../../hooks/useStudioData'
@@ -396,31 +397,27 @@ export function HeartbeatPage() {
                 />
               </div>
 
-              <nav className="heartbeat-tabs" aria-label="Heartbeat task sections">
-                <button
-                  type="button"
-                  className={activeTab === 'setup' ? 'is-active' : ''}
-                  onClick={() => setActiveTab('setup')}
-                >
-                  <Bell size={14} /> Setup
-                </button>
-                <button
-                  type="button"
-                  className={activeTab === 'access' ? 'is-active' : ''}
-                  onClick={() => setActiveTab('access')}
-                >
-                  <Users size={14} /> Agents & tools
-                  <span>{draft.selectedAgents.size}</span>
-                </button>
-                <button
-                  type="button"
-                  className={activeTab === 'history' ? 'is-active' : ''}
-                  onClick={() => setActiveTab('history')}
-                >
-                  <History size={14} /> History
-                  {draft.recent_runs.length > 0 && <span>{draft.recent_runs.length}</span>}
-                </button>
-              </nav>
+              <SectionTabs
+                className="heartbeat-tabs"
+                label="Heartbeat task sections"
+                value={activeTab}
+                options={[
+                  { id: 'setup', label: 'Setup', icon: <Bell size={14} /> },
+                  {
+                    id: 'access',
+                    label: 'Agents & tools',
+                    icon: <Users size={14} />,
+                    count: draft.selectedAgents.size,
+                  },
+                  {
+                    id: 'history',
+                    label: 'History',
+                    icon: <History size={14} />,
+                    count: draft.recent_runs.length || undefined,
+                  },
+                ]}
+                onChange={(value) => setActiveTab(value as EditorTab)}
+              />
 
               {activeTab === 'setup' && (
                 <div className="heartbeat-tab-content heartbeat-setup">

@@ -7,7 +7,17 @@ import {
   type Edge,
   type Node,
 } from '@xyflow/react'
-import { Check, ChevronLeft, ChevronRight, Copy, Eye, Plus, Search } from 'lucide-react'
+import {
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Eye,
+  LayoutDashboard,
+  Plus,
+  Search,
+  Settings2,
+} from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type {
@@ -23,6 +33,7 @@ import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
 import { Modal } from '../../components/ui/Modal'
+import { SectionTabs } from '../../components/ui/SectionTabs'
 import { useAgentNodes, useSkills, useWorkflowNodes } from '../../hooks/useStudioData'
 import { readable, stringList, toDataUrl } from '../resources/helpers'
 import {
@@ -419,22 +430,16 @@ function WorkflowPreview({ workflow }: { workflow: Workflow }) {
   useEffect(() => setTab('overview'), [workflow.id])
   return (
     <div className="workflow-preview">
-      <nav className="workflow-tabs workflow-preview__tabs" aria-label="Workflow preview pages">
-        <button
-          type="button"
-          className={tab === 'overview' ? 'is-active' : ''}
-          onClick={() => setTab('overview')}
-        >
-          Overview
-        </button>
-        <button
-          type="button"
-          className={tab === 'details' ? 'is-active' : ''}
-          onClick={() => setTab('details')}
-        >
-          Details
-        </button>
-      </nav>
+      <SectionTabs
+        className="workflow-tabs workflow-preview__tabs"
+        label="Workflow preview pages"
+        value={tab}
+        options={[
+          { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={14} /> },
+          { id: 'details', label: 'Details', icon: <Settings2 size={14} /> },
+        ]}
+        onChange={(value) => setTab(value as typeof tab)}
+      />
       {tab === 'overview' ? (
         <WorkflowPreviewOverview workflow={workflow} />
       ) : (

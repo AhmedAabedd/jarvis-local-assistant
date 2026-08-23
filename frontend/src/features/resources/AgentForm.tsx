@@ -1,10 +1,20 @@
-import { Check, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
+import {
+  BookOpen,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+  Settings2,
+  ShieldCheck,
+  Wrench,
+} from 'lucide-react'
 import { useMemo, useState, type FormEvent } from 'react'
 import type { McpServer, ModelRecord, Subagent, SubagentMcpSource } from '../../api/types'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
+import { SectionTabs } from '../../components/ui/SectionTabs'
 import { useSkills } from '../../hooks/useStudioData'
 import { stringList, toDataUrl } from './helpers'
 import {
@@ -141,19 +151,26 @@ export function AgentForm({
   return (
     <form id={formId} className="subagent-edit-form" onSubmit={submit}>
       {item ? (
-        <nav className="subagent-form-tabs" aria-label="Subagent configuration sections">
-          {pages.map((entry, index) => (
-            <button
-              className={page === entry.id ? 'is-active' : ''}
-              type="button"
-              key={entry.id}
-              aria-current={page === entry.id ? 'page' : undefined}
-              onClick={() => openPage(entry.id, index + 1)}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </nav>
+        <SectionTabs
+          className="subagent-form-tabs"
+          label="Subagent configuration sections"
+          value={page}
+          options={[
+            { id: 'configuration', label: 'Configuration', icon: <Settings2 size={14} /> },
+            {
+              id: 'skills',
+              label: 'Skills',
+              icon: <BookOpen size={14} />,
+              count: selectedSkills.size,
+            },
+            { id: 'tools', label: 'Tools', icon: <Wrench size={14} /> },
+            { id: 'security', label: 'Security', icon: <ShieldCheck size={14} /> },
+          ]}
+          onChange={(value) => {
+            const index = pages.findIndex((entry) => entry.id === value)
+            openPage(value as FormPage, index + 1)
+          }}
+        />
       ) : (
         <nav className="subagent-wizard__steps" aria-label="Creation progress">
           {pages.map((entry, index) => {

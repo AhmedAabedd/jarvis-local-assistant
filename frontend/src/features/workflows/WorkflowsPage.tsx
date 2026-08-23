@@ -15,10 +15,12 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronLeft,
   GitBranch,
+  LayoutDashboard,
   ListChecks,
   Plus,
   Save,
   Search,
+  Settings2,
   Trash2,
   Workflow as WorkflowIcon,
 } from 'lucide-react'
@@ -33,6 +35,7 @@ import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
 import { Loading } from '../../components/ui/Loading'
 import { Modal } from '../../components/ui/Modal'
+import { SectionTabs } from '../../components/ui/SectionTabs'
 import {
   keys,
   useAgentNodes,
@@ -754,20 +757,16 @@ export function WorkflowsPage() {
             </>
           }
         />
-        <div className="workflow-tabs">
-          <button
-            className={tab === 'overview' ? 'is-active' : ''}
-            onClick={() => setParams({ open: String(selected.id), tab: 'overview' })}
-          >
-            Overview
-          </button>
-          <button
-            className={tab === 'details' ? 'is-active' : ''}
-            onClick={() => setParams({ open: String(selected.id), tab: 'details' })}
-          >
-            Details
-          </button>
-        </div>
+        <SectionTabs
+          className="workflow-tabs"
+          label="Workflow pages"
+          value={tab}
+          options={[
+            { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={14} /> },
+            { id: 'details', label: 'Details', icon: <Settings2 size={14} /> },
+          ]}
+          onChange={(value) => setParams({ open: String(selected.id), tab: value })}
+        />
         <div className="page-content">
           {tab === 'overview' ? (
             <WorkflowOverview workflow={selected} workflows={workflows.data || []} />

@@ -1,10 +1,11 @@
-import { Save } from 'lucide-react'
+import { Save, Settings2, ShieldCheck } from 'lucide-react'
 import { useState } from 'react'
 import type { BuiltinAgent, EmbeddingModelRecord, ModelRecord } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
+import { SectionTabs } from '../../components/ui/SectionTabs'
 import { stringList } from './helpers'
 import { ToolChoices } from './ToolChoices'
 
@@ -141,27 +142,16 @@ export function BuiltinAgentDetails({
           </label>
         </div>
         <div className="card__body detail-grid resource-detail-body">
-          <nav
+          <SectionTabs
             className="subagent-form-tabs builtin-agent-tabs"
-            aria-label="Built-in subagent configuration sections"
-          >
-            <button
-              className={page === 'configuration' ? 'is-active' : ''}
-              type="button"
-              aria-current={page === 'configuration' ? 'page' : undefined}
-              onClick={() => setPage('configuration')}
-            >
-              Configuration
-            </button>
-            <button
-              className={page === 'security' ? 'is-active' : ''}
-              type="button"
-              aria-current={page === 'security' ? 'page' : undefined}
-              onClick={() => setPage('security')}
-            >
-              Security
-            </button>
-          </nav>
+            label="Built-in subagent configuration sections"
+            value={page}
+            options={[
+              { id: 'configuration', label: 'Configuration', icon: <Settings2 size={14} /> },
+              { id: 'security', label: 'Security', icon: <ShieldCheck size={14} /> },
+            ]}
+            onChange={(value) => setPage(value as typeof page)}
+          />
           {page === 'configuration' && (
             <>
               <Detail label="Overview state" value={item.enabled ? 'Active' : 'Inactive'} />

@@ -14,6 +14,7 @@ import {
   PackageOpen,
   Search,
   Star,
+  Store,
   Tag,
   Trash2,
   Upload,
@@ -28,6 +29,7 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
 import { Loading } from '../../components/ui/Loading'
 import { Modal } from '../../components/ui/Modal'
+import { SectionTabs } from '../../components/ui/SectionTabs'
 import { keys, useSkills, useSkillTargets } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 
@@ -723,23 +725,30 @@ export function SkillsPage() {
       />
       <div className="page-content skills-page">
         {!selected && (
-          <>
-            <nav className="skills-tabs" aria-label="Skills pages">
-              {(Object.keys(pageCopy) as Page[]).map((key) => (
-                <button
-                  type="button"
-                  key={key}
-                  className={page === key ? 'is-active' : ''}
-                  onClick={() => setPage(key)}
-                >
-                  <span>{pageCopy[key].label}</span>
-                  {key === 'installed' && (
-                    <span className="skills-tabs__count">{skills.data?.length || 0}</span>
-                  )}
-                </button>
-              ))}
-            </nav>
-          </>
+          <SectionTabs
+            className="skills-tabs"
+            label="Skills pages"
+            value={page}
+            options={[
+              {
+                id: 'installed',
+                label: pageCopy.installed.label,
+                icon: <PackageOpen size={14} />,
+                count: skills.data?.length || 0,
+              },
+              {
+                id: 'store',
+                label: pageCopy.store.label,
+                icon: <Store size={14} />,
+              },
+              {
+                id: 'import',
+                label: pageCopy.import.label,
+                icon: <Upload size={14} />,
+              },
+            ]}
+            onChange={(value) => setPage(value as Page)}
+          />
         )}
         {selected ? (
           <SkillDetails skill={selected} onBack={() => setSelected(null)} />

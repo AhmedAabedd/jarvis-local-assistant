@@ -507,16 +507,17 @@ button {
   color: var(--muted);
   font-size: 9px;
 }
-.heartbeat-tabs {
+.section-tabs {
+  width: 100%;
   display: flex;
   gap: 4px;
-  padding: 8px 14px;
   overflow-x: auto;
-  border-top: 1px solid var(--line-soft);
-  border-bottom: 1px solid var(--line-soft);
-  background: #0e1512;
+  background: transparent;
 }
-.heartbeat-tabs button {
+.heartbeat-tabs {
+  padding: 16px 24px 0;
+}
+.section-tabs button {
   min-height: 34px;
   display: inline-flex;
   align-items: center;
@@ -531,15 +532,15 @@ button {
   cursor: pointer;
   white-space: nowrap;
 }
-.heartbeat-tabs button:hover {
+.section-tabs button:hover {
   color: var(--text);
   background: var(--surface-2);
 }
-.heartbeat-tabs button.is-active {
+.section-tabs button.is-active {
   color: var(--accent);
   background: #183025;
 }
-.heartbeat-tabs button > span {
+.section-tabs__count {
   min-width: 17px;
   height: 17px;
   display: inline-grid;
@@ -2869,7 +2870,7 @@ button.resource-header-action {
 }
 .workflow-preview__tabs {
   flex: 0 0 auto;
-  margin: -8px -22px 18px;
+  margin: -8px 0 18px;
 }
 .workflow-preview__canvas {
   min-height: 0;
@@ -2897,21 +2898,15 @@ button.resource-header-action {
 }
 
 .workflow-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 0 28px;
+  width: 100%;
+  margin: 26px 0 0;
 }
-.workflow-tabs button {
-  padding: 12px 14px;
-  color: var(--muted);
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  cursor: pointer;
+.workflow-tabs + .page-content {
+  padding-top: 22px;
 }
-.workflow-tabs button.is-active {
-  color: var(--text);
-  border-bottom-color: var(--accent);
+.workflow-preview__tabs {
+  width: 100%;
+  margin: -8px 0 18px;
 }
 .workflow-form {
   display: grid;
@@ -3318,43 +3313,7 @@ button.resource-header-action {
   display: grid;
 }
 .subagent-form-tabs {
-  display: flex;
-  align-items: center;
-  gap: 28px;
   margin: -3px 0 24px;
-}
-.subagent-form-tabs button {
-  position: relative;
-  min-height: 27px;
-  flex: 0 0 auto;
-  padding: 0 2px 6px;
-  color: var(--muted);
-  border: 0;
-  background: transparent;
-  font-size: 11px;
-  font-weight: 650;
-  cursor: pointer;
-  transition: color 150ms ease;
-}
-.subagent-form-tabs button::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: transparent;
-  transition: background 150ms ease;
-}
-.subagent-form-tabs button:hover {
-  color: var(--text);
-}
-.subagent-form-tabs button.is-active {
-  color: var(--accent);
-}
-.subagent-form-tabs button.is-active::after {
-  background: var(--accent-strong);
 }
 
 .skills-page {
@@ -3362,63 +3321,7 @@ button.resource-header-action {
   margin-inline: auto;
 }
 .skills-tabs {
-  width: fit-content;
-  display: flex;
-  align-items: center;
-  gap: 28px;
   margin-bottom: 22px;
-}
-.skills-tabs button {
-  position: relative;
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 2px 7px;
-  color: var(--muted);
-  border: 0;
-  background: transparent;
-  font-size: 12px;
-  font-weight: 650;
-  cursor: pointer;
-}
-.skills-tabs__count {
-  min-width: 17px;
-  height: 17px;
-  display: inline-grid;
-  place-items: center;
-  padding: 0 4px;
-  color: var(--muted);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-2);
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 1;
-}
-.skills-tabs button.is-active .skills-tabs__count {
-  color: var(--accent);
-  border-color: rgb(89 201 142 / 35%);
-  background: rgb(89 201 142 / 8%);
-}
-.skills-tabs button::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 2px;
-  border-radius: 2px;
-  background: transparent;
-}
-.skills-tabs button:hover {
-  color: var(--text);
-}
-.skills-tabs button.is-active {
-  color: var(--accent);
-}
-.skills-tabs button.is-active::after {
-  background: var(--accent-strong);
 }
 .skills-empty {
   flex-direction: column;
@@ -4865,7 +4768,7 @@ button.panel-close-button svg {
     padding-inline: 16px;
   }
   .heartbeat-tabs {
-    padding-inline: 8px;
+    padding-inline: 16px;
   }
   .heartbeat-tab-content {
     min-height: 0;

@@ -12,3 +12,4 @@
 ## Visual consistency
 
 - A node type must use the same component structure, dimensions, icon treatment, colors, states, and interaction layout everywhere it appears in the application. Placement in a global overview, workflow editor, or any future graph must not create a visually different version of the same node type; add context-specific graph behavior through edges and handles without changing the node's visual identity.
+- Use the shared **Section Tabs** pattern for switching between peer pages or sections: icon and label, an optional compact count, and a rounded active state. The tab row must sit directly in its existing content area with no separate background, border, divider, or wrapper treatment; preserve the alignment and spacing of its page.
