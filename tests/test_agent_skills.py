@@ -128,6 +128,8 @@ class AgentSkillsTests(unittest.TestCase):
         )
         prompt, tool = agent_skills.runtime_access("supervisor", "supervisor")
         self.assertIn("review-code", prompt)
+        self.assertIn("AVAILABLE SKILLS", tool.description)
+        self.assertNotIn("review-code", tool.description)
         result = tool.invoke({"name": "review-code"})
         self.assertIn("Follow the saved review instructions.", result)
         self.assertNotIn("Stored for future support.", result)

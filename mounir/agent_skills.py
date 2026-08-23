@@ -270,8 +270,8 @@ def runtime_access(agent_type: str, agent_key: str) -> tuple[str, StructuredTool
         func=activate_skill,
         name="activate_skill",
         description=(
-            "Load the complete instructions for one assigned skill before using it. "
-            "Valid skill names: " + ", ".join(names)
+            "Load the complete instructions for one skill listed in the "
+            "AVAILABLE SKILLS section before using it."
         ),
         args_schema={
             "type": "object",
