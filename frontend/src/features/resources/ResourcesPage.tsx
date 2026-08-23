@@ -21,6 +21,7 @@ import type {
   EmbeddingModelRecord,
   McpServer,
   ModelRecord,
+  SkillRecord,
   Subagent,
 } from '../../api/types'
 import { McpIcon } from '../../components/icons/McpIcon'
@@ -35,6 +36,7 @@ import {
   useEmbeddingModels,
   useModels,
   useServers,
+  useSkills,
   keys,
 } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
@@ -86,6 +88,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const models = useModels()
   const embeddingModels = useEmbeddingModels()
   const servers = useServers()
+  const skills = useSkills()
   const agents = useAgents()
   const builtins = useBuiltins()
   const resourceMode: ResourceMode = params.get('view') === 'built-in' ? 'built-in' : 'dynamic'
@@ -622,6 +625,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                 kind={kind}
                 item={selected as ModelRecord | McpServer | Subagent}
                 models={models.data || []}
+                skills={(skills.data || []) as SkillRecord[]}
                 onToggle={(enabled) => toggle.mutate(enabled)}
               />
             )}

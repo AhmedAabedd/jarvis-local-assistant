@@ -1,4 +1,4 @@
-import type { McpServer, ModelRecord, Subagent } from '../../api/types'
+import type { McpServer, ModelRecord, SkillRecord, Subagent } from '../../api/types'
 import { Status } from '../../components/ui/Status'
 import { objectValue, readable, stringList } from './helpers'
 import { ServerTools } from './ServerTools'
@@ -26,11 +26,13 @@ export function ResourceDetails({
   kind,
   item,
   models,
+  skills,
   onToggle,
 }: {
   kind: 'models' | 'servers' | 'agents'
   item: ModelRecord | McpServer | Subagent
   models: ModelRecord[]
+  skills: SkillRecord[]
   onToggle: (enabled: boolean) => void
 }) {
   if (kind === 'models') {
@@ -114,6 +116,10 @@ export function ResourceDetails({
   const enabled = !(agent.enabled === false || Number(agent.enabled) === 0)
   const model = models.find((v) => v.id === Number(agent.model_id))
   const sources = agent.mcp_sources || []
+  const assignedSkills = (agent.skill_ids || []).map((id) => ({
+    id: Number(id),
+    skill: skills.find((skill) => Number(skill.id) === Number(id)),
+  }))
   const confirms = stringList(agent.confirm_tools, agent.confirm_tool_calls ? ['*'] : [])
   const dedupe = stringList(agent.dedupe_tools)
   return (
@@ -155,6 +161,22 @@ export function ResourceDetails({
             value={agent.system_prompt || 'Default instructions'}
             full
           />
+          <div className="detail detail--full">
+            <dt>Assigned skills</dt>
+            <dd>
+              <div className="chips">
+                {assignedSkills.length ? (
+                  assignedSkills.map(({ id, skill }) => (
+                    <span className="chip" key={id} title={skill?.description || undefined}>
+                      {skill?.name || `Skill ${id}`}
+                    </span>
+                  ))
+                ) : (
+                  <span className="chip">No skills assigned</span>
+                )}
+              </div>
+            </dd>
+          </div>
           <div className="detail detail--full">
             <dt>MCP sources</dt>
             <dd>
