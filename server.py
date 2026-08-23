@@ -1017,7 +1017,14 @@ async def agent_overview():
 @app.put("/api/supervisor")
 async def update_supervisor(req: dict):
     try:
-        db.update_supervisor_model(req.get("model_id"))
+        if "model_id" in req:
+            db.update_supervisor_model(req.get("model_id"))
+        if "skill_ids" in req:
+            db.replace_agent_skill_assignments(
+                "supervisor", "supervisor", req.get("skill_ids")
+            )
+        if "model_id" not in req and "skill_ids" not in req:
+            raise ValueError("provide a configuration change")
         return (await agent_overview())["supervisor"]
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1043,6 +1050,8 @@ async def update_builtin_agent(agent_key: str, req: dict):
             changes["embedding_model_id"] = req.get("embedding_model_id")
         if "confirm_tools" in req:
             changes["confirm_tools"] = req.get("confirm_tools")
+        if "skill_ids" in req:
+            changes["skill_ids"] = req.get("skill_ids")
         if agent_key == "knowledge" and (
             "embedding_enabled" in req or "embedding_model_id" in req
         ):

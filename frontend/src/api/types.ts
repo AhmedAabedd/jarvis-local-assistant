@@ -226,6 +226,7 @@ export interface BuiltinAgent {
   connected: boolean
   confirm_tools?: string[] | string
   tools?: ToolInfo[]
+  skill_ids: Id[]
   model_options?: Array<{ id: Id; model: string; label: string }>
   generation_model_options?: Array<{ id: Id; model: string; label: string }>
 }
@@ -237,6 +238,7 @@ export interface Supervisor {
   model_id?: Id
   provider?: string
   tools: ToolInfo[]
+  skill_ids: Id[]
   model_options?: Array<{ id: Id; model: string; label: string }>
 }
 

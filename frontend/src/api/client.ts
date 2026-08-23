@@ -14,6 +14,7 @@ import type {
   SkillRecord,
   SkillStorePage,
   SkillTarget,
+  Supervisor,
   StoreSkill,
   SetupDescriptor,
   SetupActionResult,
@@ -70,7 +71,8 @@ export const api = {
   },
   overview: {
     get: () => request<AgentOverview>('/api/agent-overview'),
-    updateSupervisor: (model_id: number) => request('/api/supervisor', json('PUT', { model_id })),
+    updateSupervisor: (body: { model_id: number; skill_ids?: number[] }) =>
+      request<Supervisor>('/api/supervisor', json('PUT', body)),
     updateBuiltin: (key: string, body: object) =>
       request(`/api/builtin-agents/${key}`, json('PUT', body)),
   },

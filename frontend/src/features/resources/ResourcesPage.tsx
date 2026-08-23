@@ -12,8 +12,9 @@ import {
   Trash2,
   Workflow,
   Wrench,
+  X,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
 import type {
@@ -41,7 +42,7 @@ import {
 } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 import { AgentForm } from './AgentForm'
-import { BuiltinAgentDetails } from './BuiltinAgentDetails'
+import { BuiltinAgentDetails, type BuiltinAgentDetailsHandle } from './BuiltinAgentDetails'
 import { EmbeddingModelDetails } from './EmbeddingModelDetails'
 import { EmbeddingModelForm } from './EmbeddingModelForm'
 import { ModelForm } from './ModelForm'
@@ -118,6 +119,11 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const [editing, setEditing] = useState<Item | null | undefined>(undefined)
   const [deleting, setDeleting] = useState(false)
   const [search, setSearch] = useState('')
+  const [builtinDirty, setBuiltinDirty] = useState(false)
+  const [builtinDraftVersion, setBuiltinDraftVersion] = useState(0)
+  const [formDirty, setFormDirty] = useState(false)
+  const [formDraftVersion, setFormDraftVersion] = useState(0)
+  const builtinDetailsRef = useRef<BuiltinAgentDetailsHandle>(null)
   const formId = `${kind}-form`
   const info = meta[kind]
   const selectedAgentPlacements =
@@ -178,6 +184,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     },
     onSuccess: async (saved) => {
       await refresh()
+      setFormDirty(false)
       const item = saved as Item
       setEditing(undefined)
       setSelected(item)
@@ -212,18 +219,6 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       setDeleting(false)
     },
   })
-  const toggle = useMutation<Item, Error, boolean>({
-    mutationFn: (enabled: boolean) => {
-      if (!selected || kind !== 'agents') throw new Error('No subagent is selected.')
-      return isBuiltins
-        ? api.builtins.update((selected as BuiltinAgent).key, { enabled })
-        : api.agents.update((selected as Subagent).id, { enabled })
-    },
-    onSuccess: async (saved) => {
-      await refresh()
-      setSelected(saved)
-    },
-  })
   const builtinConnect = useMutation<BuiltinAgent, Error, boolean>({
     mutationFn: (connected) => {
       if (!selected || !isBuiltins) throw new Error('No built-in subagent is selected.')
@@ -244,6 +239,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       embedding_enabled?: boolean
       embedding_model_id?: number | null
       confirm_tools?: string[]
+      skill_ids?: number[]
     }
   >({
     mutationFn: (body) => {
@@ -252,6 +248,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     },
     onSuccess: async (saved) => {
       await refresh()
+      setBuiltinDirty(false)
       setSelected(saved)
     },
   })
@@ -382,14 +379,17 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const openList = () => {
     setEditing(undefined)
     setSelected(null)
+    setBuiltinDirty(false)
     setParams(hasTypePicker ? { view: resourceMode } : isEmbeddingMode ? { view: 'embedding' } : {})
   }
   const openCreate = () => {
     setSelected(null)
+    setFormDirty(false)
     setEditing(null)
     setParams(hasTypePicker ? { view: 'dynamic' } : isEmbeddingMode ? { view: 'embedding' } : {})
   }
   const cancelForm = () => {
+    setFormDirty(false)
     setEditing(undefined)
     if (!selected)
       setParams(
@@ -406,6 +406,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     if (mode === resourceMode) return
     setEditing(undefined)
     setSelected(null)
+    setBuiltinDirty(false)
     setDeleting(false)
     setSearch('')
     setParams({ view: mode })
@@ -445,9 +446,19 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
 
   const headerActions = inForm ? (
     <>
-      <Button icon={<ChevronLeft size={14} />} onClick={cancelForm}>
-        Cancel
-      </Button>
+      {formDirty && (
+        <Button
+          className="resource-header-action"
+          icon={<X size={15} />}
+          onClick={() => {
+            save.reset()
+            setFormDirty(false)
+            setFormDraftVersion((version) => version + 1)
+          }}
+          aria-label="Discard changes"
+          title="Discard changes"
+        />
+      )}
       {(kind !== 'agents' || editing !== null) && (
         <Button
           variant="primary"
@@ -462,13 +473,31 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     </>
   ) : selected ? (
     <div className="resource-header-actions">
-      <Button
-        className="resource-header-action"
-        icon={<ChevronLeft size={15} />}
-        onClick={openList}
-        aria-label={`Back to ${collectionTitle.toLowerCase()}`}
-        title={`Back to ${collectionTitle.toLowerCase()}`}
-      />
+      {isBuiltins && builtinDirty && (
+        <>
+          <Button
+            className="resource-header-action"
+            icon={<X size={15} />}
+            disabled={builtinConfig.isPending}
+            onClick={() => {
+              builtinConfig.reset()
+              setBuiltinDirty(false)
+              setBuiltinDraftVersion((version) => version + 1)
+            }}
+            aria-label="Discard changes"
+            title="Discard changes"
+          />
+          <Button
+            className="resource-header-action"
+            variant="primary"
+            icon={<Save size={15} />}
+            busy={builtinConfig.isPending}
+            onClick={() => builtinDetailsRef.current?.save()}
+            aria-label="Save changes"
+            title="Save changes"
+          />
+        </>
+      )}
       {!isBuiltins && !selectedIsManagedServer && (
         <Button
           className="resource-header-action"
@@ -486,7 +515,10 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           className="resource-header-action"
           variant="primary"
           icon={<Edit3 size={15} />}
-          onClick={() => setEditing(selected)}
+          onClick={() => {
+            setFormDirty(false)
+            setEditing(selected)
+          }}
           aria-label={`Edit ${singular}`}
           title={`Edit ${singular}`}
         />
@@ -500,7 +532,28 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
 
   return (
     <>
-      <PageHeader title={headerTitle} description={headerDescription} actions={headerActions} />
+      <PageHeader
+        title={headerTitle}
+        description={headerDescription}
+        leading={
+          selected && !inForm ? (
+            <Button
+              icon={<ChevronLeft size={15} />}
+              onClick={openList}
+              aria-label={`Back to ${collectionTitle.toLowerCase()}`}
+              title={`Back to ${collectionTitle.toLowerCase()}`}
+            />
+          ) : inForm ? (
+            <Button
+              icon={<ChevronLeft size={15} />}
+              onClick={cancelForm}
+              aria-label={`Back to ${selected ? selected.name : collectionTitle.toLowerCase()}`}
+              title={`Back to ${selected ? selected.name : collectionTitle.toLowerCase()}`}
+            />
+          ) : undefined
+        }
+        actions={headerActions}
+      />
       <div className={`page-content ${hasTypePicker || kind === 'models' ? 'stack' : ''}`}>
         {kind === 'models' && !inForm && !selected && (
           <div className="model-location-picker" role="tablist" aria-label="Model type">
@@ -559,7 +612,20 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           </div>
         )}
         {inForm ? (
-          <section className="card resource-workspace resource-workspace--form">
+          <section
+            key={`resource-form:${formDraftVersion}`}
+            className="card resource-workspace resource-workspace--form"
+            onChangeCapture={() => setFormDirty(true)}
+            onInputCapture={() => setFormDirty(true)}
+            onClickCapture={(event) => {
+              const button = (event.target as HTMLElement).closest('button[type="button"]')
+              if (
+                button &&
+                !button.closest('.section-tabs, .subagent-wizard__steps, .subagent-form-footer')
+              )
+                setFormDirty(true)
+            }}
+          >
             <div className="card__body">
               {kind === 'models' && !isEmbeddingMode && (
                 <ModelForm
@@ -599,10 +665,14 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           <section className="resource-detail-page">
             {isBuiltins ? (
               <BuiltinAgentDetails
-                key={(selected as BuiltinAgent).key}
+                key={`${(selected as BuiltinAgent).key}:${builtinDraftVersion}`}
+                ref={builtinDetailsRef}
                 item={selected as BuiltinAgent}
                 models={models.data || []}
                 embeddingModels={embeddingModels.data || []}
+                skills={(skills.data || []) as SkillRecord[]}
+                skillsLoading={skills.isLoading}
+                skillsError={skills.error instanceof Error ? skills.error.message : ''}
                 saving={builtinConfig.isPending}
                 connecting={builtinConnect.isPending}
                 error={
@@ -613,6 +683,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                       : ''
                 }
                 onConnect={(connected) => builtinConnect.mutate(connected)}
+                onDirtyChange={setBuiltinDirty}
                 onSave={(body) => builtinConfig.mutateAsync(body)}
               />
             ) : isEmbeddingMode ? (
@@ -626,10 +697,8 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                 item={selected as ModelRecord | McpServer | Subagent}
                 models={models.data || []}
                 skills={(skills.data || []) as SkillRecord[]}
-                onToggle={(enabled) => toggle.mutate(enabled)}
               />
             )}
-            <Feedback message={toggle.error instanceof Error ? toggle.error.message : ''} />
           </section>
         ) : query.isLoading ? (
           <Loading />
@@ -660,6 +729,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                       key={'key' in item ? item.key : item.id}
                       onClick={() => {
                         setEditing(undefined)
+                        setBuiltinDirty(false)
                         setSelected(item)
                         setParams(
                           isBuiltins

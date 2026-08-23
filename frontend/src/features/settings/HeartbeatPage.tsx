@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Bell, Clock, History, Plus, Play, Save, Trash2, Users } from 'lucide-react'
+import { Bell, ChevronLeft, Clock, History, Plus, Play, Save, Trash2, Users, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
@@ -108,6 +108,15 @@ function taskPayload(draft: TaskDraft) {
   }
 }
 
+function cloneDraft(draft: TaskDraft): TaskDraft {
+  return {
+    ...draft,
+    selectedAgents: new Set(draft.selectedAgents),
+    selectedTools: new Set(draft.selectedTools),
+    recent_runs: [...draft.recent_runs],
+  }
+}
+
 function intervalLabel(minutes: number) {
   if (minutes < 60) return `${minutes} min`
   if (minutes === 60) return 'hour'
@@ -122,6 +131,7 @@ export function HeartbeatPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedTask = searchParams.get('task')
   const [draft, setDraft] = useState<TaskDraft>()
+  const [savedDraft, setSavedDraft] = useState<TaskDraft>()
   const [activeTab, setActiveTab] = useState<EditorTab>('setup')
   const [success, setSuccess] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<HeartbeatTask | null>(null)
@@ -130,14 +140,22 @@ export function HeartbeatPage() {
   useEffect(() => {
     if (!selectedTask) {
       setDraft(undefined)
+      setSavedDraft(undefined)
       return
     }
     if (selectedTask === 'new') {
-      setDraft((current) => (current && !current.id ? current : newTask()))
+      setDraft((current) => {
+        if (current && !current.id) return current
+        const initial = newTask()
+        setSavedDraft(cloneDraft(initial))
+        return initial
+      })
       return
     }
     const task = state?.tasks.find((item) => String(item.id) === selectedTask)
-    setDraft(task ? taskDraft(task) : undefined)
+    const next = task ? taskDraft(task) : undefined
+    setDraft(next)
+    setSavedDraft(next ? cloneDraft(next) : undefined)
   }, [selectedTask, state?.tasks])
 
   const syncTask = (task: HeartbeatTask) => {
@@ -151,7 +169,9 @@ export function HeartbeatPage() {
           : [...current.tasks, task],
       }
     })
-    setDraft(taskDraft(task))
+    const next = taskDraft(task)
+    setDraft(next)
+    setSavedDraft(cloneDraft(next))
     setSearchParams({ task: String(task.id) })
   }
 
@@ -192,6 +212,11 @@ export function HeartbeatPage() {
   })
 
   const selectedToolCount = useMemo(() => draft?.selectedTools.size || 0, [draft])
+  const draftDirty = Boolean(
+    draft &&
+    savedDraft &&
+    JSON.stringify(taskPayload(draft)) !== JSON.stringify(taskPayload(savedDraft)),
+  )
 
   if (query.isLoading || !state) {
     return (
@@ -208,7 +233,8 @@ export function HeartbeatPage() {
 
   const selectDraft = (value: TaskDraft) => {
     setSuccess('')
-    setDraft(value)
+    setDraft(cloneDraft(value))
+    setSavedDraft(cloneDraft(value))
     setActiveTab('setup')
     setSearchParams({ task: value.id ? String(value.id) : 'new' })
   }
@@ -252,18 +278,53 @@ export function HeartbeatPage() {
             ? 'Configure the task, its agents, and notification delivery'
             : 'Choose a heartbeat to view or edit it'
         }
-        actions={
+        leading={
           draft ? (
             <Button
-              icon={<ArrowLeft size={14} />}
+              icon={<ChevronLeft size={14} />}
               onClick={() => {
                 setDraft(undefined)
                 setSuccess('')
                 setSearchParams({})
               }}
-            >
-              Back to tasks
-            </Button>
+              aria-label="Back to tasks"
+              title="Back to tasks"
+            />
+          ) : undefined
+        }
+        actions={
+          draft ? (
+            <>
+              {draftDirty && (
+                <Button
+                  className="resource-header-action"
+                  icon={<X size={15} />}
+                  disabled={save.isPending || run.isPending}
+                  onClick={() => {
+                    if (!savedDraft) return
+                    save.reset()
+                    setSuccess('')
+                    setDraft(cloneDraft(savedDraft))
+                  }}
+                  aria-label="Discard changes"
+                  title="Discard changes"
+                />
+              )}
+              {(!draft.id || draftDirty) && (
+                <Button
+                  variant="primary"
+                  icon={<Save size={14} />}
+                  busy={save.isPending}
+                  disabled={run.isPending}
+                  onClick={() => {
+                    setSuccess('')
+                    save.mutate(draft)
+                  }}
+                >
+                  {draft.id ? 'Save' : 'Create'}
+                </Button>
+              )}
+            </>
           ) : (
             <Button icon={<Plus size={14} />} onClick={() => selectDraft(newTask())}>
               New task
@@ -365,18 +426,6 @@ export function HeartbeatPage() {
                     }}
                   >
                     Run now
-                  </Button>
-                  <Button
-                    variant="primary"
-                    icon={<Save size={14} />}
-                    busy={save.isPending}
-                    disabled={run.isPending}
-                    onClick={() => {
-                      setSuccess('')
-                      save.mutate(draft)
-                    }}
-                  >
-                    Save
                   </Button>
                 </div>
               }

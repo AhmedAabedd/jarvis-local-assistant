@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Save } from 'lucide-react'
+import { Save, X } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
 import type { TtsVoiceOption, VoiceSettings } from '../../api/types'
@@ -104,6 +104,10 @@ export function VoicePage() {
   const [sttError, setSttError] = useState('')
   const [ttsMessage, setTtsMessage] = useState('')
   const [ttsError, setTtsError] = useState('')
+  const [sttDirty, setSttDirty] = useState(false)
+  const [ttsDirty, setTtsDirty] = useState(false)
+  const [sttFormVersion, setSttFormVersion] = useState(0)
+  const [ttsFormVersion, setTtsFormVersion] = useState(0)
 
   const sttUpdate = useMutation({ mutationFn: api.voice.update })
   const ttsUpdate = useMutation({ mutationFn: api.voice.update })
@@ -221,6 +225,7 @@ export function VoicePage() {
         },
       })
       await refreshSettings()
+      setSttDirty(false)
       setSttMessage('Speech-to-text settings saved.')
     } catch (error) {
       setSttError(
@@ -258,6 +263,7 @@ export function VoicePage() {
         },
       })
       await refreshSettings()
+      setTtsDirty(false)
       setTtsMessage('Text-to-speech settings saved.')
     } catch (error) {
       setTtsError(
@@ -272,6 +278,30 @@ export function VoicePage() {
     setMossVoices(null)
   }
 
+  const discardSttChanges = () => {
+    sttUpdate.reset()
+    setSttLocation(undefined)
+    setSttError('')
+    setSttMessage('')
+    setSttDirty(false)
+    setSttFormVersion((version) => version + 1)
+  }
+
+  const discardTtsChanges = () => {
+    ttsUpdate.reset()
+    setTtsLocation(undefined)
+    setLocalTtsProvider(undefined)
+    setCloudTtsProvider(undefined)
+    setMossModel(undefined)
+    setMossVoice(undefined)
+    setMossVoices(null)
+    setMossModelError('')
+    setTtsError('')
+    setTtsMessage('')
+    setTtsDirty(false)
+    setTtsFormVersion((version) => version + 1)
+  }
+
   return (
     <>
       <PageHeader
@@ -282,8 +312,40 @@ export function VoicePage() {
         <SectionPicker value={section} onChange={setSection} />
 
         {section === 'stt' && (
-          <Card>
-            <form className="card__body form-grid" onSubmit={submitStt}>
+          <Card
+            title="Speech-to-text"
+            description="Configure how Mounir transcribes incoming voice."
+            action={
+              sttDirty ? (
+                <div className="resource-header-actions">
+                  <Button
+                    className="resource-header-action"
+                    icon={<X size={15} />}
+                    disabled={sttUpdate.isPending}
+                    onClick={discardSttChanges}
+                    aria-label="Discard speech-to-text changes"
+                    title="Discard changes"
+                  />
+                  <Button
+                    variant="primary"
+                    icon={<Save size={14} />}
+                    busy={sttUpdate.isPending}
+                    type="submit"
+                    form="stt-settings-form"
+                  >
+                    Save
+                  </Button>
+                </div>
+              ) : undefined
+            }
+          >
+            <form
+              key={sttFormVersion}
+              id="stt-settings-form"
+              className="card__body form-grid"
+              onChange={() => setSttDirty(true)}
+              onSubmit={submitStt}
+            >
               <LocationPicker
                 name="stt_location"
                 value={selectedSttLocation}
@@ -383,23 +445,45 @@ export function VoicePage() {
                   kind={sttMessage ? 'success' : 'error'}
                 />
               </div>
-              <div className="form-footer">
-                <Button
-                  type="submit"
-                  variant="primary"
-                  icon={<Save size={14} />}
-                  busy={sttUpdate.isPending}
-                >
-                  Save
-                </Button>
-              </div>
             </form>
           </Card>
         )}
 
         {section === 'tts' && (
-          <Card>
-            <form className="card__body form-grid" onSubmit={submitTts}>
+          <Card
+            title="Text-to-speech"
+            description="Configure how Mounir generates spoken responses."
+            action={
+              ttsDirty ? (
+                <div className="resource-header-actions">
+                  <Button
+                    className="resource-header-action"
+                    icon={<X size={15} />}
+                    disabled={ttsUpdate.isPending}
+                    onClick={discardTtsChanges}
+                    aria-label="Discard text-to-speech changes"
+                    title="Discard changes"
+                  />
+                  <Button
+                    variant="primary"
+                    icon={<Save size={14} />}
+                    busy={ttsUpdate.isPending || mossChecking}
+                    type="submit"
+                    form="tts-settings-form"
+                  >
+                    Save
+                  </Button>
+                </div>
+              ) : undefined
+            }
+          >
+            <form
+              key={ttsFormVersion}
+              id="tts-settings-form"
+              className="card__body form-grid"
+              onChange={() => setTtsDirty(true)}
+              onSubmit={submitTts}
+            >
               <LocationPicker
                 name="tts_location"
                 value={selectedTtsLocation}
@@ -605,16 +689,6 @@ export function VoicePage() {
                   message={ttsError || ttsMessage}
                   kind={ttsMessage ? 'success' : 'error'}
                 />
-              </div>
-              <div className="form-footer">
-                <Button
-                  type="submit"
-                  variant="primary"
-                  icon={<Save size={14} />}
-                  busy={ttsUpdate.isPending || mossChecking}
-                >
-                  Save
-                </Button>
               </div>
             </form>
           </Card>

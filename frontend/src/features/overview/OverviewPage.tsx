@@ -20,15 +20,17 @@ import {
   useModels,
   useOverview,
   useServers,
+  useSkills,
   useWorkflowNodes,
   useWorkflows,
   keys,
 } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
-import { AgentConfigDrawer } from './AgentConfigDrawer'
 import { agentNodeTypes, createLayeredFlowLayout, type FlowData } from './AgentFlowNode'
 import { AgentNodeDrawer } from './AgentNodeDrawer'
+import { BuiltinNodeDrawer } from './BuiltinNodeDrawer'
 import { ConnectAgentModal, WorkflowPreviewModal } from './ConnectAgentModal'
+import { SupervisorWizard } from './SupervisorWizard'
 
 type ConnectionParent = { nodeId: number | null; name: string }
 type PendingDelete = { nodeId: number; name: string }
@@ -54,13 +56,12 @@ export function OverviewPage() {
   const agentNodes = useAgentNodes()
   const models = useModels()
   const servers = useServers()
+  const skills = useSkills()
   const workflows = useWorkflows()
   const workflowNodes = useWorkflowNodes()
   const telegram = useQuery({ queryKey: keys.telegram, queryFn: api.telegram.get })
   const whatsapp = useQuery({ queryKey: keys.whatsapp, queryFn: api.whatsapp.get })
   const [selected, setSelected] = useState<BuiltinAgent | null>(null)
-  const [modelId, setModelId] = useState<number>(0)
-  const [generationModelId, setGenerationModelId] = useState<number>(0)
   const [supervisorOpen, setSupervisorOpen] = useState(false)
   const [supervisorModelId, setSupervisorModelId] = useState(0)
   const [connectionParent, setConnectionParent] = useState<ConnectionParent | null>(null)
@@ -71,28 +72,14 @@ export function OverviewPage() {
   )
   const [previewWorkflow, setPreviewWorkflow] = useState<Workflow | null>(null)
 
-  const save = useMutation({
-    mutationFn: async () => {
-      if (!selected || !modelId) return
-      return api.overview.updateBuiltin(selected.key, {
-        model_id: modelId,
-        ...(selected.key === 'media' ? { generation_model_id: generationModelId || null } : {}),
-      })
-    },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: keys.overview })
-      setSelected(null)
-    },
-  })
-  const toggleBuiltin = useMutation({
-    mutationFn: ({ key, enabled }: { key: string; enabled: boolean }) =>
-      api.overview.updateBuiltin(key, { enabled }),
-    onSuccess: async () => queryClient.invalidateQueries({ queryKey: keys.overview }),
-  })
   const saveSupervisor = useMutation({
-    mutationFn: () => api.overview.updateSupervisor(supervisorModelId),
+    mutationFn: (skillIds: number[]) =>
+      api.overview.updateSupervisor({ model_id: supervisorModelId, skill_ids: skillIds }),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: keys.overview })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.overview }),
+        queryClient.invalidateQueries({ queryKey: keys.skills }),
+      ])
       setSupervisorOpen(false)
     },
   })
@@ -275,8 +262,6 @@ export function OverviewPage() {
             setOpenNodeId(null)
             setSupervisorOpen(false)
             setSelected(item)
-            setModelId(item.model_id || 0)
-            setGenerationModelId(Number(item.generation_model_id) || 0)
           },
         },
       })
@@ -481,61 +466,24 @@ export function OverviewPage() {
           setPendingWorkflowDelete(null)
         }}
       />
-      <AgentConfigDrawer
-        open={Boolean(selected)}
-        name={selected?.name || 'Agent'}
-        description={selected?.description}
-        agentKey={selected?.key}
-        modelId={modelId}
-        modelOptions={selected?.model_options}
-        tools={selected?.tools}
-        availability={
-          selected
-            ? {
-                enabled: selected.enabled,
-                onChange: (enabled) => {
-                  toggleBuiltin.mutate({ key: selected.key, enabled })
-                  setSelected({ ...selected, enabled })
-                },
-              }
-            : undefined
+      <BuiltinNodeDrawer
+        agent={selected}
+        onOpenSubagent={(agentKey) =>
+          navigate(`/admin/agents?view=built-in&builtin=${encodeURIComponent(agentKey)}`)
         }
-        modelLabel={selected?.key === 'media' ? 'Analysis model' : 'Model'}
-        modelHint={
-          selected?.key === 'media'
-            ? 'Choose a tool-calling vision model for file and media analysis.'
-            : 'Any saved OpenAI-compatible model can power this agent.'
-        }
-        secondaryModel={
-          selected?.key === 'media'
-            ? {
-                label: 'Image generation model',
-                modelId: generationModelId,
-                options: selected.generation_model_options,
-                hint: 'Supports the OpenAI-compatible Images endpoint and Mistral image generation.',
-                onChange: setGenerationModelId,
-              }
-            : undefined
-        }
-        busy={save.isPending}
-        error={save.error instanceof Error ? save.error.message : ''}
-        onModelChange={setModelId}
-        onSave={() => save.mutate()}
         onClose={() => setSelected(null)}
       />
-      <AgentConfigDrawer
+      <SupervisorWizard
         open={supervisorOpen}
-        name={overview.data?.supervisor.name || 'Mounir'}
-        description={overview.data?.supervisor.description}
+        supervisor={overview.data?.supervisor}
         modelId={supervisorModelId}
-        modelOptions={overview.data?.supervisor.model_options}
-        tools={overview.data?.supervisor.tools}
-        capabilitiesLabel="Tools"
-        modelHint="Any saved OpenAI-compatible model can power the supervisor."
+        skills={skills.data || []}
+        skillsLoading={skills.isLoading}
+        skillsError={skills.error instanceof Error ? skills.error.message : ''}
         busy={saveSupervisor.isPending}
         error={saveSupervisor.error instanceof Error ? saveSupervisor.error.message : ''}
         onModelChange={setSupervisorModelId}
-        onSave={() => saveSupervisor.mutate()}
+        onSave={(skillIds) => saveSupervisor.mutate(skillIds)}
         onClose={() => setSupervisorOpen(false)}
       />
     </>

@@ -163,7 +163,12 @@ export function AgentForm({
               icon: <BookOpen size={14} />,
               count: selectedSkills.size,
             },
-            { id: 'tools', label: 'Tools', icon: <Wrench size={14} /> },
+            {
+              id: 'tools',
+              label: 'Tools',
+              icon: <Wrench size={14} />,
+              count: enabledTools.length,
+            },
             { id: 'security', label: 'Security', icon: <ShieldCheck size={14} /> },
           ]}
           onChange={(value) => {

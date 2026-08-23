@@ -7,13 +7,17 @@ export function SkillPicker({
   selected,
   loading,
   error,
+  readOnly = false,
+  empty,
   onChange,
 }: {
   skills: SkillRecord[]
   selected: Set<number>
   loading?: boolean
   error?: string
-  onChange: (selected: Set<number>) => void
+  readOnly?: boolean
+  empty?: string
+  onChange?: (selected: Set<number>) => void
 }) {
   const [search, setSearch] = useState('')
   const visible = useMemo(() => {
@@ -29,37 +33,44 @@ export function SkillPicker({
   if (loading) return <div className="guidance">Loading installed skills…</div>
   if (error) return <div className="guidance guidance--error">{error}</div>
   if (!skills.length) {
-    return <div className="guidance">No skills are installed yet.</div>
+    return <div className="guidance">{empty || 'No skills are installed yet.'}</div>
   }
 
   return (
     <div className="skill-picker">
-      <label className="resource-search skill-picker__search">
-        <Search size={14} />
-        <input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search installed skills…"
-          aria-label="Search installed skills"
-        />
-      </label>
+      {!readOnly && (
+        <label className="resource-search skill-picker__search">
+          <Search size={14} />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search installed skills…"
+            aria-label="Search installed skills"
+          />
+        </label>
+      )}
       <div className="skill-picker__list">
         {visible.length ? (
           visible.map((skill) => {
             const id = Number(skill.id)
             const checked = selected.has(id)
             return (
-              <label className={`skill-picker__item ${checked ? 'is-selected' : ''}`} key={id}>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={(event) => {
-                    const next = new Set(selected)
-                    if (event.target.checked) next.add(id)
-                    else next.delete(id)
-                    onChange(next)
-                  }}
-                />
+              <label
+                className={`skill-picker__item ${checked ? 'is-selected' : ''} ${readOnly ? 'is-readonly' : ''}`}
+                key={id}
+              >
+                {!readOnly && (
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(event) => {
+                      const next = new Set(selected)
+                      if (event.target.checked) next.add(id)
+                      else next.delete(id)
+                      onChange?.(next)
+                    }}
+                  />
+                )}
                 <BookOpen size={15} />
                 <span>
                   <strong>{skill.name}</strong>

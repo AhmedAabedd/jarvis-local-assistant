@@ -23,6 +23,7 @@ import {
   Settings2,
   Trash2,
   Workflow as WorkflowIcon,
+  X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -644,6 +645,8 @@ export function WorkflowsPage() {
   const [params, setParams] = useSearchParams()
   const [query, setQuery] = useState('')
   const [pendingDelete, setPendingDelete] = useState<Workflow | null>(null)
+  const [workflowFormDirty, setWorkflowFormDirty] = useState(false)
+  const [workflowDraftVersion, setWorkflowDraftVersion] = useState(0)
   const openId = Number(params.get('open') || 0)
   const creating = params.get('new') === '1'
   const tab: Tab = params.get('tab') === 'details' ? 'details' : 'overview'
@@ -653,12 +656,16 @@ export function WorkflowsPage() {
     mutationFn: (body: object) => api.workflows.create(body),
     onSuccess: async (workflow) => {
       await client.invalidateQueries({ queryKey: keys.workflows })
+      setWorkflowFormDirty(false)
       setParams({ open: String(workflow.id), tab: 'overview' })
     },
   })
   const update = useMutation({
     mutationFn: (body: object) => api.workflows.update(openId, body),
-    onSuccess: async () => client.invalidateQueries({ queryKey: keys.workflows }),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: keys.workflows })
+      setWorkflowFormDirty(false)
+    },
   })
   const remove = useMutation({
     mutationFn: (id: number) => api.workflows.remove(id),
@@ -693,21 +700,27 @@ export function WorkflowsPage() {
         <PageHeader
           title="Create workflow"
           description="Save a reusable agentic or direct workflow"
+          leading={
+            <Button
+              icon={<ChevronLeft size={14} />}
+              onClick={() => {
+                setWorkflowFormDirty(false)
+                setParams({})
+              }}
+              aria-label="Back to workflows"
+              title="Back to workflows"
+            />
+          }
           actions={
-            <>
-              <Button icon={<ChevronLeft size={14} />} onClick={() => setParams({})}>
-                Cancel
-              </Button>
-              <Button
-                form="workflow-form"
-                type="submit"
-                variant="primary"
-                icon={<Save size={14} />}
-                busy={create.isPending}
-              >
-                Create
-              </Button>
-            </>
+            <Button
+              form="workflow-form"
+              type="submit"
+              variant="primary"
+              icon={<Save size={14} />}
+              busy={create.isPending}
+            >
+              Create
+            </Button>
           }
         />
         <div className="page-content">
@@ -731,29 +744,47 @@ export function WorkflowsPage() {
         <PageHeader
           title={selected.name}
           description={selected.description || 'Reusable workflow'}
+          leading={
+            <Button
+              icon={<ChevronLeft size={14} />}
+              onClick={() => setParams({})}
+              aria-label="Back to workflows"
+              title="Back to workflows"
+            />
+          }
           actions={
             <>
-              <Button icon={<ChevronLeft size={14} />} onClick={() => setParams({})}>
-                All workflows
-              </Button>
-              {tab === 'details' && (
-                <Button
-                  form="workflow-form"
-                  type="submit"
-                  variant="primary"
-                  icon={<Save size={14} />}
-                  busy={update.isPending}
-                >
-                  Save
-                </Button>
+              {tab === 'details' && workflowFormDirty && (
+                <>
+                  <Button
+                    className="resource-header-action"
+                    icon={<X size={15} />}
+                    onClick={() => {
+                      update.reset()
+                      setWorkflowFormDirty(false)
+                      setWorkflowDraftVersion((version) => version + 1)
+                    }}
+                    aria-label="Discard changes"
+                    title="Discard changes"
+                  />
+                  <Button
+                    form="workflow-form"
+                    type="submit"
+                    variant="primary"
+                    icon={<Save size={14} />}
+                    busy={update.isPending}
+                  >
+                    Save
+                  </Button>
+                </>
               )}
               <Button
-                variant="danger"
-                icon={<Trash2 size={14} />}
+                className="resource-header-action"
+                icon={<Trash2 size={15} />}
                 onClick={() => setPendingDelete(selected)}
-              >
-                Delete
-              </Button>
+                aria-label="Delete workflow"
+                title="Delete workflow"
+              />
             </>
           }
         />
@@ -765,13 +796,25 @@ export function WorkflowsPage() {
             { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={14} /> },
             { id: 'details', label: 'Details', icon: <Settings2 size={14} /> },
           ]}
-          onChange={(value) => setParams({ open: String(selected.id), tab: value })}
+          onChange={(value) => {
+            setWorkflowFormDirty(false)
+            setParams({ open: String(selected.id), tab: value })
+          }}
         />
         <div className="page-content">
           {tab === 'overview' ? (
             <WorkflowOverview workflow={selected} workflows={workflows.data || []} />
           ) : (
-            <section className="card resource-workspace resource-workspace--form">
+            <section
+              key={`workflow:${selected.id}:${workflowDraftVersion}`}
+              className="card resource-workspace resource-workspace--form"
+              onChangeCapture={() => setWorkflowFormDirty(true)}
+              onInputCapture={() => setWorkflowFormDirty(true)}
+              onClickCapture={(event) => {
+                if ((event.target as HTMLElement).closest('button[type="button"]'))
+                  setWorkflowFormDirty(true)
+              }}
+            >
               <div className="card__body">
                 <WorkflowForm
                   key={selected.id}

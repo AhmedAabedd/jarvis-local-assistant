@@ -1,9 +1,9 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowLeft,
   BadgeCheck,
   BookOpen,
   CalendarDays,
+  ChevronLeft,
   Download,
   ExternalLink,
   FileArchive,
@@ -168,31 +168,32 @@ function SkillDetails({ skill, onBack }: { skill: SkillRecord; onBack: () => voi
   return (
     <>
       <section className="skills-detail">
-        <div className="skills-detail__toolbar">
-          <Button icon={<ArrowLeft size={15} />} onClick={onBack} aria-label="Back" title="Back" />
-          <Button
-            icon={<Trash2 size={15} />}
-            onClick={() => setDeleting(true)}
-            aria-label="Delete skill"
-            title="Delete skill"
-          />
-        </div>
         <div className="card skills-detail__card">
           <div className="card__header">
             <div>
               <h3>{skill.name}</h3>
               <p>{skill.description}</p>
             </div>
-            {skill.source_url && (
-              <a
-                className="button button--secondary"
-                href={skill.source_url}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <ExternalLink size={13} /> Source
-              </a>
-            )}
+            <div className="skills-detail__header-actions">
+              {skill.source_url && (
+                <a
+                  className="button button--secondary"
+                  href={skill.source_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink size={13} /> Source
+                </a>
+              )}
+              <Button
+                className="resource-header-action"
+                variant="danger"
+                icon={<Trash2 size={15} />}
+                onClick={() => setDeleting(true)}
+                aria-label="Delete skill"
+                title="Delete skill"
+              />
+            </div>
           </div>
           <div className="card__body skills-detail__body">
             <dl className="detail-grid skills-detail__facts">
@@ -722,6 +723,16 @@ export function SkillsPage() {
       <PageHeader
         title="Skills"
         description="Add reusable instructions to Mounir and your subagents"
+        leading={
+          selected ? (
+            <Button
+              icon={<ChevronLeft size={15} />}
+              onClick={() => setSelected(null)}
+              aria-label="Back to installed skills"
+              title="Back to installed skills"
+            />
+          ) : undefined
+        }
       />
       <div className="page-content skills-page">
         {!selected && (

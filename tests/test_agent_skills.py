@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -109,6 +110,59 @@ class AgentSkillsTests(unittest.TestCase):
             db.list_agent_skills("builtin", builtin["agent_key"])[0]["name"],
             "review-code",
         )
+        self.assertEqual(db.get_supervisor_config()["skill_ids"], [saved["id"]])
+        configured_builtin = next(
+            item
+            for item in db.list_builtin_agents()
+            if item["key"] == builtin["agent_key"]
+        )
+        self.assertEqual(configured_builtin["skill_ids"], [saved["id"]])
+
+    def test_agent_configuration_can_replace_supervisor_and_builtin_skills(self):
+        first = db.add_skill_package(self._package("review-code", "Review code."))
+        second = db.add_skill_package(self._package("write-tests", "Write tests."))
+
+        self.assertEqual(
+            db.replace_agent_skill_assignments(
+                "supervisor", "supervisor", [first["id"], second["id"]]
+            ),
+            [first["id"], second["id"]],
+        )
+        builtin = db.list_builtin_agents()[0]
+        updated = db.update_builtin_agent(builtin["key"], skill_ids=[second["id"]])
+
+        self.assertEqual(updated["skill_ids"], [second["id"]])
+        self.assertEqual(
+            db.replace_agent_skill_assignments("supervisor", "supervisor", []), []
+        )
+        self.assertEqual(db.get_supervisor_config()["skill_ids"], [])
+
+    def test_agent_configuration_apis_save_skill_selections(self):
+        import server as web_server
+
+        saved = db.add_skill_package(self._package())
+        builtin = db.list_builtin_agents()[0]
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                supervisor = await client.put(
+                    "/api/supervisor",
+                    json={"model_id": self.model["id"], "skill_ids": [saved["id"]]},
+                )
+                self.assertEqual(supervisor.status_code, 200)
+                self.assertEqual(supervisor.json()["skill_ids"], [saved["id"]])
+
+                updated_builtin = await client.put(
+                    f"/api/builtin-agents/{builtin['key']}",
+                    json={"skill_ids": [saved["id"]]},
+                )
+                self.assertEqual(updated_builtin.status_code, 200)
+                self.assertEqual(updated_builtin.json()["skill_ids"], [saved["id"]])
+
+        asyncio.run(exercise_api())
 
     def test_duplicate_skill_name_is_blocked_per_agent_only(self):
         first = db.add_skill_package(self._package(description="First instructions."))

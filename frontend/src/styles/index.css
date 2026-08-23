@@ -212,8 +212,22 @@ button {
   gap: 20px;
   border-bottom: 1px solid var(--line-soft);
 }
-.page-header > div:first-child {
+.page-header__heading,
+.page-header__copy {
   min-width: 0;
+}
+.page-header__heading {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.page-header__leading {
+  flex: 0 0 auto;
+}
+.page-header__leading .button {
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
 }
 .page-header h1 {
   margin: 0 0 7px;
@@ -1566,6 +1580,11 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+.node-tools__title > .field__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .node-tools__header-actions {
   display: flex;
@@ -2990,6 +3009,19 @@ button.resource-header-action {
 .orchestrator-wizard textarea {
   min-height: 160px;
 }
+.modal--supervisor-wizard {
+  width: min(780px, 100%);
+  height: min(650px, calc(100vh - 40px));
+}
+.modal--supervisor-wizard .modal__body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+.supervisor-wizard {
+  display: grid;
+  gap: 18px;
+}
 .flow-node--telegram .react-flow__handle {
   border-color: #2aabee;
 }
@@ -3313,7 +3345,29 @@ button.resource-header-action {
   display: grid;
 }
 .subagent-form-tabs {
-  margin: -3px 0 24px;
+  margin: -10px 0 14px;
+}
+
+.resource-workspace--readonly {
+  background: color-mix(in srgb, var(--surface) 92%, #18201c);
+}
+.readonly-setting-row {
+  background: rgb(255 255 255 / 1.5%);
+}
+.resource-workspace--readonly .detail dd {
+  color: #c5d0ca;
+}
+.readonly-security {
+  display: grid;
+  gap: 20px;
+}
+.skill-picker__item.is-readonly,
+.skill-picker__item.is-readonly:hover,
+.skill-picker__item.is-readonly.is-selected {
+  grid-template-columns: auto minmax(0, 1fr);
+  color: #b8c5be;
+  background: rgb(255 255 255 / 1.5%);
+  cursor: default;
 }
 
 .skills-page {
@@ -3332,14 +3386,10 @@ button.resource-header-action {
   gap: 12px;
   margin-inline: auto;
 }
-.skills-detail__toolbar {
+.skills-detail__header-actions {
   display: flex;
-  justify-content: space-between;
-}
-.skills-detail__toolbar .button {
-  width: 36px;
-  min-height: 36px;
-  padding: 0;
+  align-items: center;
+  gap: 7px;
 }
 .skills-detail__card .card__header h3 {
   font-size: 17px;

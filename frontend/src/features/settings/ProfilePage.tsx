@@ -1,7 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { Save, X } from 'lucide-react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
+import type { Profile } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Feedback } from '../../components/ui/Feedback'
@@ -13,10 +14,23 @@ import { PageHeader } from '../studio/PageHeader'
 export function ProfilePage() {
   const query = useProfile(),
     client = useQueryClient(),
-    [success, setSuccess] = useState('')
+    [success, setSuccess] = useState(''),
+    [draft, setDraft] = useState<Profile | null>(null),
+    [savedProfile, setSavedProfile] = useState<Profile | null>(null)
+  useEffect(() => {
+    if (!query.data) return
+    setDraft({ ...query.data })
+    setSavedProfile({ ...query.data })
+  }, [query.data])
+  const dirty = Boolean(
+    draft && savedProfile && JSON.stringify(draft) !== JSON.stringify(savedProfile),
+  )
   const update = useMutation({
     mutationFn: api.profile.update,
-    onSuccess: async () => {
+    onSuccess: async (saved) => {
+      client.setQueryData(keys.profile, saved)
+      setDraft({ ...saved })
+      setSavedProfile({ ...saved })
       await client.invalidateQueries({ queryKey: keys.profile })
       await client.invalidateQueries({ queryKey: keys.overview })
       setSuccess('Profile saved.')
@@ -24,12 +38,43 @@ export function ProfilePage() {
   })
   const submit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
+    if (!draft) return
     setSuccess('')
-    update.mutate(Object.fromEntries(new FormData(e.currentTarget).entries()))
+    update.mutate(draft)
   }
   return (
     <>
-      <PageHeader title="Profile" description="Personalize names, location, and language" />
+      <PageHeader
+        title="Profile"
+        description="Personalize names, location, and language"
+        actions={
+          dirty && draft && savedProfile ? (
+            <>
+              <Button
+                className="resource-header-action"
+                icon={<X size={15} />}
+                disabled={update.isPending}
+                onClick={() => {
+                  update.reset()
+                  setSuccess('')
+                  setDraft({ ...savedProfile })
+                }}
+                aria-label="Discard changes"
+                title="Discard changes"
+              />
+              <Button
+                variant="primary"
+                icon={<Save size={14} />}
+                busy={update.isPending}
+                type="submit"
+                form="profile-form"
+              >
+                Save profile
+              </Button>
+            </>
+          ) : undefined
+        }
+      />
       {query.isLoading ? (
         <Loading />
       ) : (
@@ -38,11 +83,16 @@ export function ProfilePage() {
             title="Assistant profile"
             description="These details are included in runtime instructions and visible throughout the interface."
           >
-            <form className="card__body form-grid" onSubmit={submit}>
+            <form id="profile-form" className="card__body form-grid" onSubmit={submit}>
               <Field label="Your name" hint="How the assistant identifies and addresses you.">
                 <input
                   name="user_name"
-                  defaultValue={query.data?.user_name}
+                  value={draft?.user_name || ''}
+                  onChange={(event) =>
+                    setDraft((current) =>
+                      current ? { ...current, user_name: event.target.value } : current,
+                    )
+                  }
                   maxLength={80}
                   required
                 />
@@ -50,7 +100,12 @@ export function ProfilePage() {
               <Field label="Assistant name" hint="Shown in the interface and used in responses.">
                 <input
                   name="assistant_name"
-                  defaultValue={query.data?.assistant_name}
+                  value={draft?.assistant_name || ''}
+                  onChange={(event) =>
+                    setDraft((current) =>
+                      current ? { ...current, assistant_name: event.target.value } : current,
+                    )
+                  }
                   maxLength={80}
                   required
                 />
@@ -58,7 +113,12 @@ export function ProfilePage() {
               <Field full label="Location" hint="Used for weather, time, and nearby information.">
                 <input
                   name="location"
-                  defaultValue={query.data?.location}
+                  value={draft?.location || ''}
+                  onChange={(event) =>
+                    setDraft((current) =>
+                      current ? { ...current, location: event.target.value } : current,
+                    )
+                  }
                   maxLength={160}
                   required
                 />
@@ -66,7 +126,12 @@ export function ProfilePage() {
               <Field full label="Preferred response language">
                 <select
                   name="preferred_language"
-                  defaultValue={query.data?.preferred_language || 'auto'}
+                  value={draft?.preferred_language || 'auto'}
+                  onChange={(event) =>
+                    setDraft((current) =>
+                      current ? { ...current, preferred_language: event.target.value } : current,
+                    )
+                  }
                 >
                   <option value="auto">Automatic</option>
                   <option value="en">English</option>
@@ -79,11 +144,6 @@ export function ProfilePage() {
                   message={update.error instanceof Error ? update.error.message : success}
                   kind={success ? 'success' : 'error'}
                 />
-              </div>
-              <div className="form-footer">
-                <Button variant="primary" icon={<Save size={14} />} busy={update.isPending}>
-                  Save profile
-                </Button>
               </div>
             </form>
           </Card>

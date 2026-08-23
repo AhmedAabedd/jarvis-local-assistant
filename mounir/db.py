@@ -1777,6 +1777,14 @@ def set_skill_assignments(skill_id: int, assignments: list[dict]) -> dict | None
 def _replace_subagent_skill_assignments(
     conn: sqlite3.Connection, subagent_id: int, skill_ids
 ) -> None:
+    _replace_agent_skill_assignments(
+        conn, "subagent", str(int(subagent_id)), skill_ids
+    )
+
+
+def _replace_agent_skill_assignments(
+    conn: sqlite3.Connection, agent_type: str, agent_key: str, skill_ids
+) -> None:
     if not isinstance(skill_ids, (list, tuple, set)):
         raise ValueError("Selected skills must be a list.")
     try:
@@ -1797,21 +1805,37 @@ def _replace_subagent_skill_assignments(
     for row in rows:
         normalized = str(row["name"]).casefold()
         if normalized in names:
-            raise ValueError(f'This subagent cannot use multiple skills named "{row["name"]}".')
+            raise ValueError(
+                f'This agent cannot use multiple skills named "{row["name"]}".'
+            )
         names.add(normalized)
-    agent_key = str(int(subagent_id))
     conn.execute(
-        "DELETE FROM skill_assignments WHERE agent_type = 'subagent' AND agent_key = ?",
-        (agent_key,),
+        "DELETE FROM skill_assignments WHERE agent_type = ? AND agent_key = ?",
+        (agent_type, agent_key),
     )
     conn.executemany(
         """
         INSERT INTO skill_assignments
             (skill_id, agent_type, agent_key, enabled, created_at)
-        VALUES (?, 'subagent', ?, 1, ?)
+        VALUES (?, ?, ?, 1, ?)
         """,
-        [(skill_id, agent_key, _now()) for skill_id in sorted(selected)],
+        [(skill_id, agent_type, agent_key, _now()) for skill_id in sorted(selected)],
     )
+
+
+def replace_agent_skill_assignments(
+    agent_type: str, agent_key: str, skill_ids
+) -> list[int]:
+    normalized_type = str(agent_type or "")
+    normalized_key = str(agent_key or "")
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _validate_skill_target(conn, normalized_type, normalized_key)
+        _replace_agent_skill_assignments(
+            conn, normalized_type, normalized_key, skill_ids
+        )
+        conn.commit()
+    return [int(skill["id"]) for skill in list_agent_skills(normalized_type, normalized_key)]
 
 
 def list_agent_skills(agent_type: str, agent_key: str) -> list[dict]:
@@ -2534,6 +2558,10 @@ def get_supervisor_config() -> dict:
         "model": runtime["model"],
         "provider": runtime["provider"],
         "model_options": options,
+        "skill_ids": [
+            int(skill["id"])
+            for skill in list_agent_skills("supervisor", "supervisor")
+        ],
     }
 
 
@@ -2834,6 +2862,10 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                 "model_options": options,
                 "confirm_tools": capability["confirm_tools"],
                 "tools": exposed_tools,
+                "skill_ids": [
+                    int(skill["id"])
+                    for skill in list_agent_skills("builtin", key)
+                ],
             }
         )
     return [agent for agent in result if agent["connected"]] if connected_only else result
@@ -2850,16 +2882,21 @@ def update_builtin_agent(
     confirm_tools: list[str] | str | object = _UNSET,
     connected: bool | None = None,
     enabled: bool | None = None,
+    skill_ids: list[int] | None | object = _UNSET,
 ) -> dict:
     definition = builtin_agents.definition(agent_key)
     if definition is None:
         raise ValueError("built-in specialist was not found")
     if (
-        model_id is _UNSET and generation_model_id is _UNSET
-        and mcp_server_id is _UNSET and embedding_model_id is _UNSET
+        model_id is _UNSET
+        and generation_model_id is _UNSET
+        and mcp_server_id is _UNSET
+        and embedding_model_id is _UNSET
         and confirm_tools is _UNSET
+        and skill_ids is _UNSET
         and embedding_enabled is None
-        and connected is None and enabled is None
+        and connected is None
+        and enabled is None
     ):
         raise ValueError("provide a configuration change")
     model_requested = model_id is not _UNSET
@@ -2974,6 +3011,10 @@ def update_builtin_agent(
         int(_bool(connected, "connected")) if connected is not None else None
     )
     with _connect() as conn:
+        if skill_ids is not _UNSET:
+            _replace_agent_skill_assignments(
+                conn, "builtin", definition["key"], skill_ids
+            )
         if model_requested:
             conn.execute(
                 """
