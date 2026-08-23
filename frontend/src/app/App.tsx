@@ -21,6 +21,9 @@ const WorkflowsPage = lazy(() =>
     default: module.WorkflowsPage,
   })),
 )
+const SkillsPage = lazy(() =>
+  import('../features/skills/SkillsPage').then((module) => ({ default: module.SkillsPage })),
+)
 const VoicePage = lazy(() =>
   import('../features/settings/VoicePage').then((module) => ({ default: module.VoicePage })),
 )
@@ -48,6 +51,7 @@ export function App() {
           <Route index element={<OverviewPage />} />
           <Route path="models" element={<ResourcesPage kind="models" />} />
           <Route path="servers" element={<ResourcesPage kind="servers" />} />
+          <Route path="skills" element={<SkillsPage />} />
           <Route path="agents" element={<ResourcesPage kind="agents" />} />
           <Route path="workflows" element={<WorkflowsPage />} />
           <Route path="voice" element={<VoicePage />} />

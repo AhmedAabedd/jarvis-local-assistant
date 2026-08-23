@@ -166,6 +166,7 @@ def run_tool_agent(
     """
 
     available_tools = list(tools)
+    available_tool_names = {tool.name for tool in available_tools}
     schemas = tool_schemas(available_tools)
     confirmation_rules = {str(name) for name in confirmation_tools or []}
     tool_lock = threading.Lock()
@@ -240,7 +241,9 @@ def run_tool_agent(
                     tool_call_id=request.tool_call["id"],
                 )
             name = str(request.tool_call["name"])
-            if "*" in confirmation_rules or name in confirmation_rules:
+            if name in available_tool_names and (
+                "*" in confirmation_rules or name in confirmation_rules
+            ):
                 arguments = dict(request.tool_call.get("args") or {})
                 summary = f"{name} {json.dumps(arguments, ensure_ascii=False)[:400]}"
                 if not mounir_tools.request_confirmation(summary):

@@ -10,6 +10,11 @@ import type {
   Notification,
   Profile,
   ServerToolsState,
+  SkillAssignment,
+  SkillRecord,
+  SkillStorePage,
+  SkillTarget,
+  StoreSkill,
   SetupDescriptor,
   SetupActionResult,
   Subagent,
@@ -115,6 +120,41 @@ export const api = {
         body,
       })
     },
+  },
+  skills: {
+    list: () => request<SkillRecord[]>('/api/skills'),
+    get: (id: number) => request<SkillRecord>(`/api/skills/${id}`),
+    targets: () => request<SkillTarget[]>('/api/skills/targets'),
+    import: (files: File[], paths: string[]) => {
+      const body = new FormData()
+      files.forEach((file) => body.append('files', file))
+      body.append('paths', JSON.stringify(paths))
+      return request<SkillRecord>('/api/skills/import', { method: 'POST', body })
+    },
+    assign: (id: number, assignments: SkillAssignment[]) =>
+      request<SkillRecord>(`/api/skills/${id}/assignments`, json('PUT', { assignments })),
+    remove: (id: number) => request(`/api/skills/${id}`, json('DELETE')),
+  },
+  skillStore: {
+    providers: () =>
+      request<Array<{ id: string; name: string; supports_install: boolean }>>(
+        '/api/skill-store/providers',
+      ),
+    browse: (provider: string, query = '', cursor = '') => {
+      const params = new URLSearchParams({ provider })
+      if (query) params.set('query', query)
+      if (cursor) params.set('cursor', cursor)
+      return request<SkillStorePage>(`/api/skill-store?${params}`)
+    },
+    details: (provider: string, reference: string) => {
+      const params = new URLSearchParams({ provider, reference })
+      return request<StoreSkill>(`/api/skill-store/details?${params}`)
+    },
+    install: (provider: string, reference: string, version = '') =>
+      request<SkillRecord>(
+        '/api/skill-store/install',
+        json('POST', { provider, reference, version }),
+      ),
   },
   agents: {
     list: () => request<Subagent[]>('/api/subagents'),

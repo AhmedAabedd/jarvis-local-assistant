@@ -633,6 +633,9 @@ edited in Agent Studio and take precedence after their initial import.
 | `MOUNIR_KNOWLEDGE_TOOL_TIMEOUT` | `300` | Maximum seconds for one knowledge MCP verb |
 | `MOUNIR_KNOWLEDGE_AGENT_TIMEOUT` | `600` | Maximum seconds for one delegated Knowledge task |
 | `MOUNIR_GBRAIN_HOME` | `<MOUNIR_DATA_DIR>/gbrain` | Parent directory for the isolated built-in GBrain instance |
+| `MOUNIR_TANK_REGISTRY_URL` | `https://tankpkg.dev/api/v1` | Tank skill registry API; may point to a self-hosted Tank instance |
+| `MOUNIR_TANK_SITE_URL` | Registry site root | Public skill-page root used for source links |
+| `MOUNIR_TANK_API_TOKEN` | unset | Optional Tank bearer token for private registries or higher read limits |
 | `NVIDIA_API_KEY` | unset | Initial Media and System provider credential |
 | `GEMINI_API_KEY` | unset | Initial Knowledge provider credential |
 | `USE_MISTRAL` | `false` | Import the Mistral supervisor configuration |

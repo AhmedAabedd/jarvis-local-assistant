@@ -320,6 +320,7 @@ function WorkflowOverview({ workflow, workflows }: { workflow: Workflow; workflo
     Promise.all([
       client.invalidateQueries({ queryKey: keys.agents }),
       client.invalidateQueries({ queryKey: keys.agentNodes }),
+      client.invalidateQueries({ queryKey: keys.skills }),
       client.invalidateQueries({ queryKey: keys.workflowNodes }),
       client.invalidateQueries({ queryKey: keys.workflows }),
     ])

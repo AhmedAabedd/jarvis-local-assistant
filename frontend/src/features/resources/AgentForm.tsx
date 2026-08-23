@@ -5,6 +5,7 @@ import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
+import { useSkills } from '../../hooks/useStudioData'
 import { stringList, toDataUrl } from './helpers'
 import {
   expandLegacyToolRules,
@@ -13,8 +14,9 @@ import {
   useMcpToolCatalog,
 } from './McpToolAccess'
 import { ToolChoices } from './ToolChoices'
+import { SkillPicker } from './SkillPicker'
 
-type FormPage = 'configuration' | 'tools' | 'security'
+type FormPage = 'configuration' | 'skills' | 'tools' | 'security'
 type ConfirmationMode = 'all' | 'selected' | 'none'
 
 export function AgentForm({
@@ -49,6 +51,8 @@ export function AgentForm({
         ? [{ mcp_server_id: Number(item.mcp_server_id), enabled_tools: item.enabled_tools }]
         : [],
   )
+  const skills = useSkills()
+  const [selectedSkills, setSelectedSkills] = useState(new Set((item?.skill_ids || []).map(Number)))
   const [mode, setMode] = useState<ConfirmationMode>(
     existingConfirm.includes('*') ? 'all' : existingConfirm.length ? 'selected' : 'none',
   )
@@ -58,7 +62,10 @@ export function AgentForm({
   const [error, setError] = useState('')
 
   const toolGroups = useMcpToolCatalog(servers)
-  const enabledTools = useMemo(() => selectedToolOptions(toolGroups, sources), [toolGroups, sources])
+  const enabledTools = useMemo(
+    () => selectedToolOptions(toolGroups, sources),
+    [toolGroups, sources],
+  )
   const enabledNames = useMemo(() => enabledTools.map((tool) => tool.name), [enabledTools])
   const confirmedSelection = useMemo(
     () => expandLegacyToolRules([...confirmed], enabledTools),
@@ -95,8 +102,14 @@ export function AgentForm({
           mcp_server_id,
           enabled_tools,
         })),
-        confirm_tools:
-          !sources.length ? [] : mode === 'all' ? ['*'] : mode === 'selected' ? confirmedTools : [],
+        skill_ids: [...selectedSkills].sort((left, right) => left - right),
+        confirm_tools: !sources.length
+          ? []
+          : mode === 'all'
+            ? ['*']
+            : mode === 'selected'
+              ? confirmedTools
+              : [],
         confirm_tool_calls: Boolean(sources.length) && mode !== 'none',
         dedupe_tools: dedupedTools,
         ...(icon !== undefined ? { icon_data: icon } : {}),
@@ -108,6 +121,7 @@ export function AgentForm({
 
   const pages: Array<{ id: FormPage; label: string }> = [
     { id: 'configuration', label: 'Configuration' },
+    { id: 'skills', label: 'Skills' },
     { id: 'tools', label: 'Tools' },
     { id: 'security', label: 'Security' },
   ]
@@ -165,7 +179,11 @@ export function AgentForm({
       {page === 'configuration' && (
         <div className="form-grid subagent-wizard__page">
           {!models.length && <div className="guidance">Create a model first.</div>}
-          {!servers.length && <div className="guidance">No MCP servers are connected. You can still create a prompt-only subagent.</div>}
+          {!servers.length && (
+            <div className="guidance">
+              No MCP servers are connected. You can still create a prompt-only subagent.
+            </div>
+          )}
           <Field full label="Name" hint="Use a unique name for this specific role.">
             <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
           </Field>
@@ -248,11 +266,27 @@ export function AgentForm({
         </div>
       )}
 
+      {page === 'skills' && (
+        <div className="subagent-wizard__page">
+          <p className="subagent-wizard__section-description">
+            Select the installed skills this subagent can discover and activate.
+          </p>
+          <SkillPicker
+            skills={skills.data || []}
+            selected={selectedSkills}
+            loading={skills.isLoading}
+            error={skills.error instanceof Error ? skills.error.message : ''}
+            onChange={setSelectedSkills}
+          />
+        </div>
+      )}
+
       {page === 'security' && (
         <div className="form-grid subagent-wizard__page">
           {!sources.length && (
             <div className="guidance">
-              Prompt-only subagents have no external actions to approve. You can save this configuration as-is.
+              Prompt-only subagents have no external actions to approve. You can save this
+              configuration as-is.
             </div>
           )}
           <Field
@@ -286,29 +320,28 @@ export function AgentForm({
               />
             </div>
           )}
-          {sources.length > 0 && <div className="key-value-editor">
-            <div className="key-value-editor__title">
-              <span>
-                <strong>Repeated action protection</strong>
-                <small>Block an identical action from running twice during the same request.</small>
-              </span>
+          {sources.length > 0 && (
+            <div className="key-value-editor">
+              <div className="key-value-editor__title">
+                <span>
+                  <strong>Repeated action protection</strong>
+                  <small>
+                    Block an identical action from running twice during the same request.
+                  </small>
+                </span>
+              </div>
+              <ToolChoices
+                tools={enabledTools}
+                selected={dedupedSelection}
+                onChange={setDeduped}
+                empty="Enable at least one tool before configuring repeated-action protection."
+              />
             </div>
-            <ToolChoices
-              tools={enabledTools}
-              selected={dedupedSelection}
-              onChange={setDeduped}
-              empty="Enable at least one tool before configuring repeated-action protection."
-            />
-          </div>}
+          )}
         </div>
       )}
 
-      <Feedback
-        message={
-          error ||
-          ''
-        }
-      />
+      <Feedback message={error || ''} />
 
       {!item && (
         <div className="subagent-form-footer">

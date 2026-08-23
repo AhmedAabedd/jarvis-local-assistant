@@ -85,6 +85,7 @@ export interface Subagent {
   model_id: Id
   mcp_server_id: Id | null
   mcp_sources: SubagentMcpSource[]
+  skill_ids: Id[]
   mcp_server_count?: number
   model?: string
   model_name?: string
@@ -237,6 +238,82 @@ export interface Supervisor {
   provider?: string
   tools: ToolInfo[]
   model_options?: Array<{ id: Id; model: string; label: string }>
+}
+
+export type SkillAgentType = 'supervisor' | 'builtin' | 'subagent'
+
+export interface SkillAssignment {
+  agent_type: SkillAgentType
+  agent_key: string
+}
+
+export interface SkillRecord {
+  id: Id
+  name: string
+  description: string
+  skill_md: string
+  files: Array<{ path: string; size: number }>
+  metadata: Record<string, unknown>
+  source_type: string
+  source_name: string
+  source_ref: string
+  source_url: string
+  version: string
+  assignments: SkillAssignment[]
+  assignment_count: number
+  file_count: number
+  has_supporting_files: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface SkillTarget extends SkillAssignment {
+  name: string
+  group: string
+}
+
+export interface StoreSkill {
+  provider: string
+  provider_name: string
+  slug: string
+  reference: string
+  name: string
+  description: string
+  version: string
+  owner: string
+  downloads: number
+  stars: number
+  installs: number
+  versions: number
+  comments: number
+  bookmarks: number
+  rolling_installs: number
+  topics: string[]
+  categories: string[]
+  official: boolean
+  installability: string
+  visibility: string
+  created_at?: number | string | null
+  updated_at?: number | string | null
+  changelog: string
+  license: string
+  skill_md: string
+  permissions: Record<string, unknown>
+  dependencies: Record<string, string>
+  scan_findings: Array<{
+    stage?: string
+    severity?: string
+    type?: string
+    description?: string
+    location?: string | null
+  }>
+  source_url: string
+}
+
+export interface SkillStorePage {
+  provider: string
+  items: StoreSkill[]
+  next_cursor: string
 }
 
 export interface AgentOverview {

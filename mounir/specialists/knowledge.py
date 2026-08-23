@@ -13,7 +13,14 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool, tool
 
-from .. import action_decline, config, graph_runtime, knowledge_protocol, llm
+from .. import (
+    action_decline,
+    agent_skills,
+    config,
+    graph_runtime,
+    knowledge_protocol,
+    llm,
+)
 from .mcp_agent import _call, _exc_detail, _list_tools, _mcp_session
 
 MAX_TOOL_ROUNDS = 8
@@ -202,6 +209,11 @@ async def _run_async(
                 for name in knowledge_protocol.TOOL_NAMES
                 if name in selected_names
             )
+            skill_prompt, skill_tool = agent_skills.runtime_access(
+                "builtin", "knowledge"
+            )
+            if skill_tool is not None:
+                framework_tools.append(skill_tool)
             if not framework_tools:
                 return "Knowledge agent has no permitted memory tools for this task."
 
@@ -229,14 +241,17 @@ async def _run_async(
                     )
                 return f"Knowledge agent failed: {_exc_detail(Exception(error))}"
 
+            messages = [
+                {
+                    "role": "system",
+                    "content": config.specialist_system_prompt(SYSTEM_PROMPT),
+                },
+            ]
+            if skill_prompt:
+                messages.append({"role": "system", "content": skill_prompt})
+            messages.append({"role": "user", "content": task})
             report = await graph_runtime.arun_tool_agent(
-                [
-                    {
-                        "role": "system",
-                        "content": config.specialist_system_prompt(SYSTEM_PROMPT),
-                    },
-                    {"role": "user", "content": task},
-                ],
+                messages,
                 framework_tools,
                 call_model,
                 max_rounds=MAX_TOOL_ROUNDS,

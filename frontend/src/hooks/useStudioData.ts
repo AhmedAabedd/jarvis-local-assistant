@@ -8,6 +8,8 @@ export const keys = {
   models: ['models'] as const,
   embeddingModels: ['embedding-models'] as const,
   servers: ['servers'] as const,
+  skills: ['skills'] as const,
+  skillTargets: ['skill-targets'] as const,
   agents: ['agents'] as const,
   agentNodes: ['agent-nodes'] as const,
   workflows: ['workflows'] as const,
@@ -35,6 +37,12 @@ export function useEmbeddingModels() {
 }
 export function useServers() {
   return useQuery({ queryKey: keys.servers, queryFn: api.servers.list })
+}
+export function useSkills() {
+  return useQuery({ queryKey: keys.skills, queryFn: api.skills.list })
+}
+export function useSkillTargets() {
+  return useQuery({ queryKey: keys.skillTargets, queryFn: api.skills.targets })
 }
 export function useAgents() {
   return useQuery({ queryKey: keys.agents, queryFn: api.agents.list })

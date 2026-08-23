@@ -31,10 +31,13 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
+
 from fastapi import (
     BackgroundTasks,
     FastAPI,
     File,
+    Form,
     Request,
     UploadFile,
     WebSocket,
@@ -45,7 +48,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from mounir.agent import Agent
-from mounir import chat_attachments, config as cfg, db, embedding_models, llm, mcp_oauth, trace
+from mounir import (
+    agent_skills,
+    chat_attachments,
+    config as cfg,
+    db,
+    embedding_models,
+    llm,
+    mcp_oauth,
+    skill_store,
+    trace,
+)
 from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
 from mounir.heartbeat import HeartbeatService
@@ -1079,6 +1092,115 @@ async def update_builtin_agent(agent_key: str, req: dict):
 async def list_builtin_agents():
     return db.list_builtin_agents()
 
+
+@app.get("/api/skills")
+async def list_skills():
+    return db.list_skills()
+
+
+@app.get("/api/skills/targets")
+async def list_skill_targets():
+    return db.list_skill_targets()
+
+
+@app.post("/api/skills/import")
+async def import_skill(
+    files: list[UploadFile] = File(...), paths: str = Form("")
+):
+    try:
+        if len(files) > agent_skills.MAX_PACKAGE_FILES:
+            raise ValueError(
+                f"A skill package can contain at most {agent_skills.MAX_PACKAGE_FILES} files."
+            )
+        selected = []
+        total = 0
+        names = [file.filename or "SKILL.md" for file in files]
+        upload_paths = agent_skills.paths_from_json(paths, names)
+        for path, file in zip(upload_paths, files):
+            content = await file.read(agent_skills.MAX_PACKAGE_BYTES + 1)
+            if len(content) > agent_skills.MAX_PACKAGE_BYTES:
+                raise ValueError("The skill package must be 10 MB or smaller.")
+            total += len(content)
+            if total > agent_skills.MAX_PACKAGE_BYTES:
+                raise ValueError("The skill package must be 10 MB or smaller.")
+            selected.append((path, content))
+        package = agent_skills.build_package(selected)
+        return db.add_skill_package(package)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/api/skills/{skill_id}")
+async def get_skill(skill_id: int):
+    skill = db.get_skill(skill_id)
+    if skill is None:
+        return JSONResponse({"error": "Skill not found."}, status_code=404)
+    return skill
+
+
+@app.put("/api/skills/{skill_id}/assignments")
+async def update_skill_assignments(skill_id: int, req: dict):
+    try:
+        skill = db.set_skill_assignments(skill_id, req.get("assignments") or [])
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if skill is None:
+        return JSONResponse({"error": "Skill not found."}, status_code=404)
+    return skill
+
+
+@app.delete("/api/skills/{skill_id}")
+async def remove_skill(skill_id: int):
+    if db.delete_skill(skill_id):
+        return {"ok": True}
+    return JSONResponse({"error": "Skill not found."}, status_code=404)
+
+
+@app.get("/api/skill-store/providers")
+async def list_skill_store_providers():
+    return skill_store.providers()
+
+
+@app.get("/api/skill-store")
+async def browse_skill_store(
+    provider: str = skill_store.DEFAULT_PROVIDER,
+    query: str = "",
+    cursor: str = "",
+    limit: int = 24,
+):
+    try:
+        return await skill_store.browse(provider, query, cursor, limit)
+    except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/api/skill-store/details")
+async def get_store_skill(provider: str, reference: str):
+    try:
+        return await skill_store.details(provider, reference)
+    except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.post("/api/skill-store/install")
+async def install_store_skill(req: dict):
+    provider = str(req.get("provider") or skill_store.DEFAULT_PROVIDER)
+    reference = str(req.get("reference") or req.get("slug") or "")
+    try:
+        existing = db.get_skill_by_source(provider, reference)
+        if existing is not None:
+            return JSONResponse(
+                {"error": "This skill is already installed."}, status_code=409
+            )
+        package = await skill_store.download(
+            provider,
+            reference,
+            str(req.get("version") or ""),
+        )
+        return db.add_skill_package(package)
+    except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
 @app.get("/api/models")
 async def list_models():
     return [db.model_for_api(model) for model in db.list_models()]
@@ -1669,6 +1791,7 @@ async def create_subagent(req: dict):
             workflow_id=req.get("workflow_id"),
             position=req.get("position"),
             mcp_sources=req.get("mcp_sources"),
+            skill_ids=req.get("skill_ids"),
             **icon,
         )
         return db.subagent_for_api(subagent)

@@ -23,7 +23,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 from langchain_core.tools import StructuredTool
 
-from .. import action_decline, config, graph_runtime, llm, mcp_oauth
+from .. import action_decline, agent_skills, config, graph_runtime, llm, mcp_oauth
 
 MAX_TOOL_ROUNDS = 8
 MCP_TOOL_TIMEOUT_SECONDS = max(
@@ -319,12 +319,20 @@ async def _run_async(
                     source_errors.append(f"{source_name}: {_exc_detail(exc)}")
 
             framework_tools: list[StructuredTool] = []
+            current_id = int(spec["id"]) if spec.get("id") is not None else None
+            skill_prompt, skill_tool = ("", None)
+            if current_id is not None:
+                skill_prompt, skill_tool = agent_skills.runtime_access(
+                    "subagent", str(current_id)
+                )
             raw_name_counts: dict[str, int] = {}
             for _source, _source_name, _session, advertised in advertised_entries:
                 raw_name_counts[advertised.name] = (
                     raw_name_counts.get(advertised.name, 0) + 1
                 )
-            used_runtime_names: set[str] = set()
+            used_runtime_names: set[str] = (
+                {"activate_skill"} if skill_tool is not None else set()
+            )
 
             def make_tool(source, source_name, session, advertised) -> StructuredTool:
                 namespace = str(
@@ -388,7 +396,6 @@ async def _run_async(
             )
             from .. import mcp_agents
 
-            current_id = int(spec["id"]) if spec.get("id") is not None else None
             current_node_id = (
                 int(spec["node_id"]) if spec.get("node_id") is not None else None
             )
@@ -493,6 +500,8 @@ async def _run_async(
                     )
                     for placement in workflow_children
                 )
+            if skill_tool is not None:
+                framework_tools.append(skill_tool)
             try:
                 from .. import db
 
@@ -511,6 +520,8 @@ async def _run_async(
             )
             if tree_prompt:
                 messages.append({"role": "system", "content": tree_prompt})
+            if skill_prompt:
+                messages.append({"role": "system", "content": skill_prompt})
             if source_errors:
                 messages.append(
                     {

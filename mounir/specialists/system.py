@@ -21,7 +21,7 @@ from typing import Annotated, Literal
 
 from langchain_core.tools import tool
 
-from .. import config, graph_runtime, llm
+from .. import agent_skills, config, graph_runtime, llm
 
 MAX_TOOL_ROUNDS = 6
 
@@ -433,12 +433,20 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     )
 
     selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
+    skill_prompt, skill_tool = agent_skills.runtime_access("builtin", "system")
+    if skill_tool is not None:
+        selected_tools.append(skill_tool)
     confirmation_tools = db.get_builtin_confirmation_tools("system")
 
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
-        {"role": "user", "content": f"{_context()}\n\nTASK FROM SUPERVISOR:\n{task}"},
     ]
+    if skill_prompt:
+        messages.append({"role": "system", "content": skill_prompt})
+    messages.append(
+        {"role": "user", "content": f"{_context()}\n\nTASK FROM SUPERVISOR:\n{task}"}
+    )
+
     def error_report(executed: list[str], error: str) -> str:
         if executed:
             return (

@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  BookOpen,
   Boxes,
   ChevronLeft,
   Database,
@@ -19,6 +20,7 @@ const primary = [
   { to: '/admin', end: true, label: 'Overview', icon: LayoutDashboard },
   { to: '/admin/models', label: 'Models', icon: Database, resetResourceList: true },
   { to: '/admin/servers', label: 'MCP Servers', icon: McpIcon, resetResourceList: true },
+  { to: '/admin/skills', label: 'Skills', icon: BookOpen },
   { to: '/admin/agents', label: 'Subagents', icon: Boxes, resetResourceList: true },
   { to: '/admin/workflows', label: 'Workflows', icon: Workflow },
 ]

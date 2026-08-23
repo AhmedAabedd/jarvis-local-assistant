@@ -151,6 +151,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       client.invalidateQueries({ queryKey: keys[kind] }),
       client.invalidateQueries({ queryKey: keys.embeddingModels }),
       client.invalidateQueries({ queryKey: keys.builtins }),
+      client.invalidateQueries({ queryKey: keys.skills }),
       client.invalidateQueries({ queryKey: keys.overview }),
       client.invalidateQueries({ queryKey: keys.agentNodes }),
     ])

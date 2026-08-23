@@ -9,6 +9,8 @@ Core tables include:
 - ``subagent_connections`` legacy compatibility projection
 - ``subagent_nodes`` workflow placements referencing reusable subagents
 - ``mcp_server_tools`` cached MCP capability metadata
+- ``skills``       portable Agent Skills packages imported by the user
+- ``skill_assignments`` reusable skill access for every kind of agent
 - ``heartbeat_*`` heartbeat permissions, schedule, state, and bounded run log
 - ``telegram_settings`` private Telegram bot configuration and pairing state
 - ``whatsapp_settings`` private WhatsApp Cloud API configuration and pairing state
@@ -397,6 +399,42 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_subagent_nodes_parent
             ON subagent_nodes (parent_node_id);
 
+        CREATE TABLE IF NOT EXISTS skills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            skill_md TEXT NOT NULL,
+            package_blob BLOB NOT NULL,
+            files TEXT NOT NULL DEFAULT '[]',
+            metadata TEXT NOT NULL DEFAULT '{}',
+            source_type TEXT NOT NULL DEFAULT 'import',
+            source_name TEXT NOT NULL DEFAULT '',
+            source_ref TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            version TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_source
+            ON skills (source_type, source_ref)
+            WHERE source_ref != '';
+
+        CREATE TABLE IF NOT EXISTS skill_assignments (
+            skill_id INTEGER NOT NULL
+                REFERENCES skills(id) ON DELETE CASCADE,
+            agent_type TEXT NOT NULL
+                CHECK (agent_type IN ('supervisor', 'builtin', 'subagent')),
+            agent_key TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (skill_id, agent_type, agent_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_skill_assignments_agent
+            ON skill_assignments (agent_type, agent_key, enabled);
+
         CREATE TABLE IF NOT EXISTS app_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -727,6 +765,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # migrations explicit so upgrading an earlier feature-branch DB works.
     migrations = {
         "models": {"model": "TEXT"},
+        "skills": {"source_name": "TEXT NOT NULL DEFAULT ''"},
         "builtin_agent_settings": {
             "model_id": "INTEGER REFERENCES models(id)",
             "generation_model_id": "INTEGER REFERENCES models(id)",
@@ -1526,6 +1565,267 @@ def init() -> None:
     with _connect() as conn:
         _init_schema(conn)
         _migrate_legacy(conn)
+
+
+# -----------------------------------------------------------------------------
+# Agent Skills
+# -----------------------------------------------------------------------------
+
+def _skill_public(conn: sqlite3.Connection, row: sqlite3.Row | dict) -> dict:
+    item = dict(row)
+    item.pop("package_blob", None)
+    try:
+        item["files"] = json.loads(item.get("files") or "[]")
+    except (TypeError, ValueError):
+        item["files"] = []
+    try:
+        item["metadata"] = json.loads(item.get("metadata") or "{}")
+    except (TypeError, ValueError):
+        item["metadata"] = {}
+    assignments = [
+        {
+            "agent_type": assignment["agent_type"],
+            "agent_key": assignment["agent_key"],
+        }
+        for assignment in conn.execute(
+            """
+            SELECT agent_type, agent_key FROM skill_assignments
+            WHERE skill_id = ? AND enabled = 1
+            ORDER BY agent_type, agent_key
+            """,
+            (item["id"],),
+        )
+    ]
+    item["assignments"] = assignments
+    item["assignment_count"] = len(assignments)
+    item["file_count"] = len(item["files"])
+    item["has_supporting_files"] = len(item["files"]) > 1
+    return item
+
+
+def list_skills() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM skills ORDER BY name COLLATE NOCASE, id"
+        ).fetchall()
+        return [_skill_public(conn, row) for row in rows]
+
+
+def get_skill(skill_id: int, *, include_package: bool = False) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM skills WHERE id = ?", (skill_id,)).fetchone()
+        if row is None:
+            return None
+        item = _skill_public(conn, row)
+        if include_package:
+            item["package_blob"] = bytes(row["package_blob"])
+        return item
+
+
+def get_skill_by_source(source_type: str, source_ref: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM skills WHERE source_type = ? AND source_ref = ?",
+            (source_type, source_ref),
+        ).fetchone()
+        return _skill_public(conn, row) if row else None
+
+
+def add_skill_package(package: dict) -> dict:
+    required = ("name", "description", "skill_md", "package_blob", "content_hash")
+    if any(package.get(field) in (None, "") for field in required):
+        raise ValueError("The skill package is incomplete.")
+    now = _now()
+    with _connect() as conn:
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO skills (
+                    name, description, skill_md, package_blob, files, metadata,
+                    source_type, source_name, source_ref, source_url, version,
+                    content_hash,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    package["name"], package["description"], package["skill_md"],
+                    sqlite3.Binary(package["package_blob"]),
+                    json.dumps(package.get("files") or []),
+                    json.dumps(package.get("metadata") or {}, default=str),
+                    str(package.get("source_type") or "import"),
+                    str(package.get("source_name") or ""),
+                    str(package.get("source_ref") or ""),
+                    str(package.get("source_url") or ""),
+                    str(package.get("version") or ""), package["content_hash"],
+                    now, now,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("This skill package is already installed.") from exc
+        row = conn.execute(
+            "SELECT * FROM skills WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return _skill_public(conn, row)
+
+
+def delete_skill(skill_id: int) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+        conn.commit()
+        return bool(cur.rowcount)
+
+
+def list_skill_targets() -> list[dict]:
+    profile = get_profile()
+    targets = [
+        {
+            "agent_type": "supervisor",
+            "agent_key": "supervisor",
+            "name": profile.get("assistant_name") or "Mounir",
+            "group": "Supervisor",
+        }
+    ]
+    targets.extend(
+        {
+            "agent_type": "builtin",
+            "agent_key": str(item["key"]),
+            "name": str(item["name"]),
+            "group": "Built-in subagents",
+        }
+        for item in list_builtin_agents()
+    )
+    targets.extend(
+        {
+            "agent_type": "subagent",
+            "agent_key": str(item["id"]),
+            "name": str(item["name"]),
+            "group": "Subagents",
+        }
+        for item in list_subagents()
+    )
+    return targets
+
+
+def _validate_skill_target(
+    conn: sqlite3.Connection, agent_type: str, agent_key: str
+) -> None:
+    if agent_type == "supervisor" and agent_key == "supervisor":
+        return
+    if agent_type == "builtin":
+        if builtin_agents.definition(agent_key) is not None:
+            return
+    elif agent_type == "subagent":
+        try:
+            subagent_id = int(agent_key)
+        except (TypeError, ValueError):
+            subagent_id = -1
+        if conn.execute(
+            "SELECT 1 FROM subagents WHERE id = ?", (subagent_id,)
+        ).fetchone():
+            return
+    raise ValueError("Select an existing agent.")
+
+
+def set_skill_assignments(skill_id: int, assignments: list[dict]) -> dict | None:
+    normalized: set[tuple[str, str]] = set()
+    for assignment in assignments or []:
+        if not isinstance(assignment, dict):
+            raise ValueError("Skill assignments must identify an agent.")
+        normalized.add(
+            (
+                str(assignment.get("agent_type") or ""),
+                str(assignment.get("agent_key") or ""),
+            )
+        )
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        skill = conn.execute(
+            "SELECT * FROM skills WHERE id = ?", (skill_id,)
+        ).fetchone()
+        if skill is None:
+            conn.rollback()
+            return None
+        for agent_type, agent_key in normalized:
+            _validate_skill_target(conn, agent_type, agent_key)
+            collision = conn.execute(
+                """
+                SELECT s.name FROM skill_assignments a
+                JOIN skills s ON s.id = a.skill_id
+                WHERE a.agent_type = ? AND a.agent_key = ? AND a.enabled = 1
+                  AND a.skill_id != ? AND lower(s.name) = lower(?)
+                """,
+                (agent_type, agent_key, skill_id, skill["name"]),
+            ).fetchone()
+            if collision:
+                raise ValueError(
+                    f'This agent already has a skill named "{skill["name"]}".'
+                )
+        conn.execute("DELETE FROM skill_assignments WHERE skill_id = ?", (skill_id,))
+        conn.executemany(
+            """
+            INSERT INTO skill_assignments
+                (skill_id, agent_type, agent_key, enabled, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [(skill_id, kind, key, 1, _now()) for kind, key in sorted(normalized)],
+        )
+        conn.commit()
+        return get_skill(skill_id)
+
+
+def _replace_subagent_skill_assignments(
+    conn: sqlite3.Connection, subagent_id: int, skill_ids
+) -> None:
+    if not isinstance(skill_ids, (list, tuple, set)):
+        raise ValueError("Selected skills must be a list.")
+    try:
+        selected = {int(skill_id) for skill_id in skill_ids}
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Select installed skills for the subagent.") from exc
+    if any(skill_id <= 0 for skill_id in selected):
+        raise ValueError("Select installed skills for the subagent.")
+    rows = list(
+        conn.execute(
+            f"SELECT id, name FROM skills WHERE id IN ({','.join('?' for _ in selected)})",
+            tuple(sorted(selected)),
+        )
+    ) if selected else []
+    if len(rows) != len(selected):
+        raise ValueError("One or more selected skills are no longer installed.")
+    names: set[str] = set()
+    for row in rows:
+        normalized = str(row["name"]).casefold()
+        if normalized in names:
+            raise ValueError(f'This subagent cannot use multiple skills named "{row["name"]}".')
+        names.add(normalized)
+    agent_key = str(int(subagent_id))
+    conn.execute(
+        "DELETE FROM skill_assignments WHERE agent_type = 'subagent' AND agent_key = ?",
+        (agent_key,),
+    )
+    conn.executemany(
+        """
+        INSERT INTO skill_assignments
+            (skill_id, agent_type, agent_key, enabled, created_at)
+        VALUES (?, 'subagent', ?, 1, ?)
+        """,
+        [(skill_id, agent_key, _now()) for skill_id in sorted(selected)],
+    )
+
+
+def list_agent_skills(agent_type: str, agent_key: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.* FROM skills s
+            JOIN skill_assignments a ON a.skill_id = s.id
+            WHERE a.agent_type = ? AND a.agent_key = ? AND a.enabled = 1
+            ORDER BY s.name COLLATE NOCASE, s.id
+            """,
+            (agent_type, str(agent_key)),
+        ).fetchall()
+        return [_skill_public(conn, row) for row in rows]
 
 
 # -----------------------------------------------------------------------------
@@ -5766,6 +6066,7 @@ def _add_subagent(
     workflow_id: int | None = None,
     position=None,
     mcp_sources=None,
+    skill_ids=None,
 ) -> int:
     try:
         selected_model_id = int(model_id)
@@ -5867,6 +6168,7 @@ def _add_subagent(
         )
     )
     _replace_subagent_sources(conn, agent_id, requested_sources)
+    _replace_subagent_skill_assignments(conn, agent_id, skill_ids or [])
     if _bool(connect_to_workflow, "connect_to_workflow"):
         _create_subagent_node(
             conn, agent_id, selected_parent_node_id, selected_workflow_id, position
@@ -5896,13 +6198,14 @@ def add_subagent(
     workflow_id: int | None = None,
     position=None,
     mcp_sources=None,
+    skill_ids=None,
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
             conn, name, description, system_prompt, model_id, mcp_server_id,
             confirm_tool_calls, parent_agent_id, confirm_tools, icon_data, icon_mime,
             dedupe_tools, enabled, enabled_tools, parent_node_id,
-            connect_to_workflow, workflow_id, position, mcp_sources,
+            connect_to_workflow, workflow_id, position, mcp_sources, skill_ids,
         )
         return get_subagent(aid)
 
@@ -5955,6 +6258,19 @@ def _enrich_subagent_connections(
     sources_by_agent = _subagent_sources_for(
         conn, {int(row["id"]) for row in rows}
     )
+    skills_by_agent: dict[int, list[int]] = {}
+    for assignment in conn.execute(
+        """
+        SELECT agent_key, skill_id FROM skill_assignments
+        WHERE agent_type = 'subagent' AND enabled = 1
+        ORDER BY skill_id
+        """
+    ):
+        try:
+            agent_id = int(assignment["agent_key"])
+        except (TypeError, ValueError):
+            continue
+        skills_by_agent.setdefault(agent_id, []).append(int(assignment["skill_id"]))
     nodes = [
         dict(node)
         for node in conn.execute(
@@ -5973,6 +6289,7 @@ def _enrich_subagent_connections(
     for row in rows:
         agent_id = int(row["id"])
         row["mcp_sources"] = sources_by_agent.get(agent_id, [])
+        row["skill_ids"] = skills_by_agent.get(agent_id, [])
         row["mcp_server_count"] = len(row["mcp_sources"])
         placements = sorted(
             (item for item in nodes if int(item["agent_id"]) == agent_id),
@@ -6422,6 +6739,8 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     )
     sources_supplied = "mcp_sources" in kwargs
     requested_sources = kwargs.pop("mcp_sources", None)
+    skills_supplied = "skill_ids" in kwargs
+    requested_skill_ids = kwargs.pop("skill_ids", None)
     allowed = {
         "name", "description", "system_prompt", "model_id",
         "mcp_server_id", "confirm_tool_calls", "confirm_tools",
@@ -6440,6 +6759,7 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
         and not parent_selection_supplied
         and not child_selection_supplied
         and not sources_supplied
+        and not skills_supplied
     ):
         return get_subagent(subagent_id)
     if "name" in fields:
@@ -6551,6 +6871,10 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
                     subagent_id,
                     requested_sources if sources_supplied else legacy_sources,
                 )
+            if skills_supplied:
+                _replace_subagent_skill_assignments(
+                    conn, subagent_id, requested_skill_ids or []
+                )
             if child_selection_supplied:
                 primary_node_id = _canonical_parent_node(conn, subagent_id)
                 _set_node_children(conn, primary_node_id, selected_child_ids)
@@ -6588,6 +6912,10 @@ def delete_subagent(subagent_id: int) -> bool:
         _sync_legacy_connections(conn)
         cur = conn.execute("DELETE FROM subagents WHERE id = ?", (subagent_id,))
         if cur.rowcount:
+            conn.execute(
+                "DELETE FROM skill_assignments WHERE agent_type = 'subagent' AND agent_key = ?",
+                (str(subagent_id),),
+            )
             _sync_legacy_connections(conn)
             conn.execute(
                 "DELETE FROM heartbeat_agent_preferences WHERE agent_key = ?",

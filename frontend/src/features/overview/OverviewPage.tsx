@@ -76,9 +76,7 @@ export function OverviewPage() {
       if (!selected || !modelId) return
       return api.overview.updateBuiltin(selected.key, {
         model_id: modelId,
-        ...(selected.key === 'media'
-          ? { generation_model_id: generationModelId || null }
-          : {}),
+        ...(selected.key === 'media' ? { generation_model_id: generationModelId || null } : {}),
       })
     },
     onSuccess: async () => {
@@ -105,6 +103,7 @@ export function OverviewPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: keys.agents }),
         queryClient.invalidateQueries({ queryKey: keys.agentNodes }),
+        queryClient.invalidateQueries({ queryKey: keys.skills }),
         queryClient.invalidateQueries({ queryKey: keys.overview }),
         queryClient.invalidateQueries({ queryKey: ['agent-node'] }),
       ])
@@ -513,8 +512,7 @@ export function OverviewPage() {
                 label: 'Image generation model',
                 modelId: generationModelId,
                 options: selected.generation_model_options,
-                hint:
-                  'Supports the OpenAI-compatible Images endpoint and Mistral image generation.',
+                hint: 'Supports the OpenAI-compatible Images endpoint and Mistral image generation.',
                 onChange: setGenerationModelId,
               }
             : undefined

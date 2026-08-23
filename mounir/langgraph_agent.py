@@ -26,6 +26,7 @@ from langgraph.types import Command
 
 from . import (
     action_decline,
+    agent_skills,
     builtin_agents,
     config as cfg,
     db,
@@ -353,6 +354,7 @@ def _compile_graph(
     scoped_targets: list[dict] | None = None,
     *,
     loaded_dynamic: list[dict] | None = None,
+    skill_tool: BaseTool | None = None,
 ):
     scoped = scoped_targets is not None
     dynamic = (
@@ -414,6 +416,8 @@ def _compile_graph(
         if item.name in delegates
     ]
     general_tools = [] if scoped else list(tools.GENERAL_TOOLS)
+    if skill_tool is not None:
+        general_tools.append(skill_tool)
     advertised_tools = [
         *general_tools,
         *builtin_tools,
@@ -538,7 +542,21 @@ class Agent:
         self.conversation.add_user(user_input, attachments=attachments)
         messages = self.conversation.to_messages()
         dynamic_specs = None
+        skill_tool = None
         if self.use_tools:
+            skill_prompt, skill_tool = agent_skills.runtime_access(
+                "supervisor", "supervisor"
+            )
+            if skill_prompt:
+                insert_at = next(
+                    (
+                        index
+                        for index, message in enumerate(messages)
+                        if message.get("role") != "system"
+                    ),
+                    len(messages),
+                )
+                messages.insert(insert_at, {"role": "system", "content": skill_prompt})
             dynamic_specs = (
                 [
                     dict(spec)
@@ -582,6 +600,7 @@ class Agent:
             self.use_tools,
             self.scoped_targets,
             loaded_dynamic=dynamic_specs,
+            skill_tool=skill_tool,
         )
         result_state: TurnState | None = None
         streamed: list[str] = []

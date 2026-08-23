@@ -23,7 +23,7 @@ import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
 import { Modal } from '../../components/ui/Modal'
-import { useAgentNodes, useWorkflowNodes } from '../../hooks/useStudioData'
+import { useAgentNodes, useSkills, useWorkflowNodes } from '../../hooks/useStudioData'
 import { readable, stringList, toDataUrl } from '../resources/helpers'
 import {
   expandLegacyToolRules,
@@ -32,9 +32,10 @@ import {
   useMcpToolCatalog,
 } from '../resources/McpToolAccess'
 import { ToolChoices } from '../resources/ToolChoices'
+import { SkillPicker } from '../resources/SkillPicker'
 import { agentNodeTypes, type FlowData } from './AgentFlowNode'
 
-type WizardStep = 1 | 2 | 3
+type WizardStep = 1 | 2 | 3 | 4
 type ConfirmationMode = 'all' | 'selected' | 'none'
 
 type Draft = {
@@ -547,6 +548,8 @@ export function ConnectAgentModal({
   const [draft, setDraft] = useState<Draft>(blankDraft)
   const [source, setSource] = useState<Subagent | undefined>()
   const [sources, setSources] = useState<SubagentMcpSource[]>([])
+  const skills = useSkills()
+  const [selectedSkills, setSelectedSkills] = useState(new Set<number>())
   const [confirmMode, setConfirmMode] = useState<ConfirmationMode>('all')
   const [confirmed, setConfirmed] = useState(new Set<string>())
   const [deduped, setDeduped] = useState(new Set<string>())
@@ -621,6 +624,7 @@ export function ConnectAgentModal({
     setDraft(blankDraft())
     setSource(undefined)
     setSources([])
+    setSelectedSkills(new Set())
     setConfirmMode('all')
     setConfirmed(new Set())
     setDeduped(new Set())
@@ -666,6 +670,7 @@ export function ConnectAgentModal({
           ? [{ mcp_server_id: Number(agent.mcp_server_id), enabled_tools: agent.enabled_tools }]
           : [],
     )
+    setSelectedSkills(new Set((agent?.skill_ids || []).map(Number)))
     setConfirmMode(confirmationMode(agent))
     setConfirmed(new Set(confirmRules.filter((name) => name !== '*')))
     setDeduped(new Set(stringList(agent?.dedupe_tools)))
@@ -710,6 +715,7 @@ export function ConnectAgentModal({
         mcp_server_id,
         enabled_tools,
       })),
+      skill_ids: [...selectedSkills].sort((left, right) => left - right),
       confirm_tools: !sources.length
         ? []
         : confirmMode === 'all'
@@ -747,7 +753,7 @@ export function ConnectAgentModal({
       <Button type="button" onClick={goBack} disabled={busy}>
         <ChevronLeft size={13} /> Previous
       </Button>
-      {step < 3 ? (
+      {step < 4 ? (
         <Button type="button" variant="primary" onClick={next} disabled={copyingIcon || busy}>
           Next <ChevronRight size={13} />
         </Button>
@@ -983,8 +989,9 @@ export function ConnectAgentModal({
             <nav className="subagent-wizard__steps" aria-label="Creation progress">
               {[
                 { number: 1, label: 'Configuration' },
-                { number: 2, label: 'Tools' },
-                { number: 3, label: 'Security' },
+                { number: 2, label: 'Skills' },
+                { number: 3, label: 'Tools' },
+                { number: 4, label: 'Security' },
               ].map(({ number, label }) => (
                 <button
                   type="button"
@@ -1101,6 +1108,21 @@ export function ConnectAgentModal({
             {step === 2 && (
               <div className="subagent-wizard__page">
                 <p className="subagent-wizard__section-description">
+                  Select the installed skills this subagent can discover and activate.
+                </p>
+                <SkillPicker
+                  skills={skills.data || []}
+                  selected={selectedSkills}
+                  loading={skills.isLoading}
+                  error={skills.error instanceof Error ? skills.error.message : ''}
+                  onChange={setSelectedSkills}
+                />
+              </div>
+            )}
+
+            {step === 3 && (
+              <div className="subagent-wizard__page">
+                <p className="subagent-wizard__section-description">
                   Choose tools from available MCP servers to connect them to your subagent.
                 </p>
                 <MultiServerToolPicker
@@ -1112,7 +1134,7 @@ export function ConnectAgentModal({
               </div>
             )}
 
-            {step === 3 && (
+            {step === 4 && (
               <div className="form-grid subagent-wizard__page">
                 {!sources.length && (
                   <div className="guidance">

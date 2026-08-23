@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 
 from langchain_core.tools import tool
 
-from .. import config, graph_runtime, llm
+from .. import agent_skills, config, graph_runtime, llm
 from . import artifacts
 
 MAX_TOOL_ROUNDS = 8
@@ -171,11 +171,16 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
         fallback_provider="NVIDIA",
     )
     selected_tools = graph_runtime.select_tools(TOOLS, allowed_tools)
+    skill_prompt, skill_tool = agent_skills.runtime_access("builtin", "media")
+    if skill_tool is not None:
+        selected_tools.append(skill_tool)
     confirmation_tools = db.get_builtin_confirmation_tools("media")
     messages = [
         {"role": "system", "content": config.specialist_system_prompt(SYSTEM_PROMPT)},
-        {"role": "user", "content": task},
     ]
+    if skill_prompt:
+        messages.append({"role": "system", "content": skill_prompt})
+    messages.append({"role": "user", "content": task})
     return graph_runtime.run_tool_agent(
         messages,
         selected_tools,
