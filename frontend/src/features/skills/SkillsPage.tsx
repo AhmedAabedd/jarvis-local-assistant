@@ -84,7 +84,7 @@ function InstalledSkills({ onOpen }: { onOpen: (skill: SkillRecord) => void }) {
       </div>
     )
   return (
-    <div className="resource-browser skills-installed">
+    <div className="resource-browser">
       <label className="resource-search">
         <Search size={13} />
         <input

@@ -1841,7 +1841,7 @@ select:disabled {
 .resource-browser {
   width: min(1180px, 100%);
   display: grid;
-  gap: 14px;
+  gap: 18px;
   margin-inline: auto;
 }
 .resource-search {
@@ -3422,9 +3422,6 @@ button.resource-header-action {
 }
 .skills-empty {
   flex-direction: column;
-}
-.skills-installed {
-  gap: 18px;
 }
 .skills-detail {
   width: min(980px, 100%);
