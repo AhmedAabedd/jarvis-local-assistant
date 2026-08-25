@@ -428,13 +428,7 @@ export interface HeartbeatTask {
   recent_runs: HeartbeatRun[]
 }
 export interface HeartbeatSettings {
-  enabled: boolean
-  interval_minutes: number
-  instructions: string
-  notify_telegram: boolean
-  notify_whatsapp: boolean
   capabilities: HeartbeatCapability[]
-  recent_runs: HeartbeatRun[]
   tasks: HeartbeatTask[]
 }
 

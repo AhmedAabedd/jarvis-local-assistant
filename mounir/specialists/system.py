@@ -38,15 +38,11 @@ RULES
   When the task asks for a change, ALWAYS call the tool — never answer that
   it is "already done" from the snapshot or from memory.
 - Only touch Wi-Fi, Bluetooth, the lock screen, or suspend when the task
-  explicitly asks for them. If an action is declined, stop and do not retry it.
-- If a tool errors, report the error honestly. Never claim a change you did
-  not see succeed.
+  explicitly asks for them.
 
-FINAL REPORT (MANDATORY)
-Your last message is read by the SUPERVISOR, not the user. One short sentence
-or two with the concrete outcome and the resulting state, e.g. "Volume raised
-to 55%." or "Paused the media playing in Chromium. Battery is at 82%,
-charging." No fluff, no headers — never write the words "FINAL REPORT".
+REPORT REQUIREMENTS
+Include the concrete outcome and resulting state. A sentence or two is enough
+for simple operations; include more detail when the caller needs it.
 """
 
 

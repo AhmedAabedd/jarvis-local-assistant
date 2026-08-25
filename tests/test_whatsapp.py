@@ -86,7 +86,7 @@ class WhatsAppTests(unittest.TestCase):
         )
         return db.get_whatsapp_settings(include_secret=True)
 
-    def test_settings_hide_secrets_and_heartbeat_destinations_persist(self):
+    def test_settings_hide_secrets(self):
         private = self._configured_settings()
         public = db.get_whatsapp_settings()
 
@@ -96,13 +96,6 @@ class WhatsAppTests(unittest.TestCase):
         self.assertNotIn("paired_phone", public)
         self.assertTrue(public["credentials_configured"])
         self.assertTrue(public["verify_token"])
-
-        heartbeat = db.update_heartbeat_settings(
-            notify_telegram=False,
-            notify_whatsapp=True,
-        )
-        self.assertFalse(heartbeat["notify_telegram"])
-        self.assertTrue(heartbeat["notify_whatsapp"])
 
     def test_cloud_api_connection_and_signature_validation(self):
         settings = self._configured_settings()

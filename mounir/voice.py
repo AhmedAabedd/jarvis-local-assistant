@@ -1,4 +1,4 @@
-"""Voice loops: push-to-talk (Stage 2) and hands-free wake-word (Stage 4).
+"""Voice loops for push-to-talk and hands-free wake-word interaction.
 
 Both reuse the same Agent (so memory, personality, and tools are identical) and
 the same transcribe → stream → speak pipeline. They differ only in how a

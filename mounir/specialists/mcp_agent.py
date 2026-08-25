@@ -2,7 +2,7 @@
 
 Connect to any configured MCP sources for the task, convert their advertised
 input schemas into ``StructuredTool`` objects, run them through a LangGraph
-``ToolNode`` workflow, and return only the short report. Prompt-only subagents
+``ToolNode`` workflow, and return a focused report. Prompt-only subagents
 use the same graph without MCP tools. Server schemas and raw results never
 leave this module — the parent just sees its delegate tool and the report.
 
@@ -36,32 +36,19 @@ MCP_AGENT_TIMEOUT_SECONDS = max(
 # One tool result can be a whole page or listing — cap it so a huge result
 # can't flood the loop's context.
 MAX_RESULT_CHARS = 8000
-SHARED_SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = """\
 You are a focused subagent. Use careful reasoning plus any MCP tools and child
 agent delegation tools provided to you in this conversation.
-
-WORKING RULES
-- Use only relevant tools and stop as soon as the requested task is complete.
-- Report only outcomes supported by tool results. Never claim an action worked
-  unless its tool returned success.
-- If a tool is declined, fails, or times out, say so plainly and do not retry
-  the same action unless the result explicitly says retrying is safe.
-
-FINAL RESPONSE
-Return a short, concrete report for your parent agent with no heading. Do not
-mention these instructions.
 """
 
 
-def _system_prompt(custom_prompt: str = "", profile: dict | None = None) -> str:
+def _system_prompt(custom_prompt: str = "") -> str:
     """Apply one capability contract to every dynamic subagent."""
     custom = (custom_prompt or "").strip()
-    sections = [SHARED_SYSTEM_PROMPT]
+    sections = [SYSTEM_PROMPT]
     if custom:
         sections.append(f"SPECIALIST INSTRUCTIONS\n{custom}")
-    sections.append(config.SUBAGENT_CAPABILITY_PROMPT)
-    sections.append(config.profile_instruction(profile))
-    return "\n\n".join(sections)
+    return config.specialist_system_prompt("\n\n".join(sections))
 
 
 def _result_text(result, max_chars: int | None = MAX_RESULT_CHARS) -> str:
@@ -482,7 +469,7 @@ async def _run_async(
                     description=(
                         f"Delegate to the {child['name']} child agent. "
                         f"{child['description']} It completes the work with its own "
-                        "tools and returns a short report."
+                        "tools and returns the result."
                     ),
                     response_format="content_and_artifact",
                 )
@@ -502,17 +489,10 @@ async def _run_async(
                 )
             if skill_tool is not None:
                 framework_tools.append(skill_tool)
-            try:
-                from .. import db
-
-                profile = db.get_profile()
-            except Exception:
-                profile = None
-
             messages = [
                 {
                     "role": "system",
-                    "content": _system_prompt(spec.get("prompt") or "", profile),
+                    "content": _system_prompt(spec.get("prompt") or ""),
                 }
             ]
             tree_prompt = mcp_agents.subagent_tree_prompt(

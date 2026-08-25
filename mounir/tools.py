@@ -321,7 +321,7 @@ def delegate_to_knowledge_tool(
 def delegate_to_system_tool(
     task: Annotated[str, "Desired hardware or system end state."],
 ) -> str:
-    """Delegate laptop hardware, connectivity, media, status, or power work."""
+    """Control or inspect laptop audio, display, connectivity, media playback, battery, or power."""
 
     return delegate_to_system(task)
 

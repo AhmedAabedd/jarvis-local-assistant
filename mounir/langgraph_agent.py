@@ -336,13 +336,18 @@ def _make_workflow_node(
 def _make_heartbeat_builtin_node(spec: dict):
     key = spec["builtin_key"]
     tool_name = f"delegate_to_{key}"
+    task_prompt = str(spec.get("task_prompt") or "").strip()
 
     def node(state: TurnState) -> Command:
         return _specialist_result(
             state,
             tool_name,
             spec["name"],
-            lambda task: builtin_agents.run(key, task, spec["allowed_tools"]),
+            lambda task: builtin_agents.run(
+                key,
+                "\n\n".join(part for part in (task, task_prompt) if part),
+                spec["allowed_tools"],
+            ),
         )
 
     return node

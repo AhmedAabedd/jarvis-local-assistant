@@ -1,4 +1,4 @@
-# Stage 2 — voice (install on top of requirements.txt)
+# Voice dependencies (install on top of requirements.txt)
 # System deps first:  sudo apt install portaudio19-dev
 faster-whisper>=1.0
 piper-tts>=1.2
@@ -7,7 +7,7 @@ soundfile>=0.12
 numpy>=1.24
 sentencepiece>=0.1.99
 
-# Stage 4 — hands-free (wake word). Silence detection is energy-based (numpy),
+# Hands-free wake word. Silence detection is energy-based (numpy),
 # so no VAD package is needed.
 # openwakeword is run via ONNX, not tflite. Its tflite-runtime dep has no wheel
 # on Python 3.13, so install it WITHOUT deps, then its real runtime deps below:
@@ -15,7 +15,4 @@ sentencepiece>=0.1.99
 onnxruntime>=1.16
 scipy>=1.3
 scikit-learn>=1.0
-
-
-#For web interface
-#sudo apt install ffmpeg
+# Optional media support: sudo apt install ffmpeg

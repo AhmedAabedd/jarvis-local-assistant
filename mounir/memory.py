@@ -1,9 +1,4 @@
-"""Conversation memory: in-RAM history plus optional JSON persistence.
-
-Stage 1 keeps this deliberately simple — a rolling window of recent turns.
-Smarter long-term memory (summaries, retrieval) is a Stage 4 concern; the
-interface here is built so that can drop in without touching the agent.
-"""
+"""Conversation memory: in-RAM history plus optional JSON persistence."""
 
 from __future__ import annotations
 
@@ -68,7 +63,7 @@ class Conversation:
 
             context = config.build_context_message(db.get_profile())
         except Exception:
-            context = config.CONTEXT_MESSAGE
+            context = config.build_context_message()
         base.append({"role": "system", "content": context})
         return base + window
 

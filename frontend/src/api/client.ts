@@ -236,8 +236,6 @@ export const api = {
   },
   heartbeat: {
     get: () => request<HeartbeatSettings>('/api/heartbeat'),
-    update: (body: object) => request<HeartbeatSettings>('/api/heartbeat', json('PUT', body)),
-    run: () => request<HeartbeatSettings>('/api/heartbeat/run', json('POST')),
     createTask: (body: object) =>
       request<HeartbeatTask>('/api/heartbeat/tasks', json('POST', body)),
     updateTask: (id: number, body: object) =>

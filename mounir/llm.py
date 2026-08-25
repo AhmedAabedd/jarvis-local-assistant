@@ -5,34 +5,42 @@ import re
 import time
 from typing import Iterator
 
-import ollama
 import requests
 
 from . import config
 
 
-class OllamaError(RuntimeError):
-    """Backward-compatible name for an error raised by the LLM transport."""
+class ModelError(RuntimeError):
+    """Error raised by the provider-neutral LLM transport."""
 
 
 def active_model(default: str) -> str:
-    """Return the legacy environment-selected model name."""
-    if config.USE_MISTRAL:
-        return config.MISTRAL_MODEL
-    if config.USE_GROQ:
-        return config.GROQ_MODEL
-    return default
+    """Return the database-selected supervisor model name."""
+    try:
+        from . import db
+
+        db.init()
+        return str(db.get_supervisor_runtime(default).get("model") or default)
+    except Exception:
+        return default
 
 
 def is_up() -> bool:
-    """Check the legacy local-provider configuration."""
-    if config.USE_MISTRAL:
-        return bool(config.MISTRAL_API_KEY)
-    if config.USE_GROQ:
-        return bool(config.GROQ_API_KEY)
+    """Check the selected model through the OpenAI-compatible models endpoint."""
     try:
-        ollama.list()
-        return True
+        from . import db
+
+        db.init()
+        runtime = db.get_supervisor_runtime(config.MODEL)
+        base_url = str(runtime.get("base_url") or "").strip().rstrip("/")
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url.removesuffix("/chat/completions")
+        response = requests.get(
+            f"{base_url}/models",
+            headers=_headers(runtime.get("api_key")),
+            timeout=5,
+        )
+        return response.ok
     except Exception:
         return False
 
@@ -40,12 +48,12 @@ def is_up() -> bool:
 def _chat_completions_url(base_url: str | None) -> str:
     value = str(base_url or "").strip().rstrip("/")
     if not value:
-        raise OllamaError(
+        raise ModelError(
             "This model needs an OpenAI-compatible base URL, for example "
             "https://provider.example/v1."
         )
     if not value.startswith(("http://", "https://")):
-        raise OllamaError("The model base URL must start with http:// or https://.")
+        raise ModelError("The model base URL must start with http:// or https://.")
     if value.endswith("/chat/completions"):
         return value
     return f"{value}/chat/completions"
@@ -181,7 +189,7 @@ def _payload(
 ) -> dict:
     selected_model = str(model or "").strip()
     if not selected_model:
-        raise OllamaError("A model ID is required.")
+        raise ModelError("A model ID is required.")
     body = {
         "model": selected_model,
         "messages": _compatible_messages(messages, provider),
@@ -229,14 +237,14 @@ def _is_retryable_response(response: requests.Response, detail: str = "") -> boo
     )
 
 
-def _endpoint_error(status_code: int, detail: str) -> OllamaError:
+def _endpoint_error(status_code: int, detail: str) -> ModelError:
     if "degraded function cannot be invoked" in detail.lower():
-        return OllamaError(
+        return ModelError(
             "The provider's model deployment is temporarily degraded and could "
             "not be invoked after retries. Try again shortly or select another "
             f"model for this agent (HTTP {status_code}: {detail})."
         )
-    return OllamaError(
+    return ModelError(
         f"OpenAI-compatible endpoint returned HTTP {status_code}: {detail}"
     )
 
@@ -316,11 +324,11 @@ def openai_chat(
             r"(?s)<think>.*?</think>", "", message.get("content") or ""
         ).strip()
         return message
-    except OllamaError:
+    except ModelError:
         raise
     except Exception as exc:
         label = f"{provider}/" if provider else ""
-        raise OllamaError(f"Model call failed ({label}{model}): {exc}") from exc
+        raise ModelError(f"Model call failed ({label}{model}): {exc}") from exc
 
 
 def _canonical_tool_call(
@@ -337,7 +345,6 @@ def chat_stream(
     messages: list[dict],
     *,
     model: str = config.MODEL,
-    think: bool | None = None,
     tools: list | None = None,
     tool_calls_out: list | None = None,
     provider: str | None = None,
@@ -345,7 +352,6 @@ def chat_stream(
     api_key: str | None = None,
 ) -> Iterator[str]:
     """Stream any model exposing OpenAI-compatible chat completions."""
-    del think  # Kept in the public signature for existing callers.
     response: requests.Response | None = None
     try:
         response = _post(
@@ -404,11 +410,11 @@ def chat_stream(
                 tool_calls_out.append(
                     _canonical_tool_call(call["name"], arguments, call["id"])
                 )
-    except OllamaError:
+    except ModelError:
         raise
     except Exception as exc:
         label = f"{provider}/" if provider else ""
-        raise OllamaError(f"Model stream failed ({label}{model}): {exc}") from exc
+        raise ModelError(f"Model stream failed ({label}{model}): {exc}") from exc
     finally:
         if response is not None:
             response.close()

@@ -277,7 +277,7 @@ jobs.
 
 | Runtime area | Supported configuration |
 |---|---|
-| Supervisor | Saved Mistral, Groq, or Ollama profiles |
+| Supervisor | Saved OpenAI-compatible local or cloud models |
 | Dynamic MCP specialists | OpenAI-compatible chat-completions endpoints with tool calling |
 | Files/Media and System | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
 | Knowledge | Configurable Gemini/OpenAI-compatible profile |
@@ -421,8 +421,8 @@ an approved template whose body contains one variable for the alert text.
 
 ### Command line
 
-`python cli.py` provides the original interactive client. It supports `/reset`,
-`/save`, `/load`, `/think`, and `/exit`.
+`python cli.py` provides the interactive client. It supports `/reset`, `/save`,
+`/load`, and `/exit`.
 
 ---
 
@@ -621,7 +621,6 @@ edited in Agent Studio and take precedence after their initial import.
 | Variable | Default | Purpose |
 |---|---|---|
 | `MOUNIR_MODEL` | `mounir` | Initial local Ollama supervisor model |
-| `MOUNIR_THINK` | `false` | Enable supported model thinking mode |
 | `MOUNIR_MAX_HISTORY` | `20` | Bounded recent-message prompt window |
 | `MOUNIR_DATA_DIR` | `~/.mounir` | SQLite database, conversations, and local voice data |
 | `MOUNIR_CHAT_ATTACHMENT_DIR` | `<data dir>/chat/attachments` | Persistent images attached through web or messaging conversations |
@@ -638,23 +637,20 @@ edited in Agent Studio and take precedence after their initial import.
 | `MOUNIR_TANK_API_TOKEN` | unset | Optional Tank bearer token for private registries or higher read limits |
 | `NVIDIA_API_KEY` | unset | Initial Media and System provider credential |
 | `GEMINI_API_KEY` | unset | Initial Knowledge provider credential |
-| `USE_MISTRAL` | `false` | Import the Mistral supervisor configuration |
-| `MISTRAL_API_KEY` | unset | Initial Mistral credential |
-| `USE_GROQ` | `false` | Use/import the Groq supervisor configuration |
-| `GROQ_API_KEY` | unset | Initial Groq credential; still supported by the legacy `groq` STT bootstrap alias |
+| `GROQ_API_KEY` | unset | Optional credential for the compatible `groq` STT bootstrap alias |
 | `MOUNIR_STT_BACKEND` | `local` | Initial STT transport: `local` or `openai_compatible` (`groq` remains an alias) |
 | `MOUNIR_STT_BASE_URL` | OpenAI API root | Initial compatible transcription API root or full endpoint |
 | `MOUNIR_STT_MODEL` | `whisper-1` | Initial compatible transcription model ID |
-| `MOUNIR_STT_API_KEY` | `OPENAI_API_KEY` | Optional initial compatible transcription bearer key |
+| `MOUNIR_STT_API_KEY` | unset | Optional initial compatible transcription bearer key |
 | `MOUNIR_TTS_BACKEND` | `piper` | Initial TTS transport: `piper`, `openai_compatible`, or `google` |
 | `MOUNIR_TTS_BASE_URL` | OpenAI API root | Initial compatible speech API root or full endpoint |
 | `MOUNIR_TTS_MODEL` | `tts-1` | Initial compatible speech model ID |
 | `MOUNIR_TTS_VOICE` | `alloy` | Initial compatible speech voice ID |
-| `MOUNIR_TTS_API_KEY` | `OPENAI_API_KEY` | Optional initial compatible speech bearer key |
+| `MOUNIR_TTS_API_KEY` | unset | Optional initial compatible speech bearer key |
 | `MOUNIR_WAKE_WORD` | `hey_jarvis` | openWakeWord trigger for hands-free voice |
 | `MOUNIR_WAKE_THRESHOLD` | `0.5` | Wake-word detection threshold |
 
-Legacy Telegram environment settings are imported once if present. After migration,
+Telegram environment settings are imported once if present. After initialization,
 Agent Studio owns the bot configuration.
 
 ---

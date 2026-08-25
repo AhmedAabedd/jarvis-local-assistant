@@ -89,12 +89,15 @@ def subagent_tree_prompt(
 ) -> str:
     """Describe the reachable delegation tree relative to one running agent.
 
-    The tree stays compact by showing names only. Descriptions for definitions
-    that are reachable only through nested agents are listed once, keyed
-    internally by agent ID. Placement IDs keep repeated nodes independent.
+    Direct children use names only because their delegation schemas already
+    include descriptions. A deeper agent's description appears beside its
+    first occurrence only, keyed internally by agent ID. Placement IDs keep
+    repeated nodes independent without duplicating capability text.
     """
     direct_children = _tree_children(specs, parent)
     if not direct_children:
+        return ""
+    if not any(_tree_children(specs, child) for child in direct_children):
         return ""
 
     direct_agent_ids = {
@@ -103,13 +106,10 @@ def subagent_tree_prompt(
         if spec.get("id") is not None
     }
     tree_lines = [
-        "AVAILABLE SUBAGENTS",
-        (
-            "Top-level agents are directly callable; reach nested agents through "
-            "their parent. Direct descriptions are in the delegation tool schemas."
-        ),
+        "SUBAGENT TREE",
+        "Call direct children only; route deeper agents through their parent.",
     ]
-    nested_capabilities: dict[int, tuple[str, str]] = {}
+    described_agent_ids = set(direct_agent_ids)
 
     def identity(spec: dict) -> tuple[str, int]:
         if spec.get("node_id") is not None:
@@ -118,18 +118,18 @@ def subagent_tree_prompt(
 
     def add_branch(spec: dict, depth: int, ancestors: set[tuple[str, int]]) -> None:
         label = str(spec.get("name") or "Unnamed subagent").strip()
-        tree_lines.append(f"{'  ' * (depth - 1)}- {label}")
-
         agent_id = spec.get("id")
+        rendered = label
         if (
             depth > 1
             and agent_id is not None
-            and int(agent_id) not in direct_agent_ids
-            and int(agent_id) not in nested_capabilities
+            and int(agent_id) not in described_agent_ids
         ):
             description = " ".join(str(spec.get("description") or "").split())
             if description:
-                nested_capabilities[int(agent_id)] = (label, description)
+                rendered = f"{label} — {description}"
+            described_agent_ids.add(int(agent_id))
+        tree_lines.append(f"{'  ' * (depth - 1)}- {rendered}")
 
         branch_id = identity(spec)
         if branch_id in ancestors:
@@ -140,12 +140,6 @@ def subagent_tree_prompt(
 
     for child in direct_children:
         add_branch(child, 1, set())
-    if nested_capabilities:
-        tree_lines.extend(("", "NESTED CAPABILITIES"))
-        tree_lines.extend(
-            f"- {name} — {description}"
-            for name, description in nested_capabilities.values()
-        )
     return "\n".join(tree_lines)
 
 
@@ -194,7 +188,7 @@ def delegate_tool(spec: dict) -> StructuredTool:
         name=delegate_tool_name(spec["name"]),
         description=(
             f"Delegate to the {spec['name']} agent. {spec['description']} "
-            "It completes the work with its own tools and returns a short report."
+            "It completes the task with its available tools and returns the result."
         ),
     )
 

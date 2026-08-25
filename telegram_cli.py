@@ -22,7 +22,7 @@ def main() -> int:
         )
         return 1
     if not llm.is_up():
-        print("Can't reach Ollama. Start it with `ollama serve` first.")
+        print("Can't reach the selected model. Check its connection in Agent Studio.")
         return 1
 
     trace.banner("phone in your pocket, brain on your desk.")

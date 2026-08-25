@@ -26,6 +26,7 @@ os.environ.pop("TELEGRAM_CHAT_ID", None)
 from mounir import (
     action_decline,
     browser_control,
+    builtin_agents,
     config,
     db,
     graph_runtime,
@@ -39,7 +40,9 @@ from mounir import (
 )
 from mounir.agent import Agent
 from mounir.memory import Conversation
+from mounir.specialists import knowledge as knowledge_agent
 from mounir.specialists import mcp_agent
+from mounir.specialists import media as media_agent
 from mounir.specialists import system as system_agent
 from mounir.specialists.mcp_agent import _call, _mcp_session, _system_prompt, discover_tools
 from mounir.telegram_bridge import TelegramBridge
@@ -176,6 +179,25 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
         self.assertEqual(db.get_voice_runtime("stt")["api_key"], "groq-voice-key")
         self.assertEqual(db.get_voice_runtime("stt")["language"], "fr")
+
+    def test_voice_bootstrap_does_not_borrow_an_unrelated_openai_key(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "unrelated-key",
+                    "MOUNIR_STT_API_KEY": "",
+                    "MOUNIR_TTS_API_KEY": "",
+                },
+                clear=False,
+            ),
+            patch.object(config, "STT_BACKEND", "local"),
+            patch.object(config, "TTS_BACKEND", "piper"),
+        ):
+            db.init()
+
+        self.assertEqual(db.get_voice_runtime("stt")["api_key"], "")
+        self.assertEqual(db.get_voice_runtime("tts")["api_key"], "")
 
     def test_voice_runtime_dispatches_selected_stt_and_tts_providers(self):
         db.init()
@@ -420,7 +442,8 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
 
     def test_telegram_token_replacement_and_pairing_are_persisted(self):
-        db.init()
+        with patch.object(config, "TELEGRAM_BOT_TOKEN", ""):
+            db.init()
         self.assertEqual(db.get_telegram_settings()["reply_mode"], "text")
         with self.assertRaisesRegex(ValueError, "bot token"):
             db.update_telegram_settings(enabled=True)
@@ -448,30 +471,45 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertFalse(removed["enabled"])
         self.assertFalse(removed["token_configured"])
 
-    def test_heartbeat_setting_is_disabled_by_default_and_persisted(self):
+    def test_fresh_database_has_no_legacy_general_heartbeat(self):
         db.init()
-        initial = db.get_heartbeat_settings()
-        self.assertEqual(initial["enabled"], False)
-        self.assertEqual(initial["interval_minutes"], 30)
-        self.assertEqual(initial["last_status"], "never")
-
-        updated = db.update_heartbeat_settings(
-            enabled=True,
-            interval_minutes=60,
-            instructions="Check for important updates.",
+        self.assertEqual(db.list_heartbeat_tasks(), [])
+        self.assertFalse(hasattr(db, "get_heartbeat_settings"))
+        self.assertFalse(hasattr(db, "update_heartbeat_settings"))
+        with db._connect() as conn:
+            tables = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertTrue(
+            {
+                "heartbeat_settings",
+                "heartbeat_tools",
+                "heartbeat_builtin_tools",
+                "heartbeat_agent_preferences",
+                "heartbeat_agent_state",
+                "heartbeat_builtin_agent_state",
+            }.isdisjoint(tables)
         )
 
-        self.assertEqual(updated["enabled"], True)
-        self.assertEqual(updated["interval_minutes"], 60)
-        self.assertIsNotNone(updated["next_run_at"])
-        self.assertEqual(db.get_heartbeat_settings()["enabled"], True)
-        with self.assertRaisesRegex(ValueError, "true or false"):
-            db.update_heartbeat_settings(enabled="yes")
-        with self.assertRaisesRegex(ValueError, "between 5 and 1440"):
-            db.update_heartbeat_settings(interval_minutes=2)
-
     def test_profile_is_persisted_and_builds_runtime_prompts(self):
-        db.init()
+        with (
+            patch.object(config, "DEFAULT_USER_NAME", ""),
+            patch.object(config, "DEFAULT_LOCATION", ""),
+        ):
+            db.init()
+        initial = db.get_profile()
+        self.assertEqual(initial["user_name"], "")
+        self.assertEqual(initial["location"], "")
+        self.assertNotIn("User:", config.build_context_message(initial))
+        self.assertNotIn("Location:", config.build_context_message(initial))
+        self.assertIn(
+            "Preferred language: Automatic",
+            config.build_context_message(initial),
+        )
+
         profile = db.update_profile(
             user_name="Lina",
             assistant_name="Atlas",
@@ -482,9 +520,15 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(db.get_profile(), profile)
         self.assertEqual(profile["assistant_name"], "Atlas")
         self.assertIn("You are Atlas", config.build_system_prompt(profile))
-        self.assertIn("User: Lina", config.build_context_message(profile))
-        self.assertIn("Reply in French", config.build_system_prompt(profile))
-        self.assertIn("Location: Paris, France", config.profile_instruction(profile))
+        self.assertNotIn("User: Lina", config.build_context_message(profile))
+        self.assertIn(
+            "Preferred language: French", config.build_context_message(profile)
+        )
+        self.assertNotIn("Reply in French", config.build_system_prompt(profile))
+        specialist_prompt = config.specialist_system_prompt("You are a tester.")
+        self.assertNotIn("Lina", specialist_prompt)
+        self.assertNotIn("Paris", specialist_prompt)
+        self.assertNotIn("Preferred language:", specialist_prompt)
 
     def test_voice_turn_instruction_is_mandatory_and_not_saved_in_history(self):
         db.init()
@@ -551,19 +595,28 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertFalse(email_tools["search_emails"]["requires_confirmation"])
         self.assertTrue(email_tools["send_email"]["requires_confirmation"])
 
+        agent_key = f"mcp:{email['id']}"
         with self.assertRaisesRegex(ValueError, "require confirmation"):
-            db.update_heartbeat_settings(
+            db.create_heartbeat_task(
+                name="Unsafe email",
+                instructions="Send email.",
+                selected_agents=[agent_key],
                 selected_tools=[
-                    {"subagent_id": email["id"], "tool_name": "send_email"}
-                ]
+                    {"agent_key": agent_key, "tool_name": "send_email"}
+                ],
             )
-        db.update_heartbeat_settings(
+        task = db.create_heartbeat_task(
+            name="Email watch",
+            instructions="Find new email.",
+            selected_agents=[agent_key],
             selected_tools=[
-                {"subagent_id": email["id"], "tool_name": "search_emails"}
-            ]
+                {"agent_key": agent_key, "tool_name": "search_emails"}
+            ],
         )
         target = next(
-            item for item in db.get_heartbeat_targets() if item["id"] == email["id"]
+            item
+            for item in db.get_heartbeat_targets(task["id"])
+            if item["id"] == email["id"]
         )
         self.assertEqual(target["allowed_tools"], ["search_emails"])
 
@@ -694,15 +747,10 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertTrue(task["enabled"])
         self.assertIsNotNone(task["next_run_at"])
 
-    def test_multi_record_migration_runs_once_and_preserves_deletion(self):
+    def test_legacy_general_heartbeat_is_not_migrated_as_a_task(self):
         db.init()
-        tasks = db.list_heartbeat_tasks()
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0]["name"], "General heartbeat")
-        self.assertTrue(db.delete_heartbeat_task(tasks[0]["id"]))
-
+        self.assertEqual(db.list_heartbeat_tasks(), [])
         db.init()
-
         self.assertEqual(db.list_heartbeat_tasks(), [])
 
     def test_heartbeat_includes_builtins_and_defaults_to_their_safe_tools(self):
@@ -719,37 +767,32 @@ class DatabaseTests(TemporaryDatabaseTest):
             tool["name"]: tool
             for tool in capabilities["builtin:system"]["tools"]
         }
-        self.assertTrue(system_tools["system_status"]["selected"])
         self.assertFalse(system_tools["system_status"]["requires_confirmation"])
-        self.assertFalse(system_tools["set_volume"]["selected"])
         self.assertTrue(system_tools["set_volume"]["requires_confirmation"])
 
         with self.assertRaisesRegex(ValueError, "require confirmation"):
-            db.update_heartbeat_settings(
+            db.create_heartbeat_task(
+                name="Unsafe system task",
+                instructions="Change volume.",
+                selected_agents=["builtin:system"],
                 selected_tools=[
                     {"agent_key": "builtin:system", "tool_name": "set_volume"}
-                ]
+                ],
             )
-        db.update_heartbeat_settings(
+        task = db.create_heartbeat_task(
+            name="System watch",
+            instructions="Check system state.",
+            selected_agents=["builtin:system"],
             selected_tools=[
                 {"agent_key": "builtin:system", "tool_name": "system_status"}
-            ]
+            ],
         )
         target = next(
             item
-            for item in db.get_heartbeat_targets()
+            for item in db.get_heartbeat_targets(task["id"])
             if item["id"] == "builtin:system"
         )
         self.assertEqual(target["allowed_tools"], ["system_status"])
-        saved_capabilities = {
-            agent["key"]: agent for agent in db.get_heartbeat_capabilities()
-        }
-        self.assertFalse(
-            any(
-                tool["selected"]
-                for tool in saved_capabilities["builtin:media"]["tools"]
-            )
-        )
 
     def test_builtin_confirmation_rules_are_persisted_and_drive_safety(self):
         db.init()
@@ -1202,7 +1245,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             patch.object(llm_mod.requests, "post", side_effect=responses) as post,
             patch.object(llm_mod.time, "sleep"),
             self.assertRaisesRegex(
-                llm_mod.OllamaError,
+                llm_mod.ModelError,
                 "provider's model deployment is temporarily degraded",
             ),
         ):
@@ -1290,22 +1333,6 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(calls[0]["model"], config.SYSTEM_MODEL)
         set_volume.assert_not_called()
 
-    def test_heartbeat_runner_dispatches_selected_builtin(self):
-        db.init()
-        db.update_heartbeat_settings(
-            selected_tools=[
-                {"agent_key": "builtin:media", "tool_name": "find_files"}
-            ]
-        )
-        with patch.object(
-            heartbeat_mod.builtin_agents, "run", return_value="HEARTBEAT_OK"
-        ) as run_builtin:
-            self.assertEqual(heartbeat_mod.run_once(), ("quiet", ""))
-
-        run_builtin.assert_called_once()
-        self.assertEqual(run_builtin.call_args.args[0], "media")
-        self.assertEqual(run_builtin.call_args.args[2], ["find_files"])
-
     def test_heartbeat_task_is_read_by_scoped_mounir_supervisor(self):
         db.init()
         task = db.create_heartbeat_task(
@@ -1321,6 +1348,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         class FakeAgent:
             def __init__(self, conversation, scoped_targets):
                 observed["targets"] = scoped_targets
+                observed["system_prompt"] = conversation.system_prompt
                 self.conversation = conversation
 
             def respond(self, prompt):
@@ -1335,8 +1363,17 @@ class DatabaseTests(TemporaryDatabaseTest):
             )
 
         self.assertIn("Check whether the computer", observed["prompt"])
+        self.assertEqual(
+            observed["system_prompt"],
+            heartbeat_mod.HEARTBEAT_SUPERVISOR_PROMPT.strip(),
+        )
+        self.assertNotIn("private local AI assistant", observed["system_prompt"])
         self.assertEqual(observed["targets"][0]["builtin_key"], "system")
         self.assertEqual(observed["targets"][0]["allowed_tools"], ["system_status"])
+        self.assertIn(
+            "only the supervisor",
+            observed["targets"][0]["task_prompt"].lower(),
+        )
         scoped_graph = langgraph_agent._compile_graph(
             config.MODEL, True, observed["targets"]
         )
@@ -1346,16 +1383,26 @@ class DatabaseTests(TemporaryDatabaseTest):
 
     def test_heartbeat_notifications_only_include_alerts(self):
         db.init()
-        quiet_run = db.begin_heartbeat_run("scheduled")
-        db.finish_heartbeat_run(quiet_run, status="quiet")
-        alert_run = db.begin_heartbeat_run("scheduled")
-        db.finish_heartbeat_run(
-            alert_run,
+        task = db.create_heartbeat_task(
+            name="System watch",
+            instructions="Check system state.",
+            selected_agents=["builtin:system"],
+            selected_tools=[
+                {"agent_key": "builtin:system", "tool_name": "system_status"}
+            ],
+        )
+        quiet_run = db.begin_heartbeat_task_run(task["id"], "scheduled")
+        db.finish_heartbeat_task_run(task["id"], quiet_run, status="quiet")
+        alert_run = db.begin_heartbeat_task_run(task["id"], "scheduled")
+        db.finish_heartbeat_task_run(
+            task["id"], alert_run,
             status="alert",
             message="An important update is available.",
         )
-        error_run = db.begin_heartbeat_run("manual")
-        db.finish_heartbeat_run(error_run, status="error", error="Unavailable")
+        error_run = db.begin_heartbeat_task_run(task["id"], "manual")
+        db.finish_heartbeat_task_run(
+            task["id"], error_run, status="error", error="Unavailable"
+        )
 
         notifications = db.list_heartbeat_notifications()
 
@@ -1374,58 +1421,39 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertEqual(db.list_heartbeat_notifications(), [])
         self.assertFalse(db.delete_heartbeat_notification(alert_run))
 
-    def test_heartbeat_runner_suppresses_quiet_checks_and_persists_alerts(self):
+    def test_heartbeat_task_service_persists_alerts_and_schedules_due_tasks(self):
         db.init()
-        email = self._create_email_fixture()
-        db.save_server_tools(
-            email["mcp_server_id"],
-            [{"name": "search_emails", "description": "Read email", "input_schema": {}}],
-        )
-        db.update_heartbeat_settings(
-            instructions="Tell me about urgent unread email.",
+        task = db.create_heartbeat_task(
+            name="System watch",
+            instructions="Check system state.",
+            enabled=True,
+            interval_minutes=30,
+            selected_agents=["builtin:system"],
             selected_tools=[
-                {"subagent_id": email["id"], "tool_name": "search_emails"}
+                {"agent_key": "builtin:system", "tool_name": "system_status"}
             ],
         )
-
-        with patch.object(heartbeat_mod, "run_mcp_agent", return_value="HEARTBEAT_OK"):
-            self.assertEqual(heartbeat_mod.run_once(), ("quiet", ""))
-        with patch.object(
-            heartbeat_mod,
-            "run_mcp_agent",
-            return_value="An urgent unread message arrived from Lina.",
-        ):
-            status, message = heartbeat_mod.run_once()
-        self.assertEqual(status, "alert")
-        self.assertIn("Email: An urgent unread message", message)
-        with patch.object(
-            heartbeat_mod,
-            "run_mcp_agent",
-            return_value="An urgent unread message arrived from Lina.",
-        ):
-            self.assertEqual(heartbeat_mod.run_once(), ("quiet", ""))
 
         notices = []
 
         async def exercise_service():
-            async def notify(text):
-                notices.append(text)
+            async def notify(text, saved_task):
+                notices.append((text, saved_task["id"]))
 
             service = heartbeat_mod.HeartbeatService(
-                notify, runner=lambda: ("alert", "Important update")
+                notify, runner=lambda task_id: ("alert", f"Update for {task_id}")
             )
-            state = await service.run_now()
+            state = await service.run_now(task["id"])
             self.assertEqual(state["last_status"], "alert")
 
         asyncio.run(exercise_service())
-        self.assertEqual(notices, ["Important update"])
-        self.assertEqual(db.list_heartbeat_runs()[0]["status"], "alert")
+        self.assertEqual(notices, [(f"Update for {task['id']}", task["id"])])
+        self.assertEqual(db.list_heartbeat_task_runs(task["id"])[0]["status"], "alert")
 
-        db.update_heartbeat_settings(enabled=True, interval_minutes=30)
         with db._connect() as conn:
             conn.execute(
-                "UPDATE heartbeat_settings SET next_run_at = ? WHERE id = 1",
-                ("2000-01-01T00:00:00+00:00",),
+                "UPDATE heartbeat_tasks SET next_run_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", task["id"]),
             )
             conn.commit()
         scheduled_calls = []
@@ -1436,7 +1464,9 @@ class DatabaseTests(TemporaryDatabaseTest):
 
             service = heartbeat_mod.HeartbeatService(
                 notify,
-                runner=lambda: (scheduled_calls.append(True) or ("quiet", "")),
+                runner=lambda task_id: (
+                    scheduled_calls.append(task_id) or ("quiet", "")
+                ),
             )
             await service.start()
             for _ in range(20):
@@ -1446,8 +1476,10 @@ class DatabaseTests(TemporaryDatabaseTest):
             await service.stop()
 
         asyncio.run(exercise_scheduler())
-        self.assertEqual(scheduled_calls, [True])
-        self.assertEqual(db.list_heartbeat_runs()[0]["trigger"], "scheduled")
+        self.assertEqual(scheduled_calls, [task["id"]])
+        self.assertEqual(
+            db.list_heartbeat_task_runs(task["id"])[0]["trigger"], "scheduled"
+        )
 
     def test_existing_database_is_migrated(self):
         with sqlite3.connect(db.DB_PATH) as conn:
@@ -1569,19 +1601,13 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertIsNotNone(voice_settings_table)
         self.assertTrue(
             {
-                "heartbeat_settings", "heartbeat_tools", "heartbeat_runs",
-                "heartbeat_agent_state", "heartbeat_builtin_tools",
-                "heartbeat_builtin_agent_state", "heartbeat_agent_preferences",
+                "heartbeat_tasks", "heartbeat_task_agents",
+                "heartbeat_task_tools", "heartbeat_task_agent_state",
+                "heartbeat_runs",
             }
             <= heartbeat_tables
         )
-        self.assertTrue(
-            {
-                "interval_minutes", "instructions", "next_run_at",
-                "last_run_at", "last_status", "last_message", "last_error",
-            }
-            <= heartbeat_columns
-        )
+        self.assertEqual(heartbeat_columns, {"id", "enabled", "updated_at"})
         self.assertTrue(
             {"connection_status", "last_tested_at", "last_error"}
             <= server_columns
@@ -1709,7 +1735,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertIn("  - Worker", supervisor_tree)
         self.assertIn("    - Specialist", supervisor_tree)
         self.assertIn("      - Deep helper", supervisor_tree)
-        self.assertIn("NESTED CAPABILITIES", supervisor_tree)
+        self.assertNotIn("NESTED CAPABILITIES", supervisor_tree)
         self.assertEqual(
             supervisor_tree.count("Worker — Handles repositories."), 1
         )
@@ -2064,7 +2090,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertNotIn("delegate_to_media", advertised)
         run_media.assert_not_called()
         with self.assertRaisesRegex(ValueError, "inactive"):
-            heartbeat_mod.builtin_agents.run(
+            builtin_agents.run(
                 "media", "Inspect media", ["find_files"]
             )
         stale_state = {
@@ -2087,10 +2113,13 @@ class DatabaseTests(TemporaryDatabaseTest):
             langgraph_agent._media(stale_state)
         stale_media.assert_not_called()
         with self.assertRaisesRegex(ValueError, "unavailable"):
-            langgraph_agent.db.update_heartbeat_settings(
+            db.create_heartbeat_task(
+                name="Inactive media",
+                instructions="Inspect media.",
+                selected_agents=["builtin:media"],
                 selected_tools=[
                     {"agent_key": "builtin:media", "tool_name": "find_files"}
-                ]
+                ],
             )
 
         db.update_builtin_agent("media", enabled=True)
@@ -2104,11 +2133,15 @@ class DatabaseTests(TemporaryDatabaseTest):
             agent["mcp_server_id"],
             [{"name": "search_emails", "description": "Read email", "input_schema": {}}],
         )
-        selection = [
-            {"subagent_id": agent["id"], "tool_name": "search_emails"}
-        ]
-        db.update_heartbeat_settings(selected_tools=selection)
-        self.assertEqual(len(db.get_heartbeat_targets()), 1)
+        agent_key = f"mcp:{agent['id']}"
+        selection = [{"agent_key": agent_key, "tool_name": "search_emails"}]
+        task = db.create_heartbeat_task(
+            name="Email watch",
+            instructions="Search email.",
+            selected_agents=[agent_key],
+            selected_tools=selection,
+        )
+        self.assertEqual(len(db.get_heartbeat_targets(task["id"])), 1)
 
         db.update_subagent(agent["id"], enabled=False)
         self.assertFalse(
@@ -2117,12 +2150,17 @@ class DatabaseTests(TemporaryDatabaseTest):
                 for item in db.get_heartbeat_capabilities()
             )
         )
-        self.assertEqual(db.get_heartbeat_targets(), [])
+        self.assertEqual(db.get_heartbeat_targets(task["id"]), [])
         with self.assertRaisesRegex(ValueError, "unavailable"):
-            db.update_heartbeat_settings(selected_tools=selection)
+            db.create_heartbeat_task(
+                name="Disabled email watch",
+                instructions="Search email.",
+                selected_agents=[agent_key],
+                selected_tools=selection,
+            )
 
         db.update_subagent(agent["id"], enabled=True)
-        self.assertEqual(len(db.get_heartbeat_targets()), 1)
+        self.assertEqual(len(db.get_heartbeat_targets(task["id"])), 1)
 
     def test_fresh_graph_has_no_automatic_dynamic_agents(self):
         from mounir.langgraph_agent import build_graph
@@ -2134,6 +2172,47 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertNotIn("mcp_researcher", node_names)
         self.assertNotIn("email", node_names)
         self.assertNotIn("researcher", node_names)
+
+    def test_repeated_nested_agent_description_is_shown_only_once(self):
+        specs = [
+            {"id": 1, "node_id": 10, "name": "Alpha", "parent_node_id": None},
+            {"id": 2, "node_id": 20, "name": "Beta", "parent_node_id": None},
+            {
+                "id": 3,
+                "node_id": 30,
+                "name": "Shared helper",
+                "description": "Handles shared work.",
+                "parent_node_id": 10,
+            },
+            {
+                "id": 3,
+                "node_id": 31,
+                "name": "Shared helper",
+                "description": "Handles shared work.",
+                "parent_node_id": 20,
+            },
+        ]
+
+        prompt = mcp_agents.subagent_tree_prompt(specs)
+
+        self.assertEqual(prompt.count("Shared helper — Handles shared work."), 1)
+        self.assertEqual(
+            sum(line.strip() == "- Shared helper" for line in prompt.splitlines()),
+            1,
+        )
+
+    def test_direct_only_subagents_do_not_add_a_redundant_tree_prompt(self):
+        specs = [
+            {
+                "id": 1,
+                "node_id": 10,
+                "name": "Direct helper",
+                "description": "Handles direct work.",
+                "parent_node_id": None,
+            }
+        ]
+
+        self.assertEqual(mcp_agents.subagent_tree_prompt(specs), "")
 
     def test_typed_tools_generate_schemas_and_toolnode_executes_supervisor_calls(self):
         db.init()
@@ -2272,6 +2351,31 @@ class DatabaseTests(TemporaryDatabaseTest):
 
 
 class TransportTests(unittest.TestCase):
+    def test_cli_health_check_uses_the_database_selected_compatible_model(self):
+        response = Mock(ok=True)
+        runtime = {
+            "model": "configured-model",
+            "base_url": "https://models.example.test/v1/chat/completions",
+            "api_key": "configured-key",
+        }
+        with (
+            patch.object(db, "init"),
+            patch.object(db, "get_supervisor_runtime", return_value=runtime),
+            patch.object(llm_mod.requests, "get", return_value=response) as get,
+        ):
+            self.assertTrue(llm_mod.is_up())
+            self.assertEqual(llm_mod.active_model("fallback"), "configured-model")
+
+        get.assert_called_once_with(
+            "https://models.example.test/v1/models",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": "Bearer configured-key",
+            },
+            timeout=5,
+        )
+
     def test_dynamic_decline_stops_before_a_second_specialist_model_call(self):
         class Tool:
             name = "get_me"
@@ -2742,15 +2846,14 @@ class TransportTests(unittest.TestCase):
             for message in observed_messages["parent-model"]
             if message["role"] == "system"
         )
-        self.assertIn("AVAILABLE SUBAGENTS", parent_system)
-        self.assertIn("- Worker", parent_system)
+        self.assertNotIn("SUBAGENT TREE", parent_system)
         self.assertNotIn("Worker — Completes focused tasks.", parent_system)
         child_system = "\n".join(
             message["content"]
             for message in observed_messages["child-model"]
             if message["role"] == "system"
         )
-        self.assertNotIn("AVAILABLE SUBAGENTS", child_system)
+        self.assertNotIn("SUBAGENT TREE", child_system)
 
     def test_restricted_mcp_run_hides_and_blocks_unselected_tools(self):
         called = []
@@ -2855,22 +2958,48 @@ class TransportTests(unittest.TestCase):
         self.assertIn("do not retry", result)
 
     def test_all_specialists_share_the_capability_boundary(self):
-        profile = {
-            "user_name": "Lina",
-            "assistant_name": "Atlas",
-            "preferred_language": "auto",
-        }
-        dynamic_prompt = _system_prompt("Use the echo tool.", profile)
-        builtin_prompt = config.specialist_system_prompt("You are a tester.", profile)
+        dynamic_prompt = _system_prompt("Use the echo tool.")
+        builtin_prompt = config.specialist_system_prompt("You are a tester.")
 
-        self.assertIn("Use only relevant tools", dynamic_prompt)
+        self.assertIn("Use only available capabilities", dynamic_prompt)
         self.assertIn(
             "SPECIALIST INSTRUCTIONS\nUse the echo tool.", dynamic_prompt
         )
         for prompt in (dynamic_prompt, builtin_prompt):
+            self.assertIn(config.SUBAGENT_SHARED_PROMPT.strip(), prompt)
             self.assertIn(config.SUBAGENT_CAPABILITY_PROMPT.strip(), prompt)
             self.assertIn("I can't complete this request", prompt)
-            self.assertIn("Assistant name: Atlas", prompt)
+            self.assertNotIn("CONFIGURED USER CONTEXT", prompt)
+            self.assertNotIn("Preferred language:", prompt)
+        for prompt in (
+            knowledge_agent.SYSTEM_PROMPT,
+            media_agent.SYSTEM_PROMPT,
+            system_agent.SYSTEM_PROMPT,
+            heartbeat_mod.HEARTBEAT_SUPERVISOR_PROMPT,
+        ):
+            self.assertNotIn("Mounir", prompt)
+        self.assertNotIn("GBRAIN TOOLS", knowledge_agent.SYSTEM_PROMPT)
+        self.assertNotIn("- recall:", knowledge_agent.SYSTEM_PROMPT)
+        self.assertNotIn("Your tools are intentionally broad", media_agent.SYSTEM_PROMPT)
+        self.assertNotIn("- read_file(", media_agent.SYSTEM_PROMPT)
+        self.assertNotIn(
+            "Never claim a memory was read", knowledge_agent.SYSTEM_PROMPT
+        )
+        self.assertNotIn("Never claim a file was created", media_agent.SYSTEM_PROMPT)
+        self.assertNotIn("Never claim a change", system_agent.SYSTEM_PROMPT)
+
+    def test_builtin_system_delegate_schema_disambiguates_media_playback(self):
+        schema = next(
+            item
+            for item in graph_runtime.tool_schemas(mounir_tools.DELEGATE_TOOLS)
+            if item["function"]["name"] == "delegate_to_system"
+        )
+
+        self.assertIn("media playback", schema["function"]["description"])
+        self.assertNotEqual(
+            schema["function"]["description"],
+            "Delegate laptop hardware, connectivity, media, status, or power work.",
+        )
 
     def test_only_selected_tools_require_confirmation(self):
         calls = []
@@ -3367,7 +3496,12 @@ class AdminApiTests(TemporaryDatabaseTest):
             app_secret="app-secret",
         )
         db.pair_whatsapp_phone("21611111111", "Ada")
-        db.update_heartbeat_settings(notify_telegram=True, notify_whatsapp=True)
+        heartbeat_task = {
+            "id": 7,
+            "name": "Channel watch",
+            "notify_telegram": True,
+            "notify_whatsapp": True,
+        }
         web_server.agent.conversation.reset()
         web_server.telegram_agent.conversation.reset()
         web_server.whatsapp_agent.conversation.reset()
@@ -3399,17 +3533,21 @@ class AdminApiTests(TemporaryDatabaseTest):
             ) as send_whatsapp_notification,
             patch.object(web_server.asyncio, "to_thread", side_effect=run_inline),
         ):
-            asyncio.run(web_server._deliver_heartbeat_alert("Important update"))
+            asyncio.run(
+                web_server._deliver_heartbeat_alert(
+                    "Important update", heartbeat_task
+                )
+            )
 
         send_notification.assert_called_once_with(
-            "Heartbeat update\n\nImportant update"
+            "Heartbeat update — Channel watch\n\nImportant update"
         )
         send_whatsapp_notification.assert_called_once_with(
-            "Heartbeat update\n\nImportant update"
+            "Heartbeat update — Channel watch\n\nImportant update"
         )
         expected = [{
             "role": "assistant",
-            "content": "Heartbeat update\n\nImportant update",
+            "content": "Heartbeat update — Channel watch\n\nImportant update",
         }]
         self.assertEqual(web_server.agent.conversation.display_messages(), expected)
         self.assertEqual(
@@ -3427,9 +3565,17 @@ class AdminApiTests(TemporaryDatabaseTest):
         import server as web_server
 
         db.init()
-        run_id = db.begin_heartbeat_run("scheduled")
-        db.finish_heartbeat_run(
-            run_id,
+        task = db.create_heartbeat_task(
+            name="Saved notifications",
+            instructions="Check system state.",
+            selected_agents=["builtin:system"],
+            selected_tools=[
+                {"agent_key": "builtin:system", "tool_name": "system_status"}
+            ],
+        )
+        run_id = db.begin_heartbeat_task_run(task["id"], "scheduled")
+        db.finish_heartbeat_task_run(
+            task["id"], run_id,
             status="alert",
             message="A saved heartbeat notification.",
         )
@@ -3730,14 +3876,18 @@ class AdminApiTests(TemporaryDatabaseTest):
 
                 heartbeat_response = await client.get("/api/heartbeat")
                 self.assertEqual(heartbeat_response.status_code, 200)
-                self.assertEqual(heartbeat_response.json()["enabled"], False)
-                protected_heartbeat = await client.put(
-                    "/api/heartbeat",
+                self.assertEqual(heartbeat_response.json()["tasks"], [])
+                self.assertNotIn("enabled", heartbeat_response.json())
+                agent_key = f"mcp:{agent_response.json()['id']}"
+                protected_heartbeat = await client.post(
+                    "/api/heartbeat/tasks",
                     json={
-                        "enabled": False,
+                        "name": "Protected echo",
+                        "instructions": "Check echo.",
+                        "selected_agents": [agent_key],
                         "selected_tools": [
                             {
-                                "subagent_id": agent_response.json()["id"],
+                                "agent_key": agent_key,
                                 "tool_name": "echo",
                             }
                         ],
@@ -3749,15 +3899,17 @@ class AdminApiTests(TemporaryDatabaseTest):
                     json={"confirm_tools": []},
                 )
                 self.assertEqual(safe_agent.status_code, 200)
-                heartbeat_update = await client.put(
-                    "/api/heartbeat",
+                heartbeat_update = await client.post(
+                    "/api/heartbeat/tasks",
                     json={
+                        "name": "Echo watch",
                         "enabled": True,
                         "interval_minutes": 15,
                         "instructions": "Check the echo service for important updates.",
+                        "selected_agents": [agent_key],
                         "selected_tools": [
                             {
-                                "subagent_id": agent_response.json()["id"],
+                                "agent_key": agent_key,
                                 "tool_name": "echo",
                             }
                         ],
@@ -3766,18 +3918,14 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(heartbeat_update.status_code, 200)
                 self.assertEqual(heartbeat_update.json()["enabled"], True)
                 self.assertEqual(heartbeat_update.json()["interval_minutes"], 15)
-                echo_capability = next(
-                    item
-                    for item in heartbeat_update.json()["capabilities"]
-                    if item["id"] == agent_response.json()["id"]
-                )
-                self.assertTrue(echo_capability["tools"][0]["selected"])
                 with patch.object(
                     web_server.heartbeat_service,
                     "_runner",
-                    return_value=("quiet", ""),
+                    side_effect=lambda _task_id: ("quiet", ""),
                 ):
-                    heartbeat_run = await client.post("/api/heartbeat/run")
+                    heartbeat_run = await client.post(
+                        f"/api/heartbeat/tasks/{heartbeat_update.json()['id']}/run"
+                    )
                 self.assertEqual(heartbeat_run.status_code, 200)
                 self.assertEqual(heartbeat_run.json()["last_status"], "quiet")
                 self.assertEqual(
@@ -4205,7 +4353,7 @@ class InterfaceRoutingTests(unittest.TestCase):
             for message in observed["messages"]
             if message.type == "system"
         )
-        self.assertIn("AVAILABLE SUBAGENTS", system_text)
+        self.assertIn("SUBAGENT TREE", system_text)
         self.assertIn("- GitHub", system_text)
         self.assertNotIn("GitHub — Handles repositories.", system_text)
         self.assertIn("  - Deployment", system_text)

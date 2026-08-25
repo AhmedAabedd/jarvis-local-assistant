@@ -45,10 +45,6 @@ MCP_CREDENTIAL_FILE_LIMIT = 2 * 1024 * 1024
 MCP_CREDENTIAL_FILE_COUNT = 10
 MAX_SUBAGENT_DEPTH = 4
 _UNSET = object()
-HEARTBEAT_DEFAULT_INSTRUCTIONS = (
-    "Check my connected services for new items that genuinely need my attention. "
-    "Ignore routine or unchanged information."
-)
 
 
 @dataclass(frozen=True)
@@ -486,41 +482,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS heartbeat_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
-            interval_minutes INTEGER NOT NULL DEFAULT 30,
-            instructions TEXT NOT NULL DEFAULT '',
-            next_run_at TEXT,
-            last_run_at TEXT,
-            last_status TEXT NOT NULL DEFAULT 'never',
-            last_message TEXT NOT NULL DEFAULT '',
-            last_error TEXT NOT NULL DEFAULT '',
-            notify_telegram INTEGER NOT NULL DEFAULT 1 CHECK (notify_telegram IN (0, 1)),
-            notify_whatsapp INTEGER NOT NULL DEFAULT 0 CHECK (notify_whatsapp IN (0, 1)),
-            updated_at TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS heartbeat_tools (
-            subagent_id INTEGER NOT NULL
-                REFERENCES subagents(id) ON DELETE CASCADE,
-            tool_name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (subagent_id, tool_name)
-        );
-
-        CREATE TABLE IF NOT EXISTS heartbeat_builtin_tools (
-            builtin_key TEXT NOT NULL,
-            tool_name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (builtin_key, tool_name)
-        );
-
-        CREATE TABLE IF NOT EXISTS heartbeat_agent_preferences (
-            agent_key TEXT PRIMARY KEY,
-            configured_at TEXT NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS heartbeat_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -579,19 +540,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             message TEXT NOT NULL DEFAULT '',
             error TEXT NOT NULL DEFAULT '',
             notification_read_at TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS heartbeat_agent_state (
-            subagent_id INTEGER PRIMARY KEY
-                REFERENCES subagents(id) ON DELETE CASCADE,
-            last_report TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS heartbeat_builtin_agent_state (
-            builtin_key TEXT PRIMARY KEY,
-            last_report TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_started
@@ -677,8 +625,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 if os.environ.get("MOUNIR_STT_API_KEY")
                 else "$GROQ_API_KEY"
                 if cfg.STT_BACKEND == "groq" and os.environ.get("GROQ_API_KEY")
-                else "$OPENAI_API_KEY"
-                if os.environ.get("OPENAI_API_KEY")
                 else ""
             ),
             cfg.WHISPER_LANGUAGE or "auto",
@@ -705,21 +651,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 else "$MOUNIR_TTS_API_KEY"
                 if cfg.TTS_BACKEND == "openai_compatible"
                 and os.environ.get("MOUNIR_TTS_API_KEY")
-                else "$OPENAI_API_KEY"
-                if cfg.TTS_BACKEND == "openai_compatible"
-                and os.environ.get("OPENAI_API_KEY")
                 else ""
             ),
             cfg.GOOGLE_TTS_LANGUAGE,
             _now(),
         ),
-    )
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO heartbeat_settings (id, enabled, updated_at)
-        VALUES (1, 0, ?)
-        """,
-        (_now(),),
     )
     conn.executemany(
         """
@@ -807,17 +743,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "enabled_tools": "TEXT",
             "workflow_id": "INTEGER REFERENCES workflows(id) ON DELETE CASCADE",
             "position": "INTEGER NOT NULL DEFAULT 0",
-        },
-        "heartbeat_settings": {
-            "interval_minutes": "INTEGER NOT NULL DEFAULT 30",
-            "instructions": "TEXT NOT NULL DEFAULT ''",
-            "next_run_at": "TEXT",
-            "last_run_at": "TEXT",
-            "last_status": "TEXT NOT NULL DEFAULT 'never'",
-            "last_message": "TEXT NOT NULL DEFAULT ''",
-            "last_error": "TEXT NOT NULL DEFAULT ''",
-            "notify_telegram": "INTEGER NOT NULL DEFAULT 1 CHECK (notify_telegram IN (0, 1))",
-            "notify_whatsapp": "INTEGER NOT NULL DEFAULT 0 CHECK (notify_whatsapp IN (0, 1))",
         },
         "heartbeat_tasks": {
             "execution_limit": "INTEGER NOT NULL DEFAULT -1",
@@ -1065,82 +990,35 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             (node_migration_key, _now()),
         )
     _enable_reusable_subagent_placements(conn)
-    conn.execute(
-        """
-        UPDATE heartbeat_settings SET instructions = ?
-        WHERE instructions IS NULL OR trim(instructions) = ''
-        """,
-        (HEARTBEAT_DEFAULT_INSTRUCTIONS,),
-    )
-    # Preserve the former single heartbeat as the first task exactly once.
-    # Later deletions must remain deleted, so the marker—not an empty table—is
-    # what controls this migration.
+    # The former singleton heartbeat is obsolete. Mark new installations as
+    # migrated without creating a visible "General heartbeat" task.
     heartbeat_tasks_migration = "heartbeat_tasks_multi_record_v1"
-    if conn.execute(
+    heartbeat_tasks_marker = conn.execute(
         "SELECT 1 FROM app_meta WHERE key = ?", (heartbeat_tasks_migration,)
-    ).fetchone() is None:
-        legacy = conn.execute(
-            "SELECT * FROM heartbeat_settings WHERE id = 1"
-        ).fetchone()
-        now = _now()
-        cur = conn.execute(
-            """
-            INSERT INTO heartbeat_tasks (
-                name, enabled, interval_minutes, instructions, next_run_at,
-                last_run_at, last_status, last_message, last_error,
-                notify_telegram, notify_whatsapp, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "General heartbeat",
-                int(legacy["enabled"]),
-                int(legacy["interval_minutes"] or 30),
-                legacy["instructions"] or HEARTBEAT_DEFAULT_INSTRUCTIONS,
-                legacy["next_run_at"],
-                legacy["last_run_at"],
-                legacy["last_status"] or "never",
-                legacy["last_message"] or "",
-                legacy["last_error"] or "",
-                int(legacy["notify_telegram"]),
-                int(legacy["notify_whatsapp"]),
-                now,
-                legacy["updated_at"] or now,
-            ),
-        )
-        task_id = int(cur.lastrowid)
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO heartbeat_task_agents (task_id, agent_key, created_at)
-            SELECT ?, 'mcp:' || subagent_id, created_at FROM heartbeat_tools
-            """,
-            (task_id,),
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO heartbeat_task_agents (task_id, agent_key, created_at)
-            SELECT ?, builtin_key, created_at FROM heartbeat_builtin_tools
-            """,
-            (task_id,),
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO heartbeat_task_tools
-                (task_id, agent_key, tool_name, created_at)
-            SELECT ?, 'mcp:' || subagent_id, tool_name, created_at FROM heartbeat_tools
-            """,
-            (task_id,),
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO heartbeat_task_tools
-                (task_id, agent_key, tool_name, created_at)
-            SELECT ?, builtin_key, tool_name, created_at FROM heartbeat_builtin_tools
-            """,
-            (task_id,),
-        )
+    ).fetchone()
+    if heartbeat_tasks_marker is None:
         conn.execute(
             "INSERT INTO app_meta (key, value) VALUES (?, ?)",
-            (heartbeat_tasks_migration, str(task_id)),
+            (heartbeat_tasks_migration, "removed"),
+        )
+    # Remove the automatically migrated singleton from existing installations.
+    # Its recorded ID distinguishes it from user-created heartbeat tasks.
+    remove_legacy_heartbeat = "heartbeat_remove_legacy_general_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?", (remove_legacy_heartbeat,)
+    ).fetchone() is None:
+        migrated = conn.execute(
+            "SELECT value FROM app_meta WHERE key = ?", (heartbeat_tasks_migration,)
+        ).fetchone()
+        try:
+            migrated_task_id = int(migrated["value"])
+        except (TypeError, ValueError):
+            migrated_task_id = None
+        if migrated_task_id is not None:
+            conn.execute("DELETE FROM heartbeat_tasks WHERE id = ?", (migrated_task_id,))
+        conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+            (remove_legacy_heartbeat, _now()),
         )
     # Earlier versions inferred every URL as legacy SSE and had no transport
     # column. A URL cannot be a valid stdio command, so migrate it to the
@@ -1538,20 +1416,6 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
 
 
 def _active_supervisor_model_defaults() -> dict:
-    if cfg.USE_MISTRAL:
-        return {
-            "provider": "Mistral",
-            "model": cfg.MISTRAL_MODEL,
-            "base_url": cfg.MISTRAL_BASE_URL,
-            "api_key": "$MISTRAL_API_KEY",
-        }
-    if cfg.USE_GROQ:
-        return {
-            "provider": "Groq",
-            "model": cfg.GROQ_MODEL,
-            "base_url": cfg.GROQ_BASE_URL,
-            "api_key": "$GROQ_API_KEY",
-        }
     return {
         "provider": "Ollama (local)",
         "model": cfg.MODEL,
@@ -2529,17 +2393,12 @@ def get_supervisor_runtime(fallback_model: str = "") -> dict:
         }
 
     defaults = _active_supervisor_model_defaults()
-    secret = ""
-    if defaults["provider"] == "Mistral":
-        secret = cfg.MISTRAL_API_KEY
-    elif defaults["provider"] == "Groq":
-        secret = cfg.GROQ_API_KEY
     return {
         "model_id": None,
         "model": defaults["model"] or fallback_model,
         "provider": defaults["provider"],
         "base_url": defaults["base_url"],
-        "api_key": secret,
+        "api_key": "",
     }
 
 
@@ -3129,40 +2988,6 @@ def enabled_builtin_agent_keys() -> set[str]:
 # Heartbeat configuration
 # -----------------------------------------------------------------------------
 
-def get_heartbeat_settings() -> dict:
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM heartbeat_settings WHERE id = 1"
-        ).fetchone()
-    if row is None:
-        return {
-            "enabled": False,
-            "interval_minutes": 30,
-            "instructions": HEARTBEAT_DEFAULT_INSTRUCTIONS,
-            "next_run_at": None,
-            "last_run_at": None,
-            "last_status": "never",
-            "last_message": "",
-            "last_error": "",
-            "notify_telegram": True,
-            "notify_whatsapp": False,
-            "updated_at": None,
-        }
-    return {
-        "enabled": bool(row["enabled"]),
-        "interval_minutes": int(row["interval_minutes"] or 30),
-        "instructions": row["instructions"] or HEARTBEAT_DEFAULT_INSTRUCTIONS,
-        "next_run_at": row["next_run_at"],
-        "last_run_at": row["last_run_at"],
-        "last_status": row["last_status"] or "never",
-        "last_message": row["last_message"] or "",
-        "last_error": row["last_error"] or "",
-        "notify_telegram": bool(row["notify_telegram"]),
-        "notify_whatsapp": bool(row["notify_whatsapp"]),
-        "updated_at": row["updated_at"],
-    }
-
-
 def _heartbeat_mcp_tools(conn: sqlite3.Connection) -> dict[int, list[dict]]:
     """Return definition-granted cached tools with stable cross-server keys."""
     grouped: dict[int, list[dict]] = {}
@@ -3227,184 +3052,6 @@ def _canonical_heartbeat_tool(agent: dict, tool_name: str) -> str | None:
         return tool_name
     matches = agent.get("aliases", {}).get(tool_name, [])
     return matches[0] if len(matches) == 1 else None
-
-
-def update_heartbeat_settings(
-    *,
-    enabled: bool | None = None,
-    interval_minutes: int | None = None,
-    instructions: str | None = None,
-    selected_tools: list[dict] | None = None,
-    notify_telegram: bool | None = None,
-    notify_whatsapp: bool | None = None,
-) -> dict:
-    if enabled is not None and not isinstance(enabled, bool):
-        raise ValueError("enabled must be true or false")
-    if interval_minutes is not None:
-        if isinstance(interval_minutes, bool) or not isinstance(interval_minutes, int):
-            raise ValueError("interval must be a whole number of minutes")
-        if not 5 <= interval_minutes <= 1440:
-            raise ValueError("interval must be between 5 and 1440 minutes")
-    if instructions is not None:
-        instructions = str(instructions or "").strip()
-        if not instructions:
-            raise ValueError("heartbeat instructions are required")
-        if len(instructions) > 2000:
-            raise ValueError("heartbeat instructions must be 2000 characters or fewer")
-    for field_name, value in (
-        ("notify_telegram", notify_telegram),
-        ("notify_whatsapp", notify_whatsapp),
-    ):
-        if value is not None and not isinstance(value, bool):
-            raise ValueError(f"{field_name} must be true or false")
-
-    normalized_tools: list[tuple[str, str]] | None = None
-    if selected_tools is not None:
-        if not isinstance(selected_tools, list):
-            raise ValueError("selected_tools must be a list")
-        normalized_tools = []
-        seen: set[tuple[str, str]] = set()
-        for entry in selected_tools:
-            if not isinstance(entry, dict):
-                raise ValueError("each heartbeat tool selection must be an object")
-            agent_key = str(entry.get("agent_key") or "").strip()
-            if not agent_key:
-                try:
-                    agent_key = f"mcp:{int(entry.get('subagent_id'))}"
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "heartbeat tool selection has an invalid subagent"
-                    ) from exc
-            tool_name = str(entry.get("tool_name") or "").strip()
-            if not tool_name:
-                raise ValueError("heartbeat tool selection has no tool name")
-            key = (agent_key, tool_name)
-            if key not in seen:
-                seen.add(key)
-                normalized_tools.append(key)
-
-    now = _now()
-    with _connect() as conn:
-        current = conn.execute(
-            "SELECT * FROM heartbeat_settings WHERE id = 1"
-        ).fetchone()
-        active = bool(current["enabled"]) if enabled is None else enabled
-        interval = (
-            int(current["interval_minutes"] or 30)
-            if interval_minutes is None
-            else interval_minutes
-        )
-        if normalized_tools is not None:
-            catalog = _heartbeat_agent_catalog(conn)
-            canonical_tools: list[tuple[str, str]] = []
-            for agent_key, tool_name in normalized_tools:
-                agent = catalog.get(agent_key)
-                canonical = (
-                    _canonical_heartbeat_tool(agent, tool_name)
-                    if agent is not None else None
-                )
-                if canonical is None:
-                    raise ValueError(
-                        "one or more selected heartbeat tools are unavailable"
-                    )
-                canonical_tools.append((agent_key, canonical))
-            normalized_tools = canonical_tools
-            valid = {
-                (agent_key, tool_name)
-                for agent_key, agent in catalog.items()
-                for tool_name in agent["tools"]
-            }
-            confirmation_rules = {
-                agent_key: set(agent["protected"])
-                for agent_key, agent in catalog.items()
-            }
-            active_builtin_keys = enabled_builtin_agent_keys()
-            builtin_capabilities = [
-                agent for agent in _builtin_capabilities_with_confirmation()
-                if agent["builtin_key"] in active_builtin_keys
-            ]
-            for agent in builtin_capabilities:
-                confirmation_rules[agent["key"]] = {
-                    tool["name"]
-                    for tool in agent["tools"]
-                    if tool["requires_confirmation"]
-                }
-                valid.update(
-                    (agent["key"], tool["name"])
-                    for tool in agent["tools"]
-                )
-            unknown = [key for key in normalized_tools if key not in valid]
-            if unknown:
-                raise ValueError("one or more selected heartbeat tools are unavailable")
-            protected = [
-                (agent_key, name)
-                for agent_key, name in normalized_tools
-                if "*" in confirmation_rules.get(agent_key, {"*"})
-                or name in confirmation_rules.get(agent_key, {"*"})
-            ]
-            if protected:
-                raise ValueError(
-                    "tools that require confirmation cannot run in the heartbeat"
-                )
-            conn.execute("DELETE FROM heartbeat_tools")
-            conn.execute("DELETE FROM heartbeat_builtin_tools")
-            conn.executemany(
-                """
-                INSERT INTO heartbeat_tools (subagent_id, tool_name, created_at)
-                VALUES (?, ?, ?)
-                """,
-                [
-                    (int(agent_key.removeprefix("mcp:")), name, now)
-                    for agent_key, name in normalized_tools
-                    if agent_key.startswith("mcp:")
-                ],
-            )
-            conn.executemany(
-                """
-                INSERT INTO heartbeat_builtin_tools
-                    (builtin_key, tool_name, created_at)
-                VALUES (?, ?, ?)
-                """,
-                [
-                    (agent_key, name, now)
-                    for agent_key, name in normalized_tools
-                    if agent_key.startswith("builtin:")
-                ],
-            )
-            conn.executemany(
-                """
-                INSERT INTO heartbeat_agent_preferences (agent_key, configured_at)
-                VALUES (?, ?)
-                ON CONFLICT(agent_key) DO UPDATE SET
-                    configured_at = excluded.configured_at
-                """,
-                [(agent_key, now) for agent_key in confirmation_rules],
-            )
-        fields = {"updated_at": now}
-        if enabled is not None:
-            fields["enabled"] = int(enabled)
-        if interval_minutes is not None:
-            fields["interval_minutes"] = interval_minutes
-        if instructions is not None:
-            fields["instructions"] = instructions
-        if notify_telegram is not None:
-            fields["notify_telegram"] = int(notify_telegram)
-        if notify_whatsapp is not None:
-            fields["notify_whatsapp"] = int(notify_whatsapp)
-        # Saving an active schedule starts a fresh interval; disabling it
-        # removes the due time so a stale wake-up cannot launch a run.
-        fields["next_run_at"] = (
-            (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
-            if active
-            else None
-        )
-        sets = ", ".join(f"{key} = ?" for key in fields)
-        conn.execute(
-            f"UPDATE heartbeat_settings SET {sets} WHERE id = 1",
-            tuple(fields.values()),
-        )
-        conn.commit()
-    return get_heartbeat_settings()
 
 
 def _heartbeat_agent_catalog(conn: sqlite3.Connection) -> dict[str, dict]:
@@ -3820,25 +3467,6 @@ def delete_heartbeat_task(task_id: int) -> bool:
 def get_heartbeat_capabilities() -> list[dict]:
     """Return built-in and cached MCP tools grouped for heartbeat configuration."""
     with _connect() as conn:
-        selected = {
-            (f"mcp:{int(row['subagent_id'])}", row["tool_name"])
-            for row in conn.execute("SELECT subagent_id, tool_name FROM heartbeat_tools")
-        }
-        selected.update(
-            (row["builtin_key"], row["tool_name"])
-            for row in conn.execute(
-                "SELECT builtin_key, tool_name FROM heartbeat_builtin_tools"
-            )
-        )
-        configured = {
-            row["agent_key"]
-            for row in conn.execute(
-                "SELECT agent_key FROM heartbeat_agent_preferences"
-            )
-        }
-        # Preserve the meaning of selections made before per-agent preference
-        # tracking was introduced.
-        configured.update(agent_key for agent_key, _ in selected)
         agents = conn.execute(
             """
             SELECT s.id, s.name, s.description, s.confirm_tools
@@ -3858,12 +3486,6 @@ def get_heartbeat_capabilities() -> list[dict]:
         agent_key = f"mcp:{int(row['id'])}"
         for tool in tools:
             tool["requires_confirmation"] = _heartbeat_rule_matches(protected, tool)
-            tool["selected"] = (
-                (agent_key, tool["name"]) in selected
-                or (agent_key, tool["tool_name"]) in selected
-                if agent_key in configured
-                else not tool["requires_confirmation"]
-            )
         statuses = {tool["connection_status"] for tool in tools}
         result.append(
             {
@@ -3887,62 +3509,37 @@ def get_heartbeat_capabilities() -> list[dict]:
         agent for agent in _builtin_capabilities_with_confirmation()
         if agent["builtin_key"] in active_builtin_keys
     ]
-    for agent in builtins:
-        for tool in agent["tools"]:
-            tool["selected"] = (
-                (agent["key"], tool["name"]) in selected
-                if agent["key"] in configured
-                else not tool["requires_confirmation"]
-            )
     return [*builtins, *result]
 
 
-def get_heartbeat_targets(task_id: int | None = None) -> list[dict]:
+def get_heartbeat_targets(task_id: int) -> list[dict]:
     """Return resolved built-in and MCP specs with selected safe tools only."""
     selected: dict[int, list[str]] = {}
     selected_builtins: dict[str, list[str]] = {}
     resolved_dynamic: dict[int, dict[str, tuple[int, str]]] = {}
     with _connect() as conn:
-        if task_id is None:
-            dynamic_rows = conn.execute(
-                """
-                SELECT ht.subagent_id, ht.tool_name
-                FROM heartbeat_tools ht
-                JOIN subagents s ON s.id = ht.subagent_id
-                WHERE s.enabled = 1
-                ORDER BY ht.subagent_id, ht.tool_name
-                """
-            )
-            builtin_rows = conn.execute(
-                """
-                SELECT builtin_key AS agent_key, tool_name
-                FROM heartbeat_builtin_tools
-                ORDER BY builtin_key, tool_name
-                """
-            )
-        else:
-            dynamic_rows = conn.execute(
-                """
-                SELECT CAST(substr(htt.agent_key, 5) AS INTEGER) AS subagent_id,
-                       htt.tool_name
-                FROM heartbeat_task_tools htt
-                JOIN subagents s
-                  ON s.id = CAST(substr(htt.agent_key, 5) AS INTEGER)
-                WHERE htt.task_id = ? AND htt.agent_key LIKE 'mcp:%'
-                  AND s.enabled = 1
-                ORDER BY htt.agent_key, htt.tool_name
-                """,
-                (int(task_id),),
-            )
-            builtin_rows = conn.execute(
-                """
-                SELECT agent_key, tool_name
-                FROM heartbeat_task_tools
-                WHERE task_id = ? AND agent_key LIKE 'builtin:%'
-                ORDER BY agent_key, tool_name
-                """,
-                (int(task_id),),
-            )
+        dynamic_rows = conn.execute(
+            """
+            SELECT CAST(substr(htt.agent_key, 5) AS INTEGER) AS subagent_id,
+                   htt.tool_name
+            FROM heartbeat_task_tools htt
+            JOIN subagents s
+              ON s.id = CAST(substr(htt.agent_key, 5) AS INTEGER)
+            WHERE htt.task_id = ? AND htt.agent_key LIKE 'mcp:%'
+              AND s.enabled = 1
+            ORDER BY htt.agent_key, htt.tool_name
+            """,
+            (int(task_id),),
+        )
+        builtin_rows = conn.execute(
+            """
+            SELECT agent_key, tool_name
+            FROM heartbeat_task_tools
+            WHERE task_id = ? AND agent_key LIKE 'builtin:%'
+            ORDER BY agent_key, tool_name
+            """,
+            (int(task_id),),
+        )
         for row in dynamic_rows:
             selected.setdefault(int(row["subagent_id"]), []).append(row["tool_name"])
         for row in builtin_rows:
@@ -4055,81 +3652,6 @@ def set_heartbeat_task_agent_report(
         conn.commit()
 
 
-def get_heartbeat_agent_report(subagent_id: int | str) -> str:
-    with _connect() as conn:
-        if isinstance(subagent_id, str) and subagent_id.startswith("builtin:"):
-            row = conn.execute(
-                """
-                SELECT last_report FROM heartbeat_builtin_agent_state
-                WHERE builtin_key = ?
-                """,
-                (subagent_id,),
-            ).fetchone()
-            return (row["last_report"] or "") if row else ""
-        row = conn.execute(
-            "SELECT last_report FROM heartbeat_agent_state WHERE subagent_id = ?",
-            (subagent_id,),
-        ).fetchone()
-    return (row["last_report"] or "") if row else ""
-
-
-def set_heartbeat_agent_report(subagent_id: int | str, report: str) -> None:
-    with _connect() as conn:
-        if isinstance(subagent_id, str) and subagent_id.startswith("builtin:"):
-            conn.execute(
-                """
-                INSERT INTO heartbeat_builtin_agent_state
-                    (builtin_key, last_report, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(builtin_key) DO UPDATE SET
-                    last_report = excluded.last_report,
-                    updated_at = excluded.updated_at
-                """,
-                (subagent_id, str(report or "").strip()[:8000], _now()),
-            )
-            conn.commit()
-            return
-        conn.execute(
-            """
-            INSERT INTO heartbeat_agent_state (subagent_id, last_report, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(subagent_id) DO UPDATE SET
-                last_report = excluded.last_report,
-                updated_at = excluded.updated_at
-            """,
-            (subagent_id, str(report or "").strip()[:8000], _now()),
-        )
-        conn.commit()
-
-
-def begin_heartbeat_run(trigger: str) -> int:
-    started = _now()
-    settings = get_heartbeat_settings()
-    next_run = (
-        datetime.now(timezone.utc)
-        + timedelta(minutes=int(settings["interval_minutes"]))
-    ).isoformat()
-    with _connect() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO heartbeat_runs (trigger, started_at, status)
-            VALUES (?, ?, 'running')
-            """,
-            (trigger, started),
-        )
-        conn.execute(
-            """
-            UPDATE heartbeat_settings
-            SET last_run_at = ?, last_status = 'running', last_message = '',
-                last_error = '', next_run_at = ?
-            WHERE id = 1
-            """,
-            (started, next_run),
-        )
-        conn.commit()
-        return int(cur.lastrowid)
-
-
 def recover_interrupted_heartbeat_runs() -> None:
     """Close runs left in progress by a previous process shutdown or crash."""
     finished = _now()
@@ -4159,53 +3681,7 @@ def recover_interrupted_heartbeat_runs() -> None:
             """,
             (finished, error),
         )
-        conn.execute(
-            """
-            UPDATE heartbeat_settings
-            SET last_status = 'error', last_error = ?
-            WHERE id = 1
-            """,
-            (error,),
-        )
         conn.commit()
-
-
-def finish_heartbeat_run(
-    run_id: int, *, status: str, message: str = "", error: str = ""
-) -> dict:
-    if status not in {"quiet", "alert", "error", "skipped"}:
-        raise ValueError("invalid heartbeat run status")
-    finished = _now()
-    message = str(message or "").strip()[:8000]
-    error = " ".join(str(error or "").split())[:2000]
-    with _connect() as conn:
-        conn.execute(
-            """
-            UPDATE heartbeat_runs
-            SET finished_at = ?, status = ?, message = ?, error = ?
-            WHERE id = ?
-            """,
-            (finished, status, message, error, run_id),
-        )
-        conn.execute(
-            """
-            UPDATE heartbeat_settings
-            SET last_status = ?, last_message = ?, last_error = ?
-            WHERE id = 1
-            """,
-            (status, message, error),
-        )
-        # Keep bounded local diagnostics rather than growing forever.
-        conn.execute(
-            """
-            DELETE FROM heartbeat_runs
-            WHERE id NOT IN (
-                SELECT id FROM heartbeat_runs ORDER BY id DESC LIMIT 100
-            )
-            """
-        )
-        conn.commit()
-    return get_heartbeat_settings()
 
 
 def begin_heartbeat_task_run(task_id: int, trigger: str) -> int:
@@ -4296,15 +3772,6 @@ def finish_heartbeat_task_run(
     if task is None:
         raise ValueError("heartbeat task not found")
     return task
-
-
-def list_heartbeat_runs(limit: int = 10) -> list[dict]:
-    limit = max(1, min(int(limit), 100))
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM heartbeat_runs ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-    return [dict(row) for row in rows]
 
 
 def list_heartbeat_task_runs(task_id: int, limit: int = 10) -> list[dict]:
@@ -6958,10 +6425,6 @@ def delete_subagent(subagent_id: int) -> bool:
                 (str(subagent_id),),
             )
             _sync_legacy_connections(conn)
-            conn.execute(
-                "DELETE FROM heartbeat_agent_preferences WHERE agent_key = ?",
-                (f"mcp:{int(subagent_id)}",),
-            )
         conn.commit()
         return cur.rowcount > 0
 

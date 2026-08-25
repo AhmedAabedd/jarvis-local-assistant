@@ -93,14 +93,18 @@ class SubagentSourceTests(unittest.TestCase):
             {(tool["name"], tool["server_name"]) for tool in capability["tools"]},
             {("search", "Web tools"), ("read_file", "File tools")},
         )
-        db.update_heartbeat_settings(
+        agent_key = f"mcp:{agent['id']}"
+        task = db.create_heartbeat_task(
+            name="Cross-server watch",
+            instructions="Use both connected sources.",
+            selected_agents=[agent_key],
             selected_tools=[
-                {"subagent_id": agent["id"], "tool_name": "search"},
-                {"subagent_id": agent["id"], "tool_name": "read_file"},
-            ]
+                {"agent_key": agent_key, "tool_name": "search"},
+                {"agent_key": agent_key, "tool_name": "read_file"},
+            ],
         )
         target = next(
-            item for item in db.get_heartbeat_targets()
+            item for item in db.get_heartbeat_targets(task["id"])
             if item["id"] == agent["id"]
         )
         self.assertEqual(
@@ -179,14 +183,18 @@ class SubagentSourceTests(unittest.TestCase):
             {tool["name"] for tool in capability["tools"]},
             {f"{first['id']}:search", f"{second['id']}:search"},
         )
-        db.update_heartbeat_settings(
+        agent_key = f"mcp:{agent['id']}"
+        task = db.create_heartbeat_task(
+            name="Selected source watch",
+            instructions="Search the selected source.",
+            selected_agents=[agent_key],
             selected_tools=[{
-                "subagent_id": agent["id"],
+                "agent_key": agent_key,
                 "tool_name": f"{second['id']}:search",
-            }]
+            }],
         )
         target = next(
-            item for item in db.get_heartbeat_targets()
+            item for item in db.get_heartbeat_targets(task["id"])
             if item["id"] == agent["id"]
         )
         self.assertEqual(len(target["mcp_sources"]), 1)

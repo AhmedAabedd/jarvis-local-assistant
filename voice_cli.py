@@ -4,8 +4,8 @@
     python voice_cli.py          # push-to-talk (Enter to start/stop)
     python voice_cli.py --wake   # hands-free: say the wake word, then talk
 
-Mounir transcribes (Whisper), thinks (Qwen3 via Ollama), and talks back (Piper),
-speaking each sentence as soon as it's ready.
+The configured STT, language model, and TTS runtimes process each turn, speaking
+each sentence as soon as it is ready.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def main() -> int:
 
     if not llm.is_up():
         print(
-            "Can't reach Ollama. Start it with `ollama serve` first.",
+            "Can't reach the selected model. Check its connection in Agent Studio.",
             file=sys.stderr,
         )
         return 1

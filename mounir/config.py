@@ -6,17 +6,14 @@ Environment variables override the defaults.
 
 from __future__ import annotations
 
-import os, platform
+import os
+import platform
 from pathlib import Path
 
 # --- Model ------------------------------------------------------------------
 
-# The custom model built from modelfiles/mounir.Modelfile (FROM qwen3:8b).
+# Local fallback used only until the user selects a saved model in Agent Studio.
 MODEL: str = os.environ.get("MOUNIR_MODEL", "mounir")
-
-# Qwen3 thinking mode. Off by default (smarter but much slower); the 8B stock
-# template honours this through the API, so think=False disables it directly.
-THINK: bool = os.environ.get("MOUNIR_THINK", "false").lower() in ("1", "true", "yes")
 
 # --- Memory -----------------------------------------------------------------
 
@@ -26,121 +23,79 @@ DATA_DIR: Path = Path(os.environ.get("MOUNIR_DATA_DIR", Path.home() / ".mounir")
 # messages (system prompt excluded) before each request.
 MAX_HISTORY_MESSAGES: int = int(os.environ.get("MOUNIR_MAX_HISTORY", "20"))
 
-# Fallback personality, used by the LangGraph supervisor when talking to a
-# base model that has no SYSTEM block baked in (e.g. raw qwen3:8b instead of
-# the `mounir` build).
-DEFAULT_USER_NAME: str = os.environ.get("MOUNIR_USER_NAME", "Ahmed")
+# Optional first-run profile values. Personal fields stay empty until configured.
+DEFAULT_USER_NAME: str = os.environ.get("MOUNIR_USER_NAME", "").strip()
 DEFAULT_ASSISTANT_NAME: str = os.environ.get("MOUNIR_ASSISTANT_NAME", "Mounir")
-DEFAULT_LOCATION: str = os.environ.get(
-    "MOUNIR_LOCATION", "Ezzahra, Ben Arous, Tunis, Tunisia"
-)
+DEFAULT_LOCATION: str = os.environ.get("MOUNIR_LOCATION", "").strip()
 DEFAULT_LANGUAGE: str = os.environ.get("MOUNIR_LANGUAGE", "auto")
 
 
 def build_system_prompt(profile: dict | None = None) -> str:
     profile = profile or {}
-    user_name = profile.get("user_name") or DEFAULT_USER_NAME
+    user_name = str(profile.get("user_name") or DEFAULT_USER_NAME).strip()
     assistant_name = profile.get("assistant_name") or DEFAULT_ASSISTANT_NAME
-    language = profile.get("preferred_language") or DEFAULT_LANGUAGE
-    language_rule = {
-        "auto": "Reply in the language the user is currently using.",
-        "en": "Reply in English unless the user explicitly requests another language.",
-        "fr": "Reply in French unless the user explicitly requests another language.",
-        "ar": "Reply in Arabic unless the user explicitly requests another language.",
-    }.get(language, "Reply in the language the user is currently using.")
-    return (
-        f"You are {assistant_name}, a private AI assistant that runs locally on "
-        f"{user_name}'s own machine. The person you're talking to is {user_name} — "
-        "your owner. You're their loyal right hand and you always have their back. "
-        "You're sharp, direct, and quick-witted, with a dry sense of humor and a "
-        "bit of sarcasm. You speak plainly and waste no words: no padded intros, "
-        "no \"certainly!\", no corporate fluff. Get to the point. When you don't "
-        "know something, say so straight instead of making it up. "
-        f"You are {assistant_name} and only {assistant_name} — never call yourself "
-        "Qwen or any other name.\n\n"
-        f"{language_rule}\n\n"
-        "The tools supplied with the current request are your exact capabilities. "
-        "Some may delegate to focused specialists. Use their names and descriptions "
-        "to choose the right one. Never claim a specialist exists and never call a "
-        "tool that is not currently supplied; it may be inactive or unconfigured. "
-        "You have no web search unless a currently supplied tool provides it.\n\n"
-        "HARD RULES:\n"
-        "1. Never claim you did something unless you actually called the tool THIS "
-        "turn and saw its result. Do not write \"done\", \"task delegated\", "
-        "\"file updated\", or similar from your head — if you didn't call the tool, "
-        "you didn't do it, and saying otherwise is lying. Perform actions by calling "
-        "tools, never by describing them.\n"
-        "2. For anything you need to look up — current events, facts that may have "
-        "changed, prices, docs, comparisons — use an available web or research "
-        "specialist tool. If none is supplied, say that lookup capability is unavailable. "
-        "Never answer a potentially stale lookup from memory.\n"
-        "3. Images directly attached to a conversation message are already in your "
-        "visual context: answer questions about those attached pixels yourself and "
-        "do not delegate merely to inspect them. For EVERY other local file or media "
-        "operation — finding or listing paths; "
-        "reading, creating, editing, appending, or converting files; and analyzing "
-        "or generating documents, data, presentations, images, audio, or video — "
-        "you MUST delegate to the available Files and Media specialist. Pass every "
-        "name, location hint, and path the user supplied. Do not guess a path or "
-        "use shell commands as a substitute. If the specialist is unavailable, "
-        "say that local artifact capability is unavailable.\n"
-        "4. For anything that changes long-term knowledge — \"remember this\", a "
-        "new contact, a preference, a template, or forgetting/cleaning stored "
-        "knowledge — use an available knowledge specialist with what to recall, store, "
-        "update, or forget. If none is supplied, say that knowledge capability is "
-        "unavailable. Never bypass it by storing durable memory through an unrelated "
-        "specialist.\n"
-        "5. When you don't know something, say so straight instead of making it up."
+    user_identity = (
+        f"The user is {user_name}. "
+        if user_name
+        else ""
     )
-
-
-SYSTEM_PROMPT: str = build_system_prompt()
-
-
+    return (
+        f"You are {assistant_name}, the user's private local AI assistant. "
+        f"{user_identity}"
+        "Be loyal, sharp, direct, and quick-witted, with dry humor and occasional "
+        "sarcasm. Skip padded introductions, automatic agreement, and corporate "
+        "fluff. Never identify yourself as the underlying model or provider.\n\n"
+        "The tools supplied for this request are your exact capabilities. Use their "
+        "names and descriptions to choose the right tool or specialist. Never call "
+        "or claim access to a capability that is not supplied.\n\n"
+        "RULES\n"
+        "1. Perform actions through tools. Claim an outcome only when a tool called "
+        "this turn confirms it.\n"
+        "2. Use an available web or research specialist for current or potentially "
+        "stale information. If none is available, say so.\n"
+        "3. Inspect images attached to the current message directly. Delegate every "
+        "other local file or media operation to Files and Media, passing all supplied "
+        "names, paths, and location hints. Never guess paths or substitute shell "
+        "commands.\n"
+        "4. Delegate durable knowledge changes or retrieval to Knowledge. Never use "
+        "an unrelated specialist as a memory store.\n"
+        "5. If information or a required capability is unavailable, say so; never "
+        "invent an answer or result."
+    )
 SUBAGENT_CAPABILITY_PROMPT = """\
 CAPABILITY BOUNDARY
-If the request cannot be completed with your available tools, do not guess, do
-not call unrelated tools, and do not pretend. Reply using exactly this shape:
+If your available capabilities cannot complete the task, do not guess or use
+unrelated tools. Reply exactly:
 
 I can't complete this request with my available tools.
 Reason: <one short reason>
 What I can do:
-- <two to five short capabilities relevant to this specialist>
+- <two to five relevant capabilities>
+"""
+SUBAGENT_SHARED_PROMPT = """\
+SHARED SPECIALIST RULES
+- Use only available capabilities and stop when the task is complete.
+- Base every claimed outcome on real tool results.
+- Report declined, failed, or timed-out actions plainly. Do not retry unless
+  the result explicitly says it is safe.
+
+FINAL RESPONSE
+Return a complete, concrete report with everything your parent agent needs to
+continue. Exclude unrelated commentary and unnecessary headings.
 """
 
 
-def profile_instruction(profile: dict | None = None) -> str:
-    """Authoritative identity block reusable by specialist prompts."""
-    profile = profile or {}
-    user_name = profile.get("user_name") or DEFAULT_USER_NAME
-    assistant_name = profile.get("assistant_name") or DEFAULT_ASSISTANT_NAME
-    location = profile.get("location") or DEFAULT_LOCATION
-    language = profile.get("preferred_language") or DEFAULT_LANGUAGE
-    return (
-        "CONFIGURED PROFILE (authoritative)\n"
-        f"- User name: {user_name}\n"
-        f"- Assistant name: {assistant_name}\n"
-        f"- Location: {location}\n"
-        f"- Preferred language: {language}\n"
-        "Any different personal names in examples or older specialist instructions "
-        "are placeholders. Use this configured profile."
-    )
-
-
-def specialist_system_prompt(base_prompt: str, profile: dict | None = None) -> str:
-    """Apply the shared capability contract and current profile to a specialist."""
-    if profile is None:
-        try:
-            from . import db
-
-            profile = db.get_profile()
-        except Exception:
-            profile = None
+def specialist_system_prompt(base_prompt: str) -> str:
+    """Apply the shared capability contract to a specialist."""
     return "\n\n".join(
-        (base_prompt.strip(), SUBAGENT_CAPABILITY_PROMPT.strip(), profile_instruction(profile))
+        (
+            base_prompt.strip(),
+            SUBAGENT_SHARED_PROMPT.strip(),
+            SUBAGENT_CAPABILITY_PROMPT.strip(),
+        )
     )
 
-# --- Voice (Stage 2) --------------------------------------------------------
+# --- Voice ------------------------------------------------------------------
 
 # Mic capture / Whisper both work at 16 kHz mono.
 SAMPLE_RATE: int = int(os.environ.get("MOUNIR_SAMPLE_RATE", "16000"))
@@ -161,7 +116,7 @@ PIPER_MODEL: str = os.environ.get(
     "MOUNIR_PIPER_MODEL", str(DATA_DIR / "voices" / "en_US-amy-medium.onnx")
 )
 
-# --- Wake word + hands-free (Stage 4) ---------------------------------------
+# --- Wake word + hands-free -------------------------------------------------
 
 # openwakeword pretrained model to trigger on. Built-ins include "hey_jarvis",
 # "alexa", "hey_mycroft". A custom "hey_mounir" needs training (see README).
@@ -176,53 +131,31 @@ VAD_SILENCE_SECONDS: float = float(os.environ.get("MOUNIR_VAD_SILENCE", "1.0"))
 # Hard cap on a single utterance.
 VAD_MAX_SECONDS: float = float(os.environ.get("MOUNIR_VAD_MAX", "15"))
 
-LOCATION: str = DEFAULT_LOCATION
-
-
 def build_context_message(profile: dict | None = None) -> str:
-    from . import path_search
-
     profile = profile or {}
-    user_name = profile.get("user_name") or DEFAULT_USER_NAME
-    assistant_name = profile.get("assistant_name") or DEFAULT_ASSISTANT_NAME
-    location = profile.get("location") or DEFAULT_LOCATION
-    language = profile.get("preferred_language") or DEFAULT_LANGUAGE
-    h = Path.home()
-    lines = [
-        f"User: {user_name}",
-        f"Assistant: {assistant_name}",
-        f"OS: {platform.system()} {platform.release()}",
-        f"Home: {h}",
-        f"Current directory: {Path.cwd()}",
-        f"Location: {location}",
-        f"Preferred language: {language}",
-    ]
-    for key, path in sorted(path_search.xdg_user_directories().items()):
-        lines.append(f"{key.title()}: {path}")
+    location = str(profile.get("location") or DEFAULT_LOCATION).strip()
+    language = str(profile.get("preferred_language") or DEFAULT_LANGUAGE).strip()
+    language_label = {
+        "auto": "Automatic",
+        "en": "English",
+        "fr": "French",
+        "ar": "Arabic",
+    }.get(language, language)
+    lines = [f"OS: {platform.system()} {platform.release()}"]
+    if location:
+        lines.append(f"Location: {location}")
+    lines.append(f"Preferred language: {language_label}")
     return "\n".join(lines)
-
-
-CONTEXT_MESSAGE: str = build_context_message()
-
-
 # --- Gemini -----------------------------------------------------------------
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-USE_GEMINI: bool = os.environ.get("USE_GEMINI", "false").lower() in ("1", "true", "yes")
 # Google's OpenAI-compatible endpoint uses the same shared chat transport as
 # every other saved model, with no provider SDK required.
 GEMINI_BASE_URL: str = os.environ.get(
     "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
 )
 # Powers the knowledge specialist's analysis and tool-selection loop.
-KNOWLEDGE_MODEL: str = os.environ.get("KNOWLEDGE_MODEL", GEMINI_MODEL)
-# Powers the system specialist (volume/brightness/media/power) — on NVIDIA,
-# like the researcher/media. The free tiers elsewhere couldn't sustain it:
-# Groq allows only 6-12k tokens/MINUTE (one task costs ~2.4k, so the SDK
-# silently slept on 429s — the "stuck 20s before reporting" bug) and this
-# Gemini key allows only 20 requests/DAY per model.
-# (llama-3.3-70b answered correctly too but queues ~22s/call on the free
-# tier; the 8b answers in ~1s and hardware commands don't need more brain.)
+KNOWLEDGE_MODEL: str = os.environ.get("KNOWLEDGE_MODEL", "gemini-2.5-flash")
+# Powers the system specialist when no database model has been selected yet.
 SYSTEM_MODEL: str = os.environ.get("SYSTEM_MODEL", "meta/llama-3.1-8b-instruct")
 
 
@@ -235,7 +168,7 @@ TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 # so anyone could message it otherwise). Leave unset for first-run discovery:
 # the bridge replies to any message with that chat's id so you can export it.
 TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
-# Initial enabled state imported with the legacy token/chat values.
+# Initial enabled state imported with the environment bootstrap values.
 TELEGRAM_ENABLED: bool = os.environ.get("MOUNIR_TELEGRAM_ENABLED", "true").lower() in (
     "1", "true", "yes", "on"
 )
@@ -265,17 +198,8 @@ CHAT_ATTACHMENT_MAX_BYTES: int = int(
 )
 
 
-# --- Groq ---------------------------------------------------------------
+# --- Groq speech bootstrap --------------------------------------------------
 GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "qwen/qwen3-32b")
-USE_GROQ: bool = os.environ.get("USE_GROQ", "false").lower() in ("1", "true", "yes")
-
-
-# --- Mistral ----------------------------------------------------------------
-MISTRAL_API_KEY: str = os.environ.get("MISTRAL_API_KEY", "")
-MISTRAL_MODEL: str = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
-MISTRAL_BASE_URL: str = os.environ.get("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
-USE_MISTRAL: bool = os.environ.get("USE_MISTRAL", "false").lower() in ("1", "true", "yes")
 
 
 # --- NVIDIA (build.nvidia.com) -----------------------------------------------
@@ -286,17 +210,11 @@ NVIDIA_BASE_URL: str = os.environ.get(
 # Omni (multimodal) model powering the media specialist: reads images, PDFs,
 # audio, and video frames. Must be a model that accepts image/audio content
 # parts on the NVIDIA OpenAI-compatible endpoint.
-MEDIA_MODEL: str = os.environ.get("MEDIA_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
-
-
-# --- Ollama Cloud (ollama.com) — powers dynamic cloud specialists ------------
-# Key from https://ollama.com/settings/keys. The cloud endpoint is
-# OpenAI-compatible, so it uses the shared message/tool transport without a
-# local Ollama daemon.
-OLLAMA_API_KEY: str = os.environ.get("OLLAMA_API_KEY", "")
-OLLAMA_CLOUD_BASE_URL: str = os.environ.get(
-    "OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"
+MEDIA_MODEL: str = os.environ.get(
+    "MEDIA_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 )
+
+
 # --- Text-to-speech ---------------------------------------------------------
 # Initial transport imported into Agent Studio on first run. Supported values
 # are "piper", "openai_compatible", and the legacy native "google" transport.
@@ -306,13 +224,9 @@ OPENAI_TTS_BASE_URL: str = os.environ.get(
 )
 OPENAI_TTS_MODEL: str = os.environ.get("MOUNIR_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE: str = os.environ.get("MOUNIR_TTS_VOICE", "alloy")
-OPENAI_TTS_API_KEY: str = os.environ.get(
-    "MOUNIR_TTS_API_KEY", os.environ.get("OPENAI_API_KEY", "")
-)
 # Google Cloud TTS over REST + a plain API key (no service-account JSON). Make a
 # key in the Google Cloud console with the "Cloud Text-to-Speech API" enabled.
 # Free tier: ~1M chars/month on Neural2/WaveNet voices, refilled monthly.
-GOOGLE_TTS_API_KEY: str = os.environ.get("GOOGLE_TTS_API_KEY", "")
 GOOGLE_TTS_LANGUAGE: str = os.environ.get("GOOGLE_TTS_LANGUAGE", "en-US")
 GOOGLE_TTS_VOICE: str = os.environ.get("GOOGLE_TTS_VOICE", "en-US-Neural2-D")
 
@@ -333,8 +247,4 @@ OPENAI_STT_BASE_URL: str = os.environ.get(
 OPENAI_STT_MODEL: str = os.environ.get(
     "MOUNIR_STT_MODEL",
     GROQ_STT_MODEL if STT_BACKEND == "groq" else "whisper-1",
-)
-OPENAI_STT_API_KEY: str = os.environ.get(
-    "MOUNIR_STT_API_KEY",
-    GROQ_API_KEY if STT_BACKEND == "groq" else os.environ.get("OPENAI_API_KEY", ""),
 )

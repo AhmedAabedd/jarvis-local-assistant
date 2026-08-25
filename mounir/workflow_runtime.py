@@ -25,7 +25,7 @@ WORKING RULES
 - Give every delegate a self-contained task with all details it needs.
 - Treat delegate reports as evidence; never claim an action succeeded unless a
   delegate reports that it succeeded.
-- When the work is complete, return one concise final response to the caller.
+- When the work is complete, return a complete final response to the caller.
 """
 
 
@@ -180,7 +180,7 @@ def _subagent_delegate_tool(
         name=mcp_agents.delegate_tool_name(spec["name"]),
         description=(
             f"Delegate to the {spec['name']} subagent. {spec['description']} "
-            "It completes the work with its own tools and returns a short report."
+            "It completes the task with its available tools and returns the result."
         ),
         response_format="content_and_artifact",
     )

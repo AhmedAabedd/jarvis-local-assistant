@@ -177,10 +177,10 @@ def _web_confirm(action: str) -> bool:
 tools.confirm_fn = _web_confirm
 
 
-async def _deliver_heartbeat_alert(message: str, task: dict | None = None) -> None:
+async def _deliver_heartbeat_alert(message: str, task: dict) -> None:
     """Deliver one proactive alert to enabled user interfaces."""
-    task_name = str((task or {}).get("name") or "").strip()
-    heading = f"Heartbeat update — {task_name}" if task_name else "Heartbeat update"
+    task_name = str(task.get("name") or "").strip()
+    heading = f"Heartbeat update — {task_name}"
     alert = f"{heading}\n\n{message}"
 
     def persist() -> None:
@@ -192,8 +192,7 @@ async def _deliver_heartbeat_alert(message: str, task: dict | None = None) -> No
     if out is not None:
         out.put_nowait({"type": "heartbeat", "text": alert, "title": task_name})
 
-    destinations = task or db.get_heartbeat_settings()
-    if destinations["notify_telegram"]:
+    if task["notify_telegram"]:
         telegram = db.get_telegram_settings()
         if (
             telegram["enabled"]
@@ -213,7 +212,7 @@ async def _deliver_heartbeat_alert(message: str, task: dict | None = None) -> No
                 # turn a successful heartbeat check into a failed run.
                 trace.kv("heartbeat telegram", f"delivery failed: {exc}")
 
-    if destinations["notify_whatsapp"]:
+    if task["notify_whatsapp"]:
         whatsapp = db.get_whatsapp_settings()
         if (
             whatsapp["enabled"]
@@ -855,9 +854,7 @@ async def get_heartbeat():
         for task in db.list_heartbeat_tasks()
     ]
     return {
-        **db.get_heartbeat_settings(),
         "capabilities": db.get_heartbeat_capabilities(),
-        "recent_runs": db.list_heartbeat_runs(),
         "tasks": tasks,
     }
 
@@ -915,7 +912,7 @@ async def run_heartbeat_task_now(task_id: int):
     if db.get_heartbeat_task(task_id) is None:
         return JSONResponse({"error": "Heartbeat task not found."}, status_code=404)
     try:
-        task = await heartbeat_service.run_now("manual", task_id)
+        task = await heartbeat_service.run_now(task_id, "manual")
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
     return {
@@ -946,45 +943,6 @@ async def delete_heartbeat_notification(notification_id: int):
         return JSONResponse({"error": "Notification not found."}, status_code=404)
     return {"ok": True}
 
-
-@app.put("/api/heartbeat")
-async def update_heartbeat(req: dict):
-    try:
-        requested_enabled = req.get("enabled")
-        selected_tools = req.get("selected_tools")
-        if requested_enabled is True:
-            if selected_tools is None:
-                selected_tools = [
-                    {"agent_key": agent["key"], "tool_name": tool["name"]}
-                    for agent in db.get_heartbeat_capabilities()
-                    for tool in agent["tools"]
-                    if tool["selected"] and not tool["requires_confirmation"]
-                ]
-            if not selected_tools:
-                raise ValueError(
-                    "select at least one non-interactive tool before enabling heartbeat"
-                )
-        db.update_heartbeat_settings(
-            enabled=requested_enabled,
-            interval_minutes=req.get("interval_minutes"),
-            instructions=req.get("instructions"),
-            selected_tools=selected_tools,
-            notify_telegram=req.get("notify_telegram"),
-            notify_whatsapp=req.get("notify_whatsapp"),
-        )
-        heartbeat_service.wake()
-        return await get_heartbeat()
-    except (TypeError, ValueError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-
-@app.post("/api/heartbeat/run")
-async def run_heartbeat_now():
-    try:
-        await heartbeat_service.run_now("manual")
-    except RuntimeError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
-    return await get_heartbeat()
 
 @app.get("/api/agent-overview")
 async def agent_overview():

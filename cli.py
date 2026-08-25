@@ -7,7 +7,6 @@ Commands:
     /reset   forget the current conversation
     /save    save conversation to ~/.mounir/last_conversation.json
     /load    restore the last saved conversation
-    /think   toggle Qwen3 thinking mode for the next replies (slower, smarter)
     /exit    quit
 
 Press Esc (or Ctrl+C) while Mounir is replying to interrupt it without leaving
@@ -283,8 +282,7 @@ def _terminal_confirm(action: str) -> bool:
 def main() -> int:
     if not llm.is_up():
         print(
-            "Can't reach Ollama. Start it with `ollama serve` "
-            "(and make sure the model is pulled).",
+            "Can't reach the selected model. Check its connection in Agent Studio.",
             file=sys.stderr,
         )
         return 1
@@ -298,7 +296,6 @@ def main() -> int:
     trace.sub_row("media", config.MEDIA_MODEL)
     trace.sub_row("knowledge", config.KNOWLEDGE_MODEL)
     trace.sub_row("system", config.SYSTEM_MODEL, last=True)
-    trace.kv("thinking", "on" if config.THINK else "off")
     trace.rule(64)
     print("  Type a message, Esc to interrupt a reply, or /exit to quit.\n")
 
@@ -346,7 +343,7 @@ def main() -> int:
                     tokens += 1
             spinner.finish()
             md.finish()
-        except llm.OllamaError as exc:
+        except llm.ModelError as exc:
             spinner.finish()
             md.finish()
             print(f"\n[error] {exc}")
@@ -381,9 +378,6 @@ def _handle_command(cmd: str, agent: Agent) -> bool:
     elif name == "/load":
         ok = agent.conversation.load()
         print("[loaded]\n" if ok else "[nothing saved yet]\n")
-    elif name == "/think":
-        config.THINK = not config.THINK
-        print(f"[thinking mode {'on' if config.THINK else 'off'}]\n")
     else:
         print(f"[unknown command: {cmd}]\n")
     return False
