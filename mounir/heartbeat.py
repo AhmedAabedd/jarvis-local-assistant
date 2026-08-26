@@ -85,6 +85,9 @@ PREVIOUS DELIVERED RESULT
         system_prompt=HEARTBEAT_SUPERVISOR_PROMPT.strip()
     )
     mounir = Agent(conversation=conversation, scoped_targets=targets)
+    # Scheduled runs are not user requests, so they do not receive automatic
+    # personal-knowledge previews.
+    mounir.automatic_knowledge = False
     # Exhaust the stream so the complete supervisor/delegation graph runs.
     list(mounir.respond(prompt))
     visible = conversation.display_messages()

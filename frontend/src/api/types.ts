@@ -213,6 +213,8 @@ export interface BuiltinAgent {
   knowledge_protocol?: string | null
   knowledge_protocol_compatible?: boolean | null
   knowledge_protocol_missing_tools?: string[]
+  automatic_knowledge_enabled?: boolean | null
+  automatic_knowledge_available?: boolean | null
   embedding_enabled?: boolean | null
   embedding_model_id?: Id | null
   embedding_model_options?: Array<{

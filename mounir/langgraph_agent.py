@@ -38,7 +38,10 @@ from . import (
     workflow_runtime,
 )
 from .memory import Conversation
-from .specialists.knowledge import run as run_knowledge
+from .specialists.knowledge import (
+    automatic_context as automatic_knowledge_context,
+    run as run_knowledge,
+)
 from .specialists.media import run as run_media
 from .specialists.mcp_agent import run as run_mcp_agent
 from .specialists.system import run as run_system
@@ -521,6 +524,7 @@ class Agent:
         model: str = cfg.MODEL,
         use_tools: bool = True,
         scoped_targets: list[dict] | None = None,
+        automatic_knowledge: bool | None = None,
     ) -> None:
         db.init()
         if conversation is None:
@@ -532,6 +536,11 @@ class Agent:
         self.model = model
         self.use_tools = use_tools
         self.scoped_targets = scoped_targets
+        self.automatic_knowledge = (
+            self._profile_managed_prompt
+            if automatic_knowledge is None
+            else bool(automatic_knowledge)
+        )
 
     def respond(
         self,
@@ -583,6 +592,21 @@ class Agent:
                 )
                 messages.insert(
                     insert_at, {"role": "system", "content": tree_prompt}
+                )
+        if self.use_tools and self.automatic_knowledge:
+            knowledge_context = automatic_knowledge_context(messages)
+            if knowledge_context:
+                insert_at = next(
+                    (
+                        index
+                        for index, message in enumerate(messages)
+                        if message.get("role") != "system"
+                    ),
+                    len(messages),
+                )
+                messages.insert(
+                    insert_at,
+                    {"role": "system", "content": knowledge_context},
                 )
         if voice:
             messages = [dict(message) for message in messages]

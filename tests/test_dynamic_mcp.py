@@ -4363,6 +4363,51 @@ class InterfaceRoutingTests(unittest.TestCase):
         self.assertNotIn("agent_id", system_text)
         self.assertNotIn("node_id", system_text)
 
+    def test_supervisor_receives_ephemeral_automatic_knowledge_previews(self):
+        observed = {}
+
+        class Graph:
+            def stream(self, state, **_stream_options):
+                from langchain_core.messages import AIMessage
+
+                observed["messages"] = state["messages"]
+                yield {"type": "custom", "data": "done"}
+                yield {
+                    "type": "values",
+                    "data": {
+                        **state,
+                        "messages": [*state["messages"], AIMessage(content="done")],
+                    },
+                }
+
+        context = """AUTOMATIC KNOWLEDGE
+These are previews of relevant pages, not their complete content.
+
+- Atlas
+  Preview: Atlas is a payment migration project.
+  Page: projects/atlas"""
+        conversation = Conversation(system_prompt="test")
+        agent = Agent(conversation=conversation, automatic_knowledge=True)
+        with (
+            patch.object(mcp_agents, "load", return_value=[]),
+            patch.object(
+                langgraph_agent,
+                "automatic_knowledge_context",
+                return_value=context,
+            ) as automatic,
+            patch.object(langgraph_agent, "_compile_graph", return_value=Graph()),
+        ):
+            self.assertEqual("".join(agent.respond("Tell me about Atlas")), "done")
+
+        automatic.assert_called_once()
+        system_text = "\n".join(
+            message.content
+            for message in observed["messages"]
+            if message.type == "system"
+        )
+        self.assertIn(context, system_text)
+        self.assertNotIn("AUTOMATIC KNOWLEDGE", str(conversation._messages))
+
     def test_confirmation_handler_reaches_the_agent_graph_stream(self):
         observed = []
 

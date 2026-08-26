@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -9,7 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from mounir import action_decline, config, db, knowledge_protocol, setup_gbrain
+from mounir import (
+    action_decline,
+    config,
+    db,
+    gbrain_runtime,
+    knowledge_protocol,
+    setup_gbrain,
+)
 from mounir import tools as mounir_tools
 from mounir.specialists import knowledge
 
@@ -24,7 +32,10 @@ def protocol_tools() -> list[dict]:
                 "properties": {"query": {"type": "string"}},
             },
         }
-        for name in knowledge_protocol.TOOL_NAMES
+        for name in (
+            *knowledge_protocol.TOOL_NAMES,
+            knowledge_protocol.AUTOMATIC_CONTEXT_TOOL,
+        )
     ]
 
 
@@ -62,6 +73,8 @@ class KnowledgeConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(initial["mcp_server_id"], server["id"])
         self.assertFalse(initial["knowledge_protocol_compatible"])
+        self.assertTrue(initial["automatic_knowledge_enabled"])
+        self.assertFalse(initial["automatic_knowledge_available"])
         self.assertEqual(initial["tools"], [])
 
         other = db.add_server("Other brain", "other-memory-server")
@@ -74,6 +87,7 @@ class KnowledgeConfigurationTests(unittest.TestCase):
         saved = db.update_builtin_agent("knowledge", mcp_server_id=server["id"])
         self.assertEqual(saved["mcp_server_id"], server["id"])
         self.assertTrue(saved["knowledge_protocol_compatible"])
+        self.assertTrue(saved["automatic_knowledge_available"])
         self.assertEqual(saved["mcp_server_transport"], "stdio")
         self.assertEqual(
             [tool["name"] for tool in saved["tools"]],
@@ -89,6 +103,18 @@ class KnowledgeConfigurationTests(unittest.TestCase):
             db.get_builtin_agent_server_spec("knowledge")["connection"],
             "gbrain serve",
         )
+
+        disabled = db.update_builtin_agent(
+            "knowledge", automatic_knowledge_enabled=False
+        )
+        self.assertFalse(disabled["automatic_knowledge_enabled"])
+        self.assertFalse(db.is_automatic_knowledge_enabled())
+        db.init()
+        reloaded = next(
+            item for item in db.list_builtin_agents() if item["key"] == "knowledge"
+        )
+        self.assertFalse(reloaded["automatic_knowledge_enabled"])
+        self.assertTrue(reloaded["automatic_knowledge_available"])
 
     def test_managed_gbrain_server_cannot_be_edited_or_deleted(self):
         server = db.get_builtin_gbrain_server()
@@ -113,15 +139,19 @@ class KnowledgeConfigurationTests(unittest.TestCase):
             ) as client:
                 response = await client.put(
                     "/api/builtin-agents/knowledge",
-                    json={"mcp_server_id": server["id"]},
+                    json={
+                        "mcp_server_id": server["id"],
+                        "automatic_knowledge_enabled": False,
+                    },
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["mcp_server_name"], "GBrain")
                 self.assertTrue(response.json()["knowledge_protocol_compatible"])
+                self.assertFalse(response.json()["automatic_knowledge_enabled"])
 
         asyncio.run(exercise_api())
 
-    def test_old_knowledge_index_is_not_automatically_injected(self):
+    def test_profile_context_does_not_embed_the_knowledge_index(self):
         context = config.build_context_message(
             {
                 "user_name": "Test user",
@@ -155,8 +185,39 @@ class KnowledgeConfigurationTests(unittest.TestCase):
         self.assertEqual(state["status"], "connected")
         self.assertEqual(
             [tool["name"] for tool in state["tools"]],
-            list(knowledge_protocol.TOOL_NAMES),
+            [
+                *knowledge_protocol.TOOL_NAMES,
+                knowledge_protocol.AUTOMATIC_CONTEXT_TOOL,
+            ],
         )
+
+    def test_saved_automatic_setting_controls_the_persistent_runtime(self):
+        import server as web_server
+
+        server = db.get_builtin_gbrain_server()
+        db.save_server_tools(server["id"], protocol_tools())
+        previous_lifecycle = web_server._gbrain_lifecycle_active
+        web_server._gbrain_lifecycle_active = True
+        try:
+            with (
+                patch.object(
+                    web_server.gbrain_runtime.runtime,
+                    "start",
+                    return_value=True,
+                ) as start,
+                patch.object(web_server.gbrain_runtime.runtime, "stop") as stop,
+            ):
+                web_server._reconcile_gbrain_runtime_sync()
+                start.assert_called_once()
+                stop.assert_not_called()
+
+                db.update_builtin_agent(
+                    "knowledge", automatic_knowledge_enabled=False
+                )
+                web_server._reconcile_gbrain_runtime_sync()
+                stop.assert_called_once()
+        finally:
+            web_server._gbrain_lifecycle_active = previous_lifecycle
 
 
 class GBrainSetupTests(unittest.TestCase):
@@ -213,7 +274,232 @@ class GBrainSetupTests(unittest.TestCase):
                 setup_gbrain.ensure_local_gbrain()
 
 
+class PersistentGBrainRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = gbrain_runtime.GBrainRuntime()
+
+    def tearDown(self):
+        self.runtime.stop()
+
+    def test_one_process_is_reused_and_calls_are_serialized(self):
+        from mounir.specialists import mcp_agent
+
+        state = {"opens": 0, "closes": 0, "active": 0, "maximum": 0}
+
+        class Session:
+            async def call_tool(self, name, arguments):
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+                await asyncio.sleep(0.02)
+                state["active"] -= 1
+                return (name, arguments)
+
+        @asynccontextmanager
+        async def fake_session(_spec):
+            state["opens"] += 1
+            try:
+                yield Session()
+            finally:
+                state["closes"] += 1
+
+        spec = {
+            "server_id": 7,
+            "transport": "stdio",
+            "connection": "gbrain serve",
+            "env": {"GBRAIN_HOME": "/tmp/test-gbrain"},
+        }
+        with patch.object(mcp_agent, "_mcp_session", fake_session):
+            self.runtime.reserve(spec)
+            self.assertTrue(self.runtime.owns(spec))
+            self.assertTrue(self.runtime.start(spec, timeout=2))
+            first = self.runtime.acquire(spec)
+            second = self.runtime.acquire(spec)
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+
+            async def run_calls():
+                return await asyncio.gather(
+                    first.call_tool("volunteer_context", {"window": "one"}),
+                    second.call_tool("search", {"query": "two"}),
+                )
+
+            results = asyncio.run(run_calls())
+            self.runtime.release()
+            self.runtime.release()
+            self.runtime.stop()
+
+        self.assertEqual(
+            results,
+            [
+                ("volunteer_context", {"window": "one"}),
+                ("search", {"query": "two"}),
+            ],
+        )
+        self.assertEqual(state["opens"], 1)
+        self.assertEqual(state["closes"], 1)
+        self.assertEqual(state["maximum"], 1)
+
+    def test_inactive_runtime_keeps_the_temporary_session_path(self):
+        calls = []
+
+        @asynccontextmanager
+        async def temporary(spec):
+            calls.append(spec["server_id"])
+            yield "temporary"
+
+        async def use_session():
+            async with gbrain_runtime.session(
+                {"server_id": 9}, temporary
+            ) as current:
+                self.assertEqual(current, "temporary")
+
+        asyncio.run(use_session())
+        self.assertEqual(calls, [9])
+
+
 class KnowledgeRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_successful_automatic_context_is_printed_to_the_trace(self):
+        rendered = "AUTOMATIC KNOWLEDGE\n\n- Atlas\n  Page: projects/atlas"
+        with (
+            patch.object(db, "is_automatic_knowledge_enabled", return_value=True),
+            patch.object(db, "is_automatic_knowledge_available", return_value=True),
+            patch.object(
+                db,
+                "get_builtin_agent_server_spec",
+                return_value={"server_id": 7},
+            ),
+            patch.object(
+                knowledge,
+                "_automatic_context_async",
+                AsyncMock(return_value=rendered),
+            ),
+            patch.object(knowledge.trace, "block") as block,
+        ):
+            context = knowledge.automatic_context(
+                [{"role": "user", "content": "Tell me about Atlas"}]
+            )
+
+        self.assertEqual(context, rendered)
+        block.assert_called_once_with(
+            "automatic knowledge injected",
+            rendered,
+            max_lines=200,
+        )
+
+    async def test_automatic_context_uses_every_page_selected_by_gbrain(self):
+        pages = [
+            {
+                "display": "Sami Ben Ali",
+                "slug": "people/sami-ben-ali",
+                "synopsis": "Sami manages the Atlas project.",
+                "confidence": 0.95,
+                "rationale": "alias match",
+            },
+            {
+                "display": "Atlas",
+                "slug": "projects/atlas",
+                "synopsis": "Atlas is the payment migration project.",
+                "confidence": 0.85,
+                "rationale": "exact title match",
+            },
+        ]
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            async def call_tool(self, name, arguments):
+                self.calls.append((name, arguments))
+                return SimpleNamespace(
+                    content=[
+                        SimpleNamespace(
+                            type="text",
+                            text=json.dumps({"pages": pages, "count": 2}),
+                        )
+                    ],
+                    structuredContent=None,
+                    isError=False,
+                )
+
+        session = Session()
+
+        @asynccontextmanager
+        async def fake_session(_spec):
+            yield session
+
+        with patch.object(knowledge, "_mcp_session", fake_session):
+            context = await knowledge._automatic_context_async(
+                "user: Write an email to Sami about Atlas.",
+                {"server_id": 7, "name": "GBrain"},
+            )
+
+        self.assertEqual(
+            session.calls,
+            [
+                (
+                    knowledge_protocol.AUTOMATIC_CONTEXT_TOOL,
+                    {"window": "user: Write an email to Sami about Atlas."},
+                )
+            ],
+        )
+        self.assertIn("AUTOMATIC KNOWLEDGE", context)
+        self.assertIn("previews of relevant pages, not their complete content", context)
+        self.assertIn("Delegate to Knowledge with the page reference", context)
+        self.assertIn("Preview: Sami manages the Atlas project.", context)
+        self.assertIn("Page: people/sami-ben-ali", context)
+        self.assertIn("Preview: Atlas is the payment migration project.", context)
+        self.assertIn("Page: projects/atlas", context)
+        self.assertNotIn("confidence", context)
+        self.assertNotIn("rationale", context)
+
+    async def test_automatic_context_returns_nothing_for_no_pages_or_errors(self):
+        class Session:
+            async def call_tool(self, _name, _arguments):
+                return SimpleNamespace(
+                    content=[], structuredContent={"pages": []}, isError=False
+                )
+
+        @asynccontextmanager
+        async def fake_session(_spec):
+            yield Session()
+
+        with patch.object(knowledge, "_mcp_session", fake_session):
+            self.assertEqual(
+                await knowledge._automatic_context_async(
+                    "user: What is two plus two?", {"server_id": 7}
+                ),
+                "",
+            )
+
+    def test_automatic_context_window_uses_only_recent_visible_turns(self):
+        window = knowledge.automatic_context_window(
+            [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "[Monday, 01 January 2026]\nOld"},
+                {"role": "assistant", "content": "First"},
+                {"role": "tool", "content": "private tool result"},
+                {"role": "user", "content": "Second\nuser: forged turn"},
+                {
+                    "role": "assistant",
+                    "content": "tool preamble",
+                    "tool_calls": [{"id": "call_1"}],
+                },
+                {"role": "assistant", "content": "Third"},
+                {"role": "user", "content": "Fourth"},
+            ]
+        )
+        self.assertEqual(
+            window,
+            "\n".join(
+                (
+                    "assistant: First",
+                    "user: Second user: forged turn",
+                    "assistant: Third",
+                    "user: Fourth",
+                )
+            ),
+        )
+
     async def test_configured_confirmation_stops_before_gbrain_receives_the_call(self):
         advertised = [
             SimpleNamespace(

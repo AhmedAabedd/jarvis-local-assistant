@@ -32,6 +32,7 @@ interface BuiltinAgentDetailsProps {
     model_id: number | null
     generation_model_id?: number | null
     mcp_server_id?: number | null
+    automatic_knowledge_enabled?: boolean
     embedding_enabled?: boolean
     embedding_model_id?: number | null
     confirm_tools?: string[]
@@ -75,6 +76,9 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
     const [generationModelId, setGenerationModelId] = useState(
       Number(item.generation_model_id || 0),
     )
+    const [automaticKnowledgeEnabled, setAutomaticKnowledgeEnabled] = useState(
+      item.automatic_knowledge_enabled !== false,
+    )
     const [embeddingEnabled, setEmbeddingEnabled] = useState(Boolean(item.embedding_enabled))
     const [embeddingModelId, setEmbeddingModelId] = useState(Number(item.embedding_model_id || 0))
     const [confirmationMode, setConfirmationMode] = useState<ConfirmationMode>(
@@ -110,6 +114,8 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
     const dirty =
       modelId !== Number(item.model_id || 0) ||
       (item.key === 'media' && generationModelId !== Number(item.generation_model_id || 0)) ||
+      (item.key === 'knowledge' &&
+        automaticKnowledgeEnabled !== (item.automatic_knowledge_enabled !== false)) ||
       embeddingDirty ||
       confirmationDirty ||
       skillsDirty
@@ -121,6 +127,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
         ...(item.key === 'knowledge'
           ? {
               mcp_server_id: mcpServerId,
+              automatic_knowledge_enabled: automaticKnowledgeEnabled,
               embedding_enabled: embeddingEnabled,
               embedding_model_id: embeddingModelId || null,
             }
@@ -257,6 +264,34 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                           )}
                         </span>
                       </dd>
+                    </div>
+                    <div className="detail detail--full knowledge-embedding-setting">
+                      <div className="setting-row">
+                        <span>
+                          <strong>Automatic knowledge</strong>
+                          <small>
+                            Add relevant saved knowledge to Mounir’s context before each user
+                            request.
+                          </small>
+                          {item.mcp_server_status === 'connected' &&
+                            !item.automatic_knowledge_available && (
+                              <small className="field__error">
+                                Automatic knowledge is unavailable because this GBrain version does
+                                not provide automatic context.
+                              </small>
+                            )}
+                        </span>
+                        <label className="switch">
+                          <input
+                            type="checkbox"
+                            checked={automaticKnowledgeEnabled}
+                            onChange={(event) => setAutomaticKnowledgeEnabled(event.target.checked)}
+                          />
+                          <span className="switch__track">
+                            <span />
+                          </span>
+                        </label>
+                      </div>
                     </div>
                     <div className="detail detail--full knowledge-embedding-setting">
                       <div className="setting-row">

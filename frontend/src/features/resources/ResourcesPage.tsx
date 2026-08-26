@@ -236,6 +236,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       model_id: number | null
       generation_model_id?: number | null
       mcp_server_id?: number | null
+      automatic_knowledge_enabled?: boolean
       embedding_enabled?: boolean
       embedding_model_id?: number | null
       confirm_tools?: string[]

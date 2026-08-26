@@ -22,6 +22,11 @@ BUILTIN_SERVER_DESCRIPTION = (
 BUILTIN_SERVER_COMMAND = "gbrain serve"
 BUILTIN_SETUP_COMMAND = "python -m mounir.setup_gbrain"
 
+# GBrain's official per-turn, zero-LLM context operation. It is an internal
+# supervisor read rather than a Knowledge subagent capability, so it is not
+# included in TOOL_NAMES or exposed in the Knowledge tool picker.
+AUTOMATIC_CONTEXT_TOOL = "volunteer_context"
+
 TOOL_NAMES = (
     "recall",
     "search",

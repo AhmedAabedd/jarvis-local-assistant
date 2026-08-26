@@ -54,6 +54,7 @@ from mounir import (
     config as cfg,
     db,
     embedding_models,
+    gbrain_runtime,
     llm,
     mcp_oauth,
     skill_store,
@@ -62,7 +63,7 @@ from mounir import (
 from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
 from mounir.heartbeat import HeartbeatService
-from mounir.specialists.mcp_agent import discover_tools
+from mounir.specialists.mcp_agent import _list_tools, discover_tools
 from mounir.telegram_bridge import TelegramBridge
 from mounir.whatsapp_bridge import WhatsAppBridge
 
@@ -100,6 +101,84 @@ class _OAuthSetupRun:
 
 
 _oauth_setup_runs: dict[int, _OAuthSetupRun] = {}
+_gbrain_lifecycle_active = False
+_gbrain_reconfigure_lock = threading.Lock()
+
+
+async def _run_gbrain_lifecycle_call(callback) -> None:
+    """Run a potentially waiting lifecycle call without blocking the web loop."""
+    finished = threading.Event()
+    failure: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            callback()
+        except BaseException as exc:
+            failure.append(exc)
+        finally:
+            finished.set()
+
+    threading.Thread(
+        target=invoke,
+        name="mounir-gbrain-lifecycle",
+        daemon=True,
+    ).start()
+    while not finished.is_set():
+        await asyncio.sleep(0.02)
+    if failure:
+        raise failure[0]
+
+
+async def _discover_server_tools(spec: dict) -> list[dict]:
+    """Discover through the existing GBrain process when it owns PGLite."""
+    if not gbrain_runtime.runtime.owns(spec):
+        return await discover_tools(spec)
+    async with gbrain_runtime.session(spec) as session:
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema or {},
+            }
+            for tool in await _list_tools(session)
+        ]
+
+
+def _reconcile_gbrain_runtime_sync() -> None:
+    """Match the process lifetime to the saved effective automatic setting."""
+    with _gbrain_reconfigure_lock:
+        if not _gbrain_lifecycle_active:
+            gbrain_runtime.runtime.stop()
+            return
+        spec = db.get_builtin_agent_server_spec("knowledge")
+        should_run = bool(
+            spec
+            and db.is_automatic_knowledge_enabled()
+            and db.is_automatic_knowledge_available()
+        )
+        if not should_run:
+            gbrain_runtime.runtime.stop()
+            return
+        if gbrain_runtime.runtime.start(spec):
+            return
+        server_id = int(spec["server_id"])
+        error = (
+            gbrain_runtime.runtime.last_error
+            or "The persistent GBrain runtime could not start."
+        )
+        gbrain_runtime.runtime.stop()
+        db.record_server_test_failure(
+            server_id,
+            error,
+        )
+
+
+async def _reconcile_gbrain_runtime() -> None:
+    await _run_gbrain_lifecycle_call(_reconcile_gbrain_runtime_sync)
+
+
+async def _stop_gbrain_runtime() -> None:
+    await _run_gbrain_lifecycle_call(gbrain_runtime.runtime.stop)
 
 
 async def _prepare_builtin_gbrain() -> None:
@@ -112,10 +191,14 @@ async def _prepare_builtin_gbrain() -> None:
         return
     server_id = int(server["id"])
     try:
-        await asyncio.to_thread(ensure_local_gbrain)
         spec = db.build_server_spec(server_id)
         if spec is None:
             raise RuntimeError("The built-in GBrain server configuration is missing.")
+        if _gbrain_lifecycle_active and db.is_automatic_knowledge_enabled():
+            gbrain_runtime.runtime.reserve(spec)
+        await _run_gbrain_lifecycle_call(ensure_local_gbrain)
+        # Setup owns the reservation, so this is the one allowed temporary
+        # session before the persistent runtime takes over.
         discovered = await asyncio.wait_for(discover_tools(spec), timeout=60)
         names = {str(tool.get("name") or "") for tool in discovered}
         missing = knowledge_protocol.missing_tools(names)
@@ -131,6 +214,8 @@ async def _prepare_builtin_gbrain() -> None:
         from mounir.specialists.mcp_agent import _exc_detail
 
         db.record_server_test_failure(server_id, _exc_detail(exc))
+    finally:
+        await _reconcile_gbrain_runtime()
 
 # Ensure the SQLite DB exists and the legacy JSON file is migrated.
 db.init()
@@ -343,6 +428,8 @@ def _safe_whatsapp_error(exc: Exception, settings: dict | None = None) -> str:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    global _gbrain_lifecycle_active
+    _gbrain_lifecycle_active = True
     gbrain_setup = asyncio.create_task(_prepare_builtin_gbrain())
     await heartbeat_service.start()
     saved = db.get_telegram_settings(include_secret=True)
@@ -352,9 +439,11 @@ async def _lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        _gbrain_lifecycle_active = False
         if not gbrain_setup.done():
             gbrain_setup.cancel()
         await asyncio.gather(gbrain_setup, return_exceptions=True)
+        await _stop_gbrain_runtime()
         oauth_tasks = [
             run.task
             for run in _oauth_setup_runs.values()
@@ -990,6 +1079,7 @@ async def update_supervisor(req: dict):
 
 @app.put("/api/builtin-agents/{agent_key}")
 async def update_builtin_agent(agent_key: str, req: dict):
+    gbrain_was_paused = False
     try:
         changes = {}
         if "model_id" in req:
@@ -1002,6 +1092,10 @@ async def update_builtin_agent(agent_key: str, req: dict):
             changes["connected"] = req.get("connected")
         if "enabled" in req:
             changes["enabled"] = req.get("enabled")
+        if "automatic_knowledge_enabled" in req:
+            changes["automatic_knowledge_enabled"] = req.get(
+                "automatic_knowledge_enabled"
+            )
         if "embedding_enabled" in req:
             changes["embedding_enabled"] = req.get("embedding_enabled")
         if "embedding_model_id" in req:
@@ -1045,14 +1139,22 @@ async def update_builtin_agent(agent_key: str, req: dict):
                     or not runtime.get("dimensions")
                 ):
                     raise ValueError("test the embedding model before enabling it")
-                await asyncio.to_thread(
-                    embedding_models.apply_to_gbrain,
-                    next_enabled,
-                    runtime,
+                if _gbrain_lifecycle_active:
+                    await _stop_gbrain_runtime()
+                    gbrain_was_paused = True
+                await _run_gbrain_lifecycle_call(
+                    lambda: embedding_models.apply_to_gbrain(
+                        next_enabled,
+                        runtime,
+                    )
                 )
-        return db.update_builtin_agent(agent_key, **changes)
+        saved = db.update_builtin_agent(agent_key, **changes)
     except (RuntimeError, TypeError, ValueError) as exc:
+        if gbrain_was_paused:
+            await _reconcile_gbrain_runtime()
         return JSONResponse({"error": str(exc)}, status_code=400)
+    await _reconcile_gbrain_runtime()
+    return saved
 
 
 @app.get("/api/builtin-agents")
@@ -1484,10 +1586,13 @@ async def test_server(server_id: int):
             status_code=409,
         )
     try:
-        tools_found = await asyncio.wait_for(discover_tools(spec), timeout=45)
+        tools_found = await asyncio.wait_for(
+            _discover_server_tools(spec), timeout=45
+        )
     except TimeoutError:
         error = "Connection timed out after 45 seconds."
         db.record_server_test_failure(server_id, error)
+        await _reconcile_gbrain_runtime()
         return JSONResponse(
             {"error": error}, status_code=504
         )
@@ -1497,8 +1602,10 @@ async def test_server(server_id: int):
 
         error = _exc_detail(exc)
         db.record_server_test_failure(server_id, error)
+        await _reconcile_gbrain_runtime()
         return JSONResponse({"error": error}, status_code=400)
     state = db.save_server_tools(server_id, tools_found)
+    await _reconcile_gbrain_runtime()
     return {"ok": True, **state}
 
 
@@ -1559,7 +1666,15 @@ async def run_server_setup_action(server_id: int, action_id: str, request: Reque
         return JSONResponse({"error": "Server not found."}, status_code=404)
     try:
         if action_id == "run_command":
-            return await _run_local_setup_command(server_id)
+            managed = db.get_builtin_gbrain_server()
+            is_gbrain = bool(managed and int(managed["id"]) == server_id)
+            if is_gbrain and _gbrain_lifecycle_active:
+                await _stop_gbrain_runtime()
+            try:
+                return await _run_local_setup_command(server_id)
+            finally:
+                if is_gbrain:
+                    await _prepare_builtin_gbrain()
         if action_id == "disconnect_oauth":
             run = _oauth_setup_runs.pop(server_id, None)
             if run and run.task and not run.task.done():

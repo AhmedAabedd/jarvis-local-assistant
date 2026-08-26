@@ -467,6 +467,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             model_id INTEGER REFERENCES models(id),
             generation_model_id INTEGER REFERENCES models(id),
             mcp_server_id INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT,
+            automatic_knowledge_enabled INTEGER NOT NULL DEFAULT 1
+                CHECK (automatic_knowledge_enabled IN (0, 1)),
             embedding_enabled INTEGER NOT NULL DEFAULT 0
                 CHECK (embedding_enabled IN (0, 1)),
             embedding_model_id INTEGER REFERENCES embedding_models(id) ON DELETE RESTRICT,
@@ -706,6 +708,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "model_id": "INTEGER REFERENCES models(id)",
             "generation_model_id": "INTEGER REFERENCES models(id)",
             "mcp_server_id": "INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT",
+            "automatic_knowledge_enabled": (
+                "INTEGER NOT NULL DEFAULT 1 "
+                "CHECK (automatic_knowledge_enabled IN (0, 1))"
+            ),
             "embedding_enabled": "INTEGER NOT NULL DEFAULT 0 CHECK (embedding_enabled IN (0, 1))",
             "embedding_model_id": "INTEGER REFERENCES embedding_models(id) ON DELETE RESTRICT",
             "confirm_tools": "TEXT NOT NULL DEFAULT '[]'",
@@ -2621,6 +2627,7 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
             setting = conn.execute(
                 """
                 SELECT s.model_id, s.generation_model_id, s.mcp_server_id,
+                       s.automatic_knowledge_enabled,
                        s.embedding_enabled, s.embedding_model_id,
                        s.confirm_tools, s.connected, s.enabled,
                        COALESCE(m.model, s.model) AS model,
@@ -2644,6 +2651,7 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
             else None
         )
         protocol_missing: list[str] = []
+        advertised_names: set[str] = set()
         exposed_tools = capability["tools"]
         if key == "knowledge" and server_id is not None:
             state = get_server_tools_state(server_id)
@@ -2698,6 +2706,15 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                 "knowledge_protocol_missing_tools": (
                     protocol_missing if key == "knowledge" else []
                 ),
+                "automatic_knowledge_enabled": (
+                    bool(setting["automatic_knowledge_enabled"])
+                    if setting else True
+                ) if key == "knowledge" else None,
+                "automatic_knowledge_available": (
+                    setting is not None
+                    and setting["mcp_server_status"] == "connected"
+                    and knowledge_protocol.AUTOMATIC_CONTEXT_TOOL in advertised_names
+                ) if key == "knowledge" else None,
                 "embedding_enabled": (
                     bool(setting["embedding_enabled"]) if setting else False
                 ) if key == "knowledge" else None,
@@ -2736,6 +2753,7 @@ def update_builtin_agent(
     model_id: int | None | object = _UNSET,
     generation_model_id: int | None | object = _UNSET,
     mcp_server_id: int | None | object = _UNSET,
+    automatic_knowledge_enabled: bool | None = None,
     embedding_enabled: bool | None = None,
     embedding_model_id: int | None | object = _UNSET,
     confirm_tools: list[str] | str | object = _UNSET,
@@ -2753,6 +2771,7 @@ def update_builtin_agent(
         and embedding_model_id is _UNSET
         and confirm_tools is _UNSET
         and skill_ids is _UNSET
+        and automatic_knowledge_enabled is None
         and embedding_enabled is None
         and connected is None
         and enabled is None
@@ -2814,6 +2833,15 @@ def update_builtin_agent(
     )
     if normalized_embedding_enabled is not None and definition["key"] != "knowledge":
         raise ValueError("only Knowledge supports embeddings")
+    normalized_automatic_knowledge = (
+        int(_bool(automatic_knowledge_enabled, "automatic knowledge"))
+        if automatic_knowledge_enabled is not None else None
+    )
+    if (
+        normalized_automatic_knowledge is not None
+        and definition["key"] != "knowledge"
+    ):
+        raise ValueError("only Knowledge supports automatic knowledge")
     confirmation_requested = confirm_tools is not _UNSET
     normalized_confirm_tools = None
     if confirmation_requested:
@@ -2915,6 +2943,15 @@ def update_builtin_agent(
                 """,
                 (requested_embedding_id, _now(), definition["key"]),
             )
+        if normalized_automatic_knowledge is not None:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET automatic_knowledge_enabled = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (normalized_automatic_knowledge, _now(), definition["key"]),
+            )
         if normalized_embedding_enabled is not None:
             conn.execute(
                 """
@@ -2971,6 +3008,42 @@ def is_builtin_agent_enabled(agent_key: str) -> bool:
             (key,),
         ).fetchone()
     return bool(row and row["enabled"] and row["connected"])
+
+
+def is_automatic_knowledge_enabled() -> bool:
+    """Return the effective per-turn Knowledge context setting."""
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT automatic_knowledge_enabled, enabled, connected
+            FROM builtin_agent_settings
+            WHERE agent_key = 'knowledge'
+            """
+        ).fetchone()
+    return bool(
+        row
+        and row["automatic_knowledge_enabled"]
+        and row["enabled"]
+        and row["connected"]
+    )
+
+
+def is_automatic_knowledge_available() -> bool:
+    """Return whether the managed server advertises per-turn context."""
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM builtin_agent_settings setting
+            JOIN mcp_servers server ON server.id = setting.mcp_server_id
+            JOIN mcp_server_tools tool ON tool.mcp_server_id = server.id
+            WHERE setting.agent_key = 'knowledge'
+              AND server.connection_status = 'connected'
+              AND tool.name = ?
+            """,
+            (knowledge_protocol.AUTOMATIC_CONTEXT_TOOL,),
+        ).fetchone()
+    return row is not None
 
 
 def enabled_builtin_agent_keys() -> set[str]:
