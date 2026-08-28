@@ -239,14 +239,14 @@ export function ServerForm({
                 title="Environment variables"
                 entries={environment}
                 onChange={setEnvironment}
+                hint="Add values required by this server, such as API keys or file paths."
               />
               <div className="credential-file-editor">
                 <div className="key-value-editor__title">
                   <div>
                     <strong>Credential files</strong>
                     <small>
-                      Files stay private and their local paths are passed through your chosen
-                      variable.
+                      Upload private files and set the variable name used for each file.
                     </small>
                   </div>
                   <Button

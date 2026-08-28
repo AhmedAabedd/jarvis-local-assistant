@@ -1257,10 +1257,12 @@ textarea {
   margin-top: 8px;
 }
 .file-picker {
+  position: relative;
   min-width: 0;
   min-height: 40px;
   display: flex;
   align-items: center;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 9px;
   padding: 9px 11px;
@@ -1279,10 +1281,14 @@ textarea {
 }
 .file-picker input {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
   opacity: 0;
-  pointer-events: none;
+  cursor: pointer;
 }
 .setup-method-row {
   min-width: 0;
@@ -2247,7 +2253,7 @@ select:disabled {
 .modal--compact-write-form .field {
   gap: 4px;
 }
-.modal--compact-write-form input:not([type='radio']):not([type='checkbox']),
+.modal--compact-write-form input:not([type='radio']):not([type='checkbox']):not([type='file']),
 .modal--compact-write-form select,
 .modal--compact-write-form textarea {
   min-height: 32px;
