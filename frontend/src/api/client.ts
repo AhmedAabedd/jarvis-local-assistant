@@ -11,6 +11,7 @@ import type {
   EmbeddingModelRecord,
   Notification,
   Profile,
+  ProviderRecord,
   ServerToolsState,
   SkillAssignment,
   SkillRecord,
@@ -71,6 +72,13 @@ export const api = {
   profile: {
     get: () => request<Profile>('/api/profile'),
     update: (body: Partial<Profile>) => request<Profile>('/api/profile', json('PUT', body)),
+  },
+  providers: {
+    list: () => request<ProviderRecord[]>('/api/providers'),
+    create: (body: object) => request<ProviderRecord>('/api/providers', json('POST', body)),
+    update: (id: number, body: object) =>
+      request<ProviderRecord>(`/api/providers/${id}`, json('PUT', body)),
+    remove: (id: number) => request(`/api/providers/${id}`, json('DELETE')),
   },
   overview: {
     get: () => request<AgentOverview>('/api/agent-overview'),

@@ -1,20 +1,23 @@
 import { Search } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
-import type { EmbeddingModelRecord } from '../../api/types'
+import type { EmbeddingModelRecord, ProviderRecord } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Field } from '../../components/ui/Field'
 import { Feedback } from '../../components/ui/Feedback'
 import { ModelLocationOptions, type ModelLocation } from './ModelLocationOptions'
+import { ProviderConnectionFields, type ProviderConnectionValue } from './ProviderConnectionFields'
 
 type Adapter = EmbeddingModelRecord['adapter']
 
 export function EmbeddingModelForm({
   item,
+  providers,
   formId,
   onSubmit,
 }: {
   item?: EmbeddingModelRecord
+  providers: ProviderRecord[]
   formId: string
   onSubmit: (body: object) => Promise<void>
 }) {
@@ -24,16 +27,14 @@ export function EmbeddingModelForm({
   const [models, setModels] = useState<string[]>([])
   const [location, setLocation] = useState<ModelLocation>(item?.location || 'cloud')
   const [adapter, setAdapter] = useState<Adapter>(item?.adapter || 'openai_compatible')
-  const [baseUrl, setBaseUrl] = useState(
-    item?.base_url || (location === 'local' ? 'http://localhost:11434/v1' : ''),
-  )
-  const [apiKey, setApiKey] = useState('')
+  const [connection, setConnection] = useState<ProviderConnectionValue>(() => ({
+    providerId: item?.provider_id ? String(item.provider_id) : '',
+    baseUrlId: item?.provider_base_url_id ? String(item.provider_base_url_id) : '',
+    apiKeyId: item?.provider_api_key_id ? String(item.provider_api_key_id) : '',
+  }))
 
   const changeLocation = (next: ModelLocation) => {
     setLocation(next)
-    if (!item && !baseUrl) {
-      setBaseUrl(next === 'local' ? 'http://localhost:11434/v1' : '')
-    }
   }
 
   const discover = async () => {
@@ -44,8 +45,9 @@ export function EmbeddingModelForm({
         ...(item ? { id: item.id } : {}),
         location,
         adapter,
-        base_url: baseUrl,
-        api_key: apiKey,
+        provider_id: connection.providerId,
+        provider_base_url_id: connection.baseUrlId,
+        provider_api_key_id: connection.apiKeyId,
       })
       setModels(result.models)
       if (!result.models.length) {
@@ -62,7 +64,6 @@ export function EmbeddingModelForm({
     event.preventDefault()
     setError('')
     const body = Object.fromEntries(new FormData(event.currentTarget).entries())
-    if (item && !String(body.api_key || '').trim()) delete body.api_key
     try {
       await onSubmit(body)
     } catch (caught) {
@@ -94,45 +95,16 @@ export function EmbeddingModelForm({
           <option value="ollama">Ollama</option>
         </select>
       </Field>
-      <Field
-        full
-        label="Base URL"
-        hint={
+      <ProviderConnectionFields
+        providers={providers}
+        value={connection}
+        onChange={setConnection}
+        urlHint={
           adapter === 'ollama'
-            ? 'The Ollama server address. The standard local API is http://localhost:11434/v1.'
-            : 'The OpenAI-compatible API root. Do not include /embeddings.'
+            ? 'Choose the saved Ollama-compatible server root.'
+            : 'Choose an OpenAI-compatible API root; do not include /embeddings.'
         }
-      >
-        <input
-          type="url"
-          name="base_url"
-          value={baseUrl}
-          onChange={(event) => setBaseUrl(event.target.value)}
-          placeholder={
-            location === 'local' ? 'http://localhost:11434/v1' : 'https://provider.example/v1'
-          }
-          required
-        />
-      </Field>
-      <Field
-        full
-        label="API key"
-        hint={
-          item?.api_key_configured
-            ? 'A key is saved. Leave blank to keep it.'
-            : location === 'local'
-              ? 'Leave blank unless the local service requires authentication.'
-              : 'Enter the provider key, or an environment reference such as $EMBEDDING_API_KEY.'
-        }
-      >
-        <input
-          name="api_key"
-          type="password"
-          value={apiKey}
-          onChange={(event) => setApiKey(event.target.value)}
-          placeholder="Enter an API key"
-        />
-      </Field>
+      />
       <div className="field field--full">
         <span className="field__label">Model ID</span>
         <span className="field__hint">

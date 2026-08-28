@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
-import type { TtsVoiceOption, VoiceModelRecord } from '../../api/types'
+import type { ProviderRecord, TtsVoiceOption, VoiceModelRecord } from '../../api/types'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
 import { ModelLocationOptions, type ModelLocation } from './ModelLocationOptions'
+import { ProviderConnectionFields, type ProviderConnectionValue } from './ProviderConnectionFields'
 
 type VoiceKind = VoiceModelRecord['kind']
 
@@ -15,11 +16,13 @@ function defaultProvider(kind: VoiceKind, location: ModelLocation) {
 export function VoiceModelForm({
   kind,
   item,
+  providers,
   formId,
   onSubmit,
 }: {
   kind: VoiceKind
   item?: VoiceModelRecord
+  providers: ProviderRecord[]
   formId: string
   onSubmit: (body: object) => Promise<void>
 }) {
@@ -28,7 +31,11 @@ export function VoiceModelForm({
   const [provider, setProvider] = useState(item?.provider || defaultProvider(kind, location))
   const [model, setModel] = useState(item?.model || '')
   const [voice, setVoice] = useState(item?.voice || '')
-  const [baseUrl, setBaseUrl] = useState(item?.base_url || '')
+  const [connection, setConnection] = useState<ProviderConnectionValue>(() => ({
+    providerId: item?.provider_id ? String(item.provider_id) : '',
+    baseUrlId: item?.provider_base_url_id ? String(item.provider_base_url_id) : '',
+    apiKeyId: item?.provider_api_key_id ? String(item.provider_api_key_id) : '',
+  }))
   const [voices, setVoices] = useState<TtsVoiceOption[] | null>(null)
   const [voiceError, setVoiceError] = useState('')
 
@@ -36,7 +43,7 @@ export function VoiceModelForm({
     setLocation(next)
     const nextProvider = defaultProvider(kind, next)
     setProvider(nextProvider)
-    setBaseUrl('')
+    setConnection({ providerId: '', baseUrlId: '', apiKeyId: '' })
     setVoice('')
     setVoices(null)
     setVoiceError('')
@@ -77,7 +84,6 @@ export function VoiceModelForm({
     event.preventDefault()
     setError('')
     const body = Object.fromEntries(new FormData(event.currentTarget).entries())
-    if (item && !String(body.api_key || '').trim()) delete body.api_key
     try {
       await onSubmit({ ...body, kind, location, provider })
     } catch (caught) {
@@ -109,7 +115,6 @@ export function VoiceModelForm({
             onChange={(event) => {
               const next = event.target.value
               setProvider(next)
-              setBaseUrl(next === 'google' ? 'https://texttospeech.googleapis.com/v1' : '')
               setVoice('')
               setVoices(null)
             }}
@@ -221,39 +226,17 @@ export function VoiceModelForm({
       {isTts && provider !== 'google' && <input type="hidden" name="language" value="auto" />}
 
       {remote && (
-        <>
-          <Field
-            full
-            label="API URL"
-            hint={
-              kind === 'stt'
-                ? 'An API root or complete /audio/transcriptions endpoint.'
-                : 'An API root or complete /audio/speech endpoint.'
-            }
-          >
-            <input
-              type="url"
-              name="base_url"
-              value={baseUrl}
-              onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="https://provider.example/v1"
-              required
-            />
-          </Field>
-          <Field
-            full
-            label="API key"
-            hint={
-              item?.api_key_configured
-                ? 'A key is saved. Leave blank to keep it.'
-                : provider === 'google'
-                  ? 'Required by Google Cloud Text-to-Speech.'
-                  : 'Optional for unauthenticated compatible endpoints.'
-            }
-          >
-            <input name="api_key" type="password" />
-          </Field>
-        </>
+        <ProviderConnectionFields
+          providers={providers}
+          value={connection}
+          onChange={setConnection}
+          urlLabel="API URL"
+          urlHint={
+            kind === 'stt'
+              ? 'Choose an API root or complete /audio/transcriptions endpoint.'
+              : 'Choose an API root or complete /audio/speech endpoint.'
+          }
+        />
       )}
       <div className="field--full">
         <Feedback message={error} />

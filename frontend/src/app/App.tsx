@@ -32,6 +32,11 @@ const SkillsPage = lazy(() =>
 const VoicePage = lazy(() =>
   import('../features/settings/VoicePage').then((module) => ({ default: module.VoicePage })),
 )
+const ProvidersPage = lazy(() =>
+  import('../features/settings/ProvidersPage').then((module) => ({
+    default: module.ProvidersPage,
+  })),
+)
 const TelegramPage = lazy(() =>
   import('../features/settings/TelegramPage').then((module) => ({ default: module.TelegramPage })),
 )
@@ -60,6 +65,7 @@ export function App() {
           <Route path="agents" element={<ResourcesPage key="agents" kind="agents" />} />
           <Route path="workflows" element={<WorkflowsPage />} />
           <Route path="voice" element={<VoicePage />} />
+          <Route path="providers" element={<ProvidersPage />} />
           <Route path="telegram" element={<TelegramPage />} />
           <Route path="whatsapp" element={<WhatsAppPage />} />
           <Route path="heartbeat" element={<HeartbeatPage />} />

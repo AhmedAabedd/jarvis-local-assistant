@@ -1367,6 +1367,9 @@ async def create_model(req: dict):
             req.get("base_url", ""),
             req.get("api_key", ""),
             req.get("location", ""),
+            req.get("provider_id"),
+            req.get("provider_base_url_id"),
+            req.get("provider_api_key_id"),
         )
         return db.model_for_api(model)
     except (TypeError, ValueError) as exc:
@@ -1400,6 +1403,42 @@ def _restricted_delete_response(result: db.DeletionResult, resource: str):
     )
 
 
+@app.get("/api/providers")
+async def list_providers():
+    return db.list_providers()
+
+
+@app.post("/api/providers")
+async def create_provider(req: dict):
+    try:
+        return db.add_provider(
+            req.get("name", ""),
+            req.get("description", ""),
+            req.get("base_urls", []),
+            req.get("api_keys", []),
+        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/providers/{provider_id}")
+async def update_provider(provider_id: int, req: dict):
+    try:
+        provider = db.update_provider(provider_id, **req)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if provider is None:
+        return JSONResponse({"error": "Provider not found."}, status_code=404)
+    return provider
+
+
+@app.delete("/api/providers/{provider_id}")
+async def delete_provider(provider_id: int):
+    return _restricted_delete_response(
+        db.delete_provider_result(provider_id), "Provider"
+    )
+
+
 @app.delete("/api/models/{model_id}")
 async def delete_model(model_id: int):
     return _restricted_delete_response(db.delete_model_result(model_id), "Model")
@@ -1423,6 +1462,9 @@ async def create_embedding_model(req: dict):
             req.get("model", ""),
             req.get("base_url", ""),
             req.get("api_key", ""),
+            req.get("provider_id"),
+            req.get("provider_base_url_id"),
+            req.get("provider_api_key_id"),
         )
         return db.embedding_model_for_api(model)
     except (TypeError, ValueError) as exc:
@@ -1457,17 +1499,28 @@ async def discover_embedding_models(req: dict):
                 return JSONResponse(
                     {"error": "Embedding model not found."}, status_code=404
                 )
+        candidate_url = req.get("base_url", (saved or {}).get("base_url", ""))
+        api_key = req.get("api_key") or (saved or {}).get("api_key", "")
+        if req.get("provider_id") not in (None, ""):
+            connection = db.resolve_provider_connection(
+                req.get("provider_id"),
+                req.get("provider_base_url_id"),
+                req.get("provider_api_key_id"),
+                require_url=True,
+            )
+            candidate_url = connection["base_url"]
+            api_key = connection["api_key"]
         _, adapter, base_url = db._normalize_embedding_connection(
             req.get("location", (saved or {}).get("location", "cloud")),
             req.get("adapter", (saved or {}).get("adapter", "openai_compatible")),
-            req.get("base_url", (saved or {}).get("base_url", "")),
+            candidate_url,
         )
         models = await asyncio.to_thread(
             embedding_models.discover_models,
             {
                 "adapter": adapter,
                 "base_url": base_url,
-                "api_key": req.get("api_key") or (saved or {}).get("api_key", ""),
+                "api_key": api_key,
             },
         )
         return {"models": models}

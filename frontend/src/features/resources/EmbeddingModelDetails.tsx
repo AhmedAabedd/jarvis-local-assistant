@@ -59,15 +59,19 @@ export function EmbeddingModelDetails({
           <Detail label="Name" value={item.name} />
           <Detail label="Location" value={readable(item.location)} />
           <Detail label="Connection type" value={readable(item.adapter)} />
+          <Detail label="Provider" value={item.provider_name || 'Not configured'} />
           <Detail
             label="Dimensions"
             value={item.dimensions ? `${item.dimensions}` : 'Detected after testing'}
           />
           <Detail label="Model ID" value={item.model} full />
-          <Detail label="Base URL" value={item.base_url} full />
+          <Detail label={item.provider_base_url_name || 'Base URL'} value={item.base_url} full />
           <Detail
             label="Credential"
-            value={item.api_key_configured ? 'API key saved' : 'No API key saved'}
+            value={
+              item.provider_api_key_name ||
+              (item.api_key_configured ? 'API key saved' : 'No API key saved')
+            }
             full
           />
           {item.last_error && <Detail label="Last error" value={item.last_error} full />}

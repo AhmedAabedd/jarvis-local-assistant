@@ -1,5 +1,5 @@
 import { X } from 'lucide-react'
-import { useEffect, useId, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 interface Props {
@@ -14,6 +14,7 @@ interface Props {
   className?: string
   integrated?: boolean
   headingActions?: ReactNode
+  fixedInitialHeight?: boolean
 }
 
 export function Modal({
@@ -28,17 +29,28 @@ export function Modal({
   className,
   integrated,
   headingActions,
+  fixedInitialHeight,
 }: Props) {
   const titleId = useId()
+  const panelRef = useRef<HTMLElement>(null)
   useEffect(() => {
     if (!open) return
     const closeOnEscape = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [open, onClose])
+  useLayoutEffect(() => {
+    const panel = panelRef.current
+    if (!open || !fixedInitialHeight || !panel) return
+    panel.style.height = `${panel.getBoundingClientRect().height}px`
+    return () => {
+      panel.style.height = ''
+    }
+  }, [fixedInitialHeight, open])
   if (!open) return null
   const panel = (
     <section
+      ref={panelRef}
       className={`modal ${wide ? 'modal--wide' : ''} ${side ? 'modal--side' : ''} ${className || ''}`}
       role="dialog"
       aria-modal={side ? 'false' : 'true'}

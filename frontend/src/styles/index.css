@@ -103,14 +103,17 @@ button {
   position: sticky;
   top: 0;
   height: 100%;
+  min-height: 0;
   padding: 22px 14px 16px;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   border-right: 1px solid var(--line-soft);
   background: #0e1512;
 }
 .brand {
   height: 54px;
+  flex-shrink: 0;
   padding: 0 10px;
   display: flex;
   align-items: center;
@@ -142,10 +145,16 @@ button {
 .studio-nav {
   display: flex;
   flex: 1;
+  min-height: 0;
   flex-direction: column;
   gap: 3px;
   padding-top: 20px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.studio-nav > * {
+  flex-shrink: 0;
 }
 .nav-label {
   color: var(--muted-2);
@@ -176,6 +185,7 @@ button {
 }
 .back-to-chat {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 10px;
   margin-top: 14px;
@@ -2518,6 +2528,35 @@ select:disabled {
 .modal--mcp-write-form .key-value-editor {
   padding: 11px;
   border-radius: 8px;
+}
+.modal--provider-write-form .key-value-editor {
+  padding: 11px;
+  border-radius: 8px;
+}
+.modal--provider-write-form .key-value-row {
+  grid-template-columns: minmax(0, 0.78fr) minmax(0, 1.22fr) 32px;
+}
+.modal--provider-write-form .key-value-row .icon-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+}
+.provider-detail-list {
+  display: grid;
+  gap: 9px;
+}
+.provider-detail-list > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.provider-detail-list strong {
+  font-size: 11px;
+}
+.provider-detail-list code {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 .modal--mcp-write-form .credential-file-row {
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) 32px;
@@ -5609,6 +5648,8 @@ button.panel-close-button svg {
     justify-content: space-around;
     padding: 0;
     overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-gutter: auto;
   }
   .studio-nav a {
     min-width: 50px;

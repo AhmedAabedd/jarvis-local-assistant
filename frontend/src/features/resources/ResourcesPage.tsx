@@ -42,6 +42,7 @@ import {
   useEmbeddingModels,
   useModelCatalog,
   useModels,
+  useProviders,
   useServers,
   useSkills,
   keys,
@@ -137,6 +138,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const [params, setParams] = useSearchParams()
   const location = useLocation()
   const models = useModels()
+  const providers = useProviders()
   const modelCatalog = useModelCatalog()
   const embeddingModels = useEmbeddingModels()
   const servers = useServers()
@@ -983,6 +985,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           {activeModelType === 'llm' && (
             <ModelForm
               item={editing as ModelRecord | undefined}
+              providers={providers.data || []}
               formId={formId}
               onSubmit={submit}
             />
@@ -990,6 +993,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           {activeModelType === 'embedding' && (
             <EmbeddingModelForm
               item={editing as EmbeddingModelRecord | undefined}
+              providers={providers.data || []}
               formId={formId}
               onSubmit={submit}
             />
@@ -999,6 +1003,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
               key={activeModelType}
               kind={activeModelType}
               item={editing as VoiceModelRecord | undefined}
+              providers={providers.data || []}
               formId={formId}
               onSubmit={submit}
             />
@@ -1057,14 +1062,21 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         ) : createModelType ? (
           <>
             <div key={`model-create-form:${createModelType}`} className="model-write-modal-form">
-              {createModelType === 'llm' && <ModelForm formId={formId} onSubmit={submit} />}
+              {createModelType === 'llm' && (
+                <ModelForm providers={providers.data || []} formId={formId} onSubmit={submit} />
+              )}
               {createModelType === 'embedding' && (
-                <EmbeddingModelForm formId={formId} onSubmit={submit} />
+                <EmbeddingModelForm
+                  providers={providers.data || []}
+                  formId={formId}
+                  onSubmit={submit}
+                />
               )}
               {(createModelType === 'tts' || createModelType === 'stt') && (
                 <VoiceModelForm
                   key={createModelType}
                   kind={createModelType}
+                  providers={providers.data || []}
                   formId={formId}
                   onSubmit={submit}
                 />

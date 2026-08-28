@@ -13,9 +13,39 @@ export interface ModelRecord {
   location: 'cloud' | 'local'
   model: string
   provider: string
+  provider_id?: Id | null
+  provider_name?: string
+  provider_base_url_id?: Id | null
+  provider_base_url_name?: string
+  provider_api_key_id?: Id | null
+  provider_api_key_name?: string
   base_url: string
   api_key?: string
   api_key_configured?: boolean
+}
+
+export interface ProviderBaseUrl {
+  id?: Id
+  name: string
+  value: string
+}
+
+export interface ProviderApiKey {
+  id?: Id
+  name: string
+  value: string
+  configured?: boolean
+}
+
+export interface ProviderRecord {
+  id: Id
+  name: string
+  description: string
+  base_urls: ProviderBaseUrl[]
+  api_keys: ProviderApiKey[]
+  model_count: number
+  created_at?: string
+  updated_at?: string
 }
 
 export interface EmbeddingModelRecord {
@@ -27,6 +57,12 @@ export interface EmbeddingModelRecord {
   base_url: string
   api_key?: string
   api_key_configured?: boolean
+  provider_id?: Id | null
+  provider_name?: string
+  provider_base_url_id?: Id | null
+  provider_base_url_name?: string
+  provider_api_key_id?: Id | null
+  provider_api_key_name?: string
   dimensions?: number | null
   connection_status: 'untested' | 'connected' | 'stale' | 'failed'
   last_tested_at?: string | null
@@ -45,6 +81,12 @@ export interface VoiceModelRecord {
   language: string
   api_key?: string
   api_key_configured?: boolean
+  provider_id?: Id | null
+  provider_name?: string
+  provider_base_url_id?: Id | null
+  provider_base_url_name?: string
+  provider_api_key_id?: Id | null
+  provider_api_key_name?: string
 }
 
 export interface ToolInfo {

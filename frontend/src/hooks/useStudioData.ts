@@ -3,6 +3,7 @@ import { api } from '../api/client'
 
 export const keys = {
   profile: ['profile'] as const,
+  providers: ['providers'] as const,
   overview: ['overview'] as const,
   builtins: ['builtins'] as const,
   models: ['models'] as const,
@@ -24,6 +25,9 @@ export const keys = {
 
 export function useProfile() {
   return useQuery({ queryKey: keys.profile, queryFn: api.profile.get })
+}
+export function useProviders() {
+  return useQuery({ queryKey: keys.providers, queryFn: api.providers.list })
 }
 export function useOverview() {
   return useQuery({ queryKey: keys.overview, queryFn: api.overview.get })

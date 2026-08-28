@@ -2,6 +2,7 @@
 
 Core tables include:
 
+- ``providers``    reusable service definitions with named URLs and API keys
 - ``models``       canonical registry for every configured model
 - ``*_model_details`` one-to-one, type-specific model configuration
 - ``mcp_servers``  reusable MCP server connections (transport + command/URL)
@@ -184,6 +185,32 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS providers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_base_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            value TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(provider_id, name COLLATE NOCASE)
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            value TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(provider_id, name COLLATE NOCASE)
+        );
+
         CREATE TABLE IF NOT EXISTS models (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
@@ -195,6 +222,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             provider TEXT NOT NULL DEFAULT '',
             base_url TEXT NOT NULL DEFAULT '',
             api_key TEXT NOT NULL DEFAULT '',
+            provider_id INTEGER REFERENCES providers(id) ON DELETE RESTRICT,
+            provider_base_url_id INTEGER REFERENCES provider_base_urls(id) ON DELETE RESTRICT,
+            provider_api_key_id INTEGER REFERENCES provider_api_keys(id) ON DELETE RESTRICT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -738,6 +768,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "model_type": "TEXT NOT NULL DEFAULT 'text' CHECK (model_type IN ('text', 'embedding', 'speech', 'transcription'))",
             "location": "TEXT NOT NULL DEFAULT 'cloud' CHECK (location IN ('cloud', 'local'))",
             "updated_at": "TEXT",
+            "provider_id": "INTEGER REFERENCES providers(id) ON DELETE RESTRICT",
+            "provider_base_url_id": "INTEGER REFERENCES provider_base_urls(id) ON DELETE RESTRICT",
+            "provider_api_key_id": "INTEGER REFERENCES provider_api_keys(id) ON DELETE RESTRICT",
         },
         "skills": {"source_name": "TEXT NOT NULL DEFAULT ''"},
         "builtin_agent_settings": {
@@ -825,6 +858,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 added_columns.add((table, column))
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_models_provider_base_url "
+        "ON models(provider_base_url_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_models_provider_api_key "
+        "ON models(provider_api_key_id)"
+    )
     # Discard the incompatible workflow experiment once. It used active/default
     # state and a seeded system record; the current architecture has neither.
     workflow_columns = {
@@ -1121,6 +1165,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     )
     _migrate_unified_models(conn)
     _bootstrap_voice_models(conn)
+    _migrate_model_providers(conn)
     _ensure_model_detail_triggers(conn)
     confirmation_filter = (
         "" if ("subagents", "confirm_tools") in added_columns
@@ -1373,6 +1418,529 @@ def model_for_api(model: dict | None) -> dict | None:
     result = dict(model)
     result["api_key_configured"] = bool(result.pop("api_key", ""))
     return result
+
+
+# -----------------------------------------------------------------------------
+# Reusable model providers
+# -----------------------------------------------------------------------------
+
+def _provider_entry_name(value, label: str) -> str:
+    name = _required(value, f"{label} name")
+    if len(name) > 120:
+        raise ValueError(f"{label} name is too long.")
+    return name
+
+
+def _provider_url(value) -> str:
+    url = _required(value, "base URL value").rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("Base URL values must start with http:// or https://.")
+    if len(url) > 2000:
+        raise ValueError("Base URL value is too long.")
+    return url
+
+
+def _provider_with_conn(
+    conn: sqlite3.Connection,
+    provider_id: int,
+    *,
+    include_secrets: bool = False,
+) -> dict | None:
+    row = conn.execute("SELECT * FROM providers WHERE id = ?", (provider_id,)).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result["base_urls"] = [
+        dict(entry)
+        for entry in conn.execute(
+            """
+            SELECT id, name, value FROM provider_base_urls
+            WHERE provider_id = ? ORDER BY position, id
+            """,
+            (provider_id,),
+        )
+    ]
+    result["api_keys"] = []
+    for entry in conn.execute(
+        """
+        SELECT id, name, value FROM provider_api_keys
+        WHERE provider_id = ? ORDER BY position, id
+        """,
+        (provider_id,),
+    ):
+        item = dict(entry)
+        item["configured"] = bool(item["value"])
+        if not include_secrets:
+            item["value"] = ""
+        result["api_keys"].append(item)
+    result["model_count"] = int(
+        conn.execute(
+            "SELECT COUNT(*) AS count FROM models WHERE provider_id = ?",
+            (provider_id,),
+        ).fetchone()["count"]
+    )
+    return result
+
+
+def get_provider(provider_id: int, *, include_secrets: bool = False) -> dict | None:
+    with _connect() as conn:
+        return _provider_with_conn(conn, int(provider_id), include_secrets=include_secrets)
+
+
+def list_providers() -> list[dict]:
+    with _connect() as conn:
+        ids = [
+            int(row["id"])
+            for row in conn.execute("SELECT id FROM providers ORDER BY name COLLATE NOCASE")
+        ]
+        return [_provider_with_conn(conn, provider_id) for provider_id in ids]
+
+
+def _normalize_provider_collection(value, label: str) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list.")
+    normalized = []
+    names: set[str] = set()
+    for position, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Each {label.lower()} entry must be an object.")
+        name = _provider_entry_name(raw.get("name"), label.rstrip("s"))
+        folded = name.casefold()
+        if folded in names:
+            raise ValueError(f'{label.rstrip("s")} “{name}” is duplicated.')
+        names.add(folded)
+        entry_id = raw.get("id")
+        if entry_id in (None, ""):
+            entry_id = None
+        else:
+            try:
+                entry_id = int(entry_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label.rstrip('s')} selection is invalid.") from exc
+        normalized.append(
+            {
+                "id": entry_id,
+                "name": name,
+                "value": str(raw.get("value") or "").strip(),
+                "position": position,
+            }
+        )
+    return normalized
+
+
+def _write_provider_entries(
+    conn: sqlite3.Connection,
+    provider_id: int,
+    table: str,
+    entries: list[dict],
+    *,
+    secret: bool,
+) -> None:
+    existing = {
+        int(row["id"]): dict(row)
+        for row in conn.execute(
+            f"SELECT id, name, value FROM {table} WHERE provider_id = ?",
+            (provider_id,),
+        )
+    }
+    kept: set[int] = set()
+    for entry in entries:
+        entry_id = entry["id"]
+        value = entry["value"]
+        if entry_id is not None:
+            current = existing.get(entry_id)
+            if current is None:
+                raise ValueError("Provider entry does not belong to this provider.")
+            if secret and not value:
+                value = current["value"]
+            if not secret:
+                value = _provider_url(value)
+            elif not value:
+                raise ValueError(f'API key value is required for “{entry["name"]}”.')
+            conn.execute(
+                f"UPDATE {table} SET name = ?, value = ?, position = ? WHERE id = ?",
+                (entry["name"], value, entry["position"], entry_id),
+            )
+            kept.add(entry_id)
+            continue
+        if not value:
+            kind = "API key" if secret else "Base URL"
+            raise ValueError(f'{kind} value is required for “{entry["name"]}”.')
+        if not secret:
+            value = _provider_url(value)
+        cur = conn.execute(
+            f"INSERT INTO {table} (provider_id, name, value, position) VALUES (?, ?, ?, ?)",
+            (provider_id, entry["name"], value, entry["position"]),
+        )
+        kept.add(int(cur.lastrowid))
+
+    removed = set(existing) - kept
+    if removed:
+        placeholders = ", ".join("?" for _ in removed)
+        reference_column = (
+            "provider_api_key_id" if secret else "provider_base_url_id"
+        )
+        used = conn.execute(
+            f"""
+            SELECT name FROM models
+            WHERE {reference_column} IN ({placeholders})
+            ORDER BY name LIMIT 1
+            """,
+            tuple(removed),
+        ).fetchone()
+        if used:
+            kind = "API key" if secret else "base URL"
+            raise ValueError(
+                f'This provider {kind} is used by the “{used["name"]}” model. '
+                "Assign that model to another value before removing it."
+            )
+        conn.execute(
+            f"DELETE FROM {table} WHERE id IN ({placeholders})",
+            tuple(removed),
+        )
+
+
+def _propagate_provider_connection(conn: sqlite3.Connection, provider_id: int) -> None:
+    provider = conn.execute(
+        "SELECT name FROM providers WHERE id = ?", (provider_id,)
+    ).fetchone()
+    if provider is None:
+        return
+    changed_embeddings = conn.execute(
+        """
+        SELECT m.id FROM models m
+        WHERE m.provider_id = ? AND m.model_type = 'embedding'
+          AND (
+            m.base_url IS NOT COALESCE(
+                (SELECT value FROM provider_base_urls WHERE id = m.provider_base_url_id), ''
+            )
+            OR m.api_key IS NOT COALESCE(
+                (SELECT value FROM provider_api_keys WHERE id = m.provider_api_key_id), ''
+            )
+          )
+        """,
+        (provider_id,),
+    ).fetchall()
+    changed_embedding_ids = [int(row["id"]) for row in changed_embeddings]
+    if changed_embedding_ids:
+        placeholders = ", ".join("?" for _ in changed_embedding_ids)
+        active = conn.execute(
+            f"""
+            SELECT 1 FROM builtin_agent_settings
+            WHERE agent_key = 'knowledge' AND embedding_enabled = 1
+              AND embedding_model_id IN ({placeholders})
+            """,
+            tuple(changed_embedding_ids),
+        ).fetchone()
+        if active:
+            raise ValueError(
+                "Disable Knowledge embeddings before changing this provider connection."
+            )
+        conn.execute(
+            f"""
+            UPDATE embedding_model_details
+            SET dimensions = NULL, connection_status = 'stale',
+                last_tested_at = NULL, last_error = ''
+            WHERE model_id IN ({placeholders})
+            """,
+            tuple(changed_embedding_ids),
+        )
+    conn.execute(
+        """
+        UPDATE models
+        SET provider = CASE WHEN model_type = 'text' THEN ? ELSE provider END,
+            base_url = COALESCE(
+                (SELECT value FROM provider_base_urls
+                 WHERE id = models.provider_base_url_id),
+                ''
+            ),
+            api_key = COALESCE(
+                (SELECT value FROM provider_api_keys
+                 WHERE id = models.provider_api_key_id),
+                ''
+            ),
+            updated_at = ?
+        WHERE provider_id = ?
+        """,
+        (provider["name"], _now(), provider_id),
+    )
+
+
+def add_provider(
+    name: str,
+    description: str = "",
+    base_urls=None,
+    api_keys=None,
+) -> dict:
+    provider_name = _required(name, "name")
+    if len(provider_name) > 160:
+        raise ValueError("Provider name is too long.")
+    provider_description = str(description or "").strip()
+    if len(provider_description) > 2000:
+        raise ValueError("Provider description is too long.")
+    urls = _normalize_provider_collection(base_urls, "Base URLs")
+    keys = _normalize_provider_collection(api_keys, "API keys")
+    with _connect() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO providers (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (provider_name, provider_description, _now(), _now()),
+            )
+            provider_id = int(cur.lastrowid)
+            _write_provider_entries(
+                conn, provider_id, "provider_base_urls", urls, secret=False
+            )
+            _write_provider_entries(
+                conn, provider_id, "provider_api_keys", keys, secret=True
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+    return get_provider(provider_id)
+
+
+def update_provider(provider_id: int, **kwargs) -> dict | None:
+    with _connect() as conn:
+        current = _provider_with_conn(conn, int(provider_id), include_secrets=True)
+        if current is None:
+            return None
+        name = _required(kwargs.get("name", current["name"]), "name")
+        description = str(kwargs.get("description", current["description"]) or "").strip()
+        if len(name) > 160:
+            raise ValueError("Provider name is too long.")
+        if len(description) > 2000:
+            raise ValueError("Provider description is too long.")
+        urls = _normalize_provider_collection(
+            kwargs.get("base_urls", current["base_urls"]), "Base URLs"
+        )
+        keys = _normalize_provider_collection(
+            kwargs.get("api_keys", current["api_keys"]), "API keys"
+        )
+        try:
+            conn.execute(
+                "UPDATE providers SET name = ?, description = ?, updated_at = ? WHERE id = ?",
+                (name, description, _now(), provider_id),
+            )
+            _write_provider_entries(
+                conn, provider_id, "provider_base_urls", urls, secret=False
+            )
+            _write_provider_entries(
+                conn, provider_id, "provider_api_keys", keys, secret=True
+            )
+            _propagate_provider_connection(conn, provider_id)
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+    return get_provider(provider_id)
+
+
+def delete_provider_result(provider_id: int) -> DeletionResult:
+    with _connect() as conn:
+        provider = conn.execute(
+            "SELECT 1 FROM providers WHERE id = ?", (provider_id,)
+        ).fetchone()
+        if provider is None:
+            return DeletionResult("not_found")
+        models = conn.execute(
+            "SELECT name FROM models WHERE provider_id = ? ORDER BY name",
+            (provider_id,),
+        ).fetchall()
+        if models:
+            return DeletionResult(
+                "in_use", tuple(f'the “{row["name"]}” model' for row in models)
+            )
+        conn.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
+        conn.commit()
+    return DeletionResult("deleted")
+
+
+def _optional_id(value, field: str) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        selected = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Select a valid {field}.") from exc
+    if selected <= 0:
+        raise ValueError(f"Select a valid {field}.")
+    return selected
+
+
+def _resolve_provider_connection(
+    conn: sqlite3.Connection,
+    provider_id,
+    provider_base_url_id=None,
+    provider_api_key_id=None,
+    *,
+    require_url: bool = False,
+) -> dict:
+    selected_provider_id = _optional_id(provider_id, "provider")
+    if selected_provider_id is None:
+        raise ValueError("Select a provider.")
+    provider = conn.execute(
+        "SELECT id, name FROM providers WHERE id = ?", (selected_provider_id,)
+    ).fetchone()
+    if provider is None:
+        raise ValueError("Select an existing provider.")
+    selected_url_id = _optional_id(provider_base_url_id, "provider base URL")
+    base_url = ""
+    if selected_url_id is not None:
+        url = conn.execute(
+            "SELECT value FROM provider_base_urls WHERE id = ? AND provider_id = ?",
+            (selected_url_id, selected_provider_id),
+        ).fetchone()
+        if url is None:
+            raise ValueError("Select a base URL belonging to the selected provider.")
+        base_url = url["value"]
+    if require_url and not base_url:
+        raise ValueError("Select a base URL for this model.")
+    selected_key_id = _optional_id(provider_api_key_id, "provider API key")
+    api_key = ""
+    if selected_key_id is not None:
+        key = conn.execute(
+            "SELECT value FROM provider_api_keys WHERE id = ? AND provider_id = ?",
+            (selected_key_id, selected_provider_id),
+        ).fetchone()
+        if key is None:
+            raise ValueError("Select an API key belonging to the selected provider.")
+        api_key = key["value"]
+    return {
+        "provider_id": selected_provider_id,
+        "provider_base_url_id": selected_url_id,
+        "provider_api_key_id": selected_key_id,
+        "provider_name": provider["name"],
+        "base_url": base_url,
+        "api_key": api_key,
+    }
+
+
+def resolve_provider_connection(
+    provider_id,
+    provider_base_url_id=None,
+    provider_api_key_id=None,
+    *,
+    require_url: bool = False,
+) -> dict:
+    with _connect() as conn:
+        result = _resolve_provider_connection(
+            conn,
+            provider_id,
+            provider_base_url_id,
+            provider_api_key_id,
+            require_url=require_url,
+        )
+    result["api_key"] = _resolve_key(result["api_key"])
+    return result
+
+
+def _unique_provider_entry_name(
+    conn: sqlite3.Connection, table: str, provider_id: int, base: str
+) -> str:
+    existing = {
+        str(row["name"]).casefold()
+        for row in conn.execute(
+            f"SELECT name FROM {table} WHERE provider_id = ?", (provider_id,)
+        )
+    }
+    if base.casefold() not in existing:
+        return base
+    suffix = 2
+    while f"{base} {suffix}".casefold() in existing:
+        suffix += 1
+    return f"{base} {suffix}"
+
+
+def _migrate_model_providers(conn: sqlite3.Connection) -> None:
+    """Promote legacy inline model connections into reusable provider records."""
+    labels = {
+        "text": "LLM",
+        "embedding": "Embeddings",
+        "speech": "Speech",
+        "transcription": "Transcription",
+    }
+    rows = conn.execute(
+        "SELECT * FROM models WHERE provider_id IS NULL ORDER BY id"
+    ).fetchall()
+    for stored in rows:
+        model = dict(stored)
+        provider_name = str(model.get("provider") or "").strip()
+        if not provider_name:
+            provider_name = f'{model.get("name") or "Existing model"} provider'
+        provider = conn.execute(
+            "SELECT id FROM providers WHERE name = ? COLLATE NOCASE", (provider_name,)
+        ).fetchone()
+        if provider is None:
+            cur = conn.execute(
+                "INSERT INTO providers (name, description, created_at, updated_at) VALUES (?, '', ?, ?)",
+                (provider_name, _now(), _now()),
+            )
+            provider_id = int(cur.lastrowid)
+        else:
+            provider_id = int(provider["id"])
+
+        url_id = None
+        base_url = str(model.get("base_url") or "").strip()
+        if base_url:
+            existing_url = conn.execute(
+                "SELECT id FROM provider_base_urls WHERE provider_id = ? AND value = ?",
+                (provider_id, base_url),
+            ).fetchone()
+            if existing_url:
+                url_id = int(existing_url["id"])
+            else:
+                label = f'{labels.get(model.get("model_type"), "Model")} URL'
+                cur = conn.execute(
+                    """
+                    INSERT INTO provider_base_urls (provider_id, name, value, position)
+                    VALUES (?, ?, ?, (SELECT COUNT(*) FROM provider_base_urls WHERE provider_id = ?))
+                    """,
+                    (
+                        provider_id,
+                        _unique_provider_entry_name(
+                            conn, "provider_base_urls", provider_id, label
+                        ),
+                        base_url.rstrip("/"),
+                        provider_id,
+                    ),
+                )
+                url_id = int(cur.lastrowid)
+
+        key_id = None
+        api_key = str(model.get("api_key") or "")
+        if api_key:
+            existing_key = conn.execute(
+                "SELECT id FROM provider_api_keys WHERE provider_id = ? AND value = ?",
+                (provider_id, api_key),
+            ).fetchone()
+            if existing_key:
+                key_id = int(existing_key["id"])
+            else:
+                label = f'{labels.get(model.get("model_type"), "Model")} API key'
+                cur = conn.execute(
+                    """
+                    INSERT INTO provider_api_keys (provider_id, name, value, position)
+                    VALUES (?, ?, ?, (SELECT COUNT(*) FROM provider_api_keys WHERE provider_id = ?))
+                    """,
+                    (
+                        provider_id,
+                        _unique_provider_entry_name(
+                            conn, "provider_api_keys", provider_id, label
+                        ),
+                        api_key,
+                        provider_id,
+                    ),
+                )
+                key_id = int(cur.lastrowid)
+        conn.execute(
+            """
+            UPDATE models
+            SET provider_id = ?, provider_base_url_id = ?, provider_api_key_id = ?
+            WHERE id = ?
+            """,
+            (provider_id, url_id, key_id, model["id"]),
+        )
 
 
 def server_for_api(server: dict | None) -> dict | None:
@@ -2350,22 +2918,40 @@ def _bootstrap_voice_models(conn: sqlite3.Connection) -> None:
 
 
 def add_voice_model(name: str, kind: str, **kwargs) -> dict:
-    fields = _validate_voice_model(kind, kwargs)
     now = _now()
     with _connect() as conn:
         try:
+            provider_refs = None
+            if kwargs.get("provider_id") not in (None, ""):
+                provider_refs = _resolve_provider_connection(
+                    conn,
+                    kwargs.get("provider_id"),
+                    kwargs.get("provider_base_url_id"),
+                    kwargs.get("provider_api_key_id"),
+                )
+                kwargs = {
+                    **kwargs,
+                    "base_url": provider_refs["base_url"],
+                    "api_key": provider_refs["api_key"],
+                }
+            fields = _validate_voice_model(kind, kwargs)
             cur = conn.execute(
                 """
                 INSERT INTO models
                     (name, model_type, location, provider, model, base_url, api_key,
+                     provider_id, provider_base_url_id, provider_api_key_id,
                      created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _required(name, "name"),
                     "speech" if fields["kind"] == "tts" else "transcription",
                     fields["location"], fields["provider"], fields["model"],
-                    fields["base_url"], fields["api_key"], now, now,
+                    fields["base_url"], fields["api_key"],
+                    provider_refs["provider_id"] if provider_refs else None,
+                    provider_refs["provider_base_url_id"] if provider_refs else None,
+                    provider_refs["provider_api_key_id"] if provider_refs else None,
+                    now, now,
                 ),
             )
             model_id = int(cur.lastrowid)
@@ -2392,11 +2978,17 @@ def _voice_model_query() -> str:
                m.location, m.provider, m.model,
                COALESCE(s.voice, '') AS voice,
                m.base_url, m.api_key,
+               m.provider_id, m.provider_base_url_id, m.provider_api_key_id,
+               p.name AS provider_name, u.name AS provider_base_url_name,
+               k.name AS provider_api_key_name,
                COALESCE(s.language, t.language, 'auto') AS language,
                m.created_at, m.updated_at
         FROM models m
         LEFT JOIN speech_model_details s ON s.model_id = m.id
         LEFT JOIN transcription_model_details t ON t.model_id = m.id
+        LEFT JOIN providers p ON p.id = m.provider_id
+        LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
+        LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
     """
 
 
@@ -2440,17 +3032,54 @@ def update_voice_model(model_id: int, *, _clear_api_key: bool = False, **kwargs)
     requested_kind = str(kwargs.get("kind") or current["kind"]).strip().lower()
     if requested_kind != current["kind"]:
         raise ValueError("A saved voice model's type cannot be changed")
-    fields = _validate_voice_model(current["kind"], kwargs, current)
-    if _clear_api_key:
-        fields["api_key"] = ""
-    if kwargs.get("name") is not None:
-        fields["name"] = _required(kwargs["name"], "name")
     now = _now()
     with _connect() as conn:
         try:
+            provider_refs = None
+            if any(
+                key in kwargs
+                for key in ("provider_id", "provider_base_url_id", "provider_api_key_id")
+            ):
+                provider_refs = _resolve_provider_connection(
+                    conn,
+                    kwargs.get("provider_id", current["provider_id"]),
+                    kwargs.get("provider_base_url_id", current["provider_base_url_id"]),
+                    kwargs.get("provider_api_key_id", current["provider_api_key_id"]),
+                )
+                kwargs = {
+                    **kwargs,
+                    "base_url": provider_refs["base_url"],
+                    "api_key": provider_refs["api_key"],
+                }
+            fields = _validate_voice_model(current["kind"], kwargs, current)
+            if provider_refs is not None:
+                fields["api_key"] = provider_refs["api_key"]
+                fields.update(
+                    provider_id=provider_refs["provider_id"],
+                    provider_base_url_id=provider_refs["provider_base_url_id"],
+                    provider_api_key_id=provider_refs["provider_api_key_id"],
+                )
+                if fields["provider"] == "google" and not fields["api_key"]:
+                    raise ValueError("TTS API key is required for this provider")
+            elif fields["location"] == "local" and (
+                fields["provider"] != current["provider"]
+                or current["location"] != "local"
+            ):
+                fields.update(
+                    provider_id=None,
+                    provider_base_url_id=None,
+                    provider_api_key_id=None,
+                )
+            if _clear_api_key:
+                fields["api_key"] = ""
+            if kwargs.get("name") is not None:
+                fields["name"] = _required(kwargs["name"], "name")
             base_fields = {
                 key: fields[key]
-                for key in ("name", "location", "provider", "model", "base_url", "api_key")
+                for key in (
+                    "name", "location", "provider", "model", "base_url", "api_key",
+                    "provider_id", "provider_base_url_id", "provider_api_key_id",
+                )
                 if key in fields
             }
             base_fields["updated_at"] = now
@@ -4687,15 +5316,31 @@ def _add_model(
     base_url: str,
     api_key: str,
     location: str = "",
+    provider_id=None,
+    provider_base_url_id=None,
+    provider_api_key_id=None,
 ) -> int:
     now = _now()
     try:
+        provider_refs = None
+        if provider_id not in (None, ""):
+            provider_refs = _resolve_provider_connection(
+                conn,
+                provider_id,
+                provider_base_url_id,
+                provider_api_key_id,
+                require_url=True,
+            )
+            provider = provider_refs["provider_name"]
+            base_url = provider_refs["base_url"]
+            api_key = provider_refs["api_key"]
         cur = conn.execute(
             """
             INSERT INTO models
                 (name, model_type, location, model, provider, base_url, api_key,
+                 provider_id, provider_base_url_id, provider_api_key_id,
                  created_at, updated_at)
-            VALUES (?, 'text', ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 'text', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
@@ -4704,6 +5349,9 @@ def _add_model(
                 (provider or "").strip(),
                 _normalize_model_base_url(base_url),
                 api_key or "",
+                provider_refs["provider_id"] if provider_refs else None,
+                provider_refs["provider_base_url_id"] if provider_refs else None,
+                provider_refs["provider_api_key_id"] if provider_refs else None,
                 now,
                 now,
             ),
@@ -4720,7 +5368,16 @@ def _add_model(
 
 def _get_model_by_name(conn: sqlite3.Connection, name: str) -> dict | None:
     cur = conn.execute(
-        "SELECT * FROM models WHERE name = ? AND model_type = 'text'", (name.strip(),)
+        """
+        SELECT m.*, p.name AS provider_name,
+               u.name AS provider_base_url_name, k.name AS provider_api_key_name
+        FROM models m
+        LEFT JOIN providers p ON p.id = m.provider_id
+        LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
+        LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
+        WHERE m.name = ? AND m.model_type = 'text'
+        """,
+        (name.strip(),),
     )
     row = cur.fetchone()
     return dict(row) if row else None
@@ -4733,16 +5390,39 @@ def add_model(
     base_url: str,
     api_key: str,
     location: str = "",
+    provider_id=None,
+    provider_base_url_id=None,
+    provider_api_key_id=None,
 ) -> dict:
     with _connect() as conn:
-        mid = _add_model(conn, name, model, provider, base_url, api_key, location)
+        mid = _add_model(
+            conn,
+            name,
+            model,
+            provider,
+            base_url,
+            api_key,
+            location,
+            provider_id,
+            provider_base_url_id,
+            provider_api_key_id,
+        )
         return get_model(mid)
 
 
 def get_model(model_id: int) -> dict | None:
     with _connect() as conn:
         cur = conn.execute(
-            "SELECT * FROM models WHERE id = ? AND model_type = 'text'", (model_id,)
+            """
+            SELECT m.*, p.name AS provider_name,
+                   u.name AS provider_base_url_name, k.name AS provider_api_key_name
+            FROM models m
+            LEFT JOIN providers p ON p.id = m.provider_id
+            LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
+            LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
+            WHERE m.id = ? AND m.model_type = 'text'
+            """,
+            (model_id,),
         )
         row = cur.fetchone()
         return dict(row) if row else None
@@ -4769,7 +5449,17 @@ def get_model_by_name(name: str) -> dict | None:
 
 def list_models() -> list[dict]:
     with _connect() as conn:
-        cur = conn.execute("SELECT * FROM models WHERE model_type = 'text' ORDER BY name")
+        cur = conn.execute(
+            """
+            SELECT m.*, p.name AS provider_name,
+                   u.name AS provider_base_url_name, k.name AS provider_api_key_name
+            FROM models m
+            LEFT JOIN providers p ON p.id = m.provider_id
+            LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
+            LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
+            WHERE m.model_type = 'text' ORDER BY m.name
+            """
+        )
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -4779,6 +5469,9 @@ def list_model_catalog() -> list[dict]:
         rows = conn.execute(
             """
             SELECT m.*,
+                   p.name AS provider_name,
+                   u.name AS provider_base_url_name,
+                   k.name AS provider_api_key_name,
                    e.adapter, e.dimensions, e.connection_status,
                    e.last_tested_at, e.last_error,
                    s.voice AS speech_voice, s.language AS speech_language,
@@ -4787,6 +5480,9 @@ def list_model_catalog() -> list[dict]:
             LEFT JOIN embedding_model_details e ON e.model_id = m.id
             LEFT JOIN speech_model_details s ON s.model_id = m.id
             LEFT JOIN transcription_model_details t ON t.model_id = m.id
+            LEFT JOIN providers p ON p.id = m.provider_id
+            LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
+            LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
             ORDER BY m.name
             """
         ).fetchall()
@@ -4798,7 +5494,9 @@ def list_model_catalog() -> list[dict]:
             key: row[key]
             for key in (
                 "id", "name", "model", "provider", "location", "base_url",
-                "api_key", "created_at", "updated_at",
+                "api_key", "provider_id", "provider_base_url_id",
+                "provider_api_key_id", "provider_name", "provider_base_url_name",
+                "provider_api_key_name", "created_at", "updated_at",
             )
         }
         if model_type == "embedding":
@@ -4824,7 +5522,10 @@ def list_model_catalog() -> list[dict]:
 
 
 def update_model(model_id: int, **kwargs) -> dict | None:
-    allowed = {"name", "location", "model", "provider", "base_url", "api_key"}
+    allowed = {
+        "name", "location", "model", "provider", "base_url", "api_key",
+        "provider_id", "provider_base_url_id", "provider_api_key_id",
+    }
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
         return get_model(model_id)
@@ -4842,6 +5543,25 @@ def update_model(model_id: int, **kwargs) -> dict | None:
             return None
         if current["model_type"] != "text":
             return None
+        if any(
+            key in kwargs
+            for key in ("provider_id", "provider_base_url_id", "provider_api_key_id")
+        ):
+            refs = _resolve_provider_connection(
+                conn,
+                kwargs.get("provider_id", current["provider_id"]),
+                kwargs.get("provider_base_url_id", current["provider_base_url_id"]),
+                kwargs.get("provider_api_key_id", current["provider_api_key_id"]),
+                require_url=True,
+            )
+            fields.update(
+                provider=refs["provider_name"],
+                base_url=refs["base_url"],
+                api_key=refs["api_key"],
+                provider_id=refs["provider_id"],
+                provider_base_url_id=refs["provider_base_url_id"],
+                provider_api_key_id=refs["provider_api_key_id"],
+            )
         if "location" in fields:
             fields["location"] = _normalize_model_location(
                 fields["location"],
@@ -4968,17 +5688,32 @@ def add_embedding_model(
     model: str,
     base_url: str,
     api_key: str = "",
+    provider_id=None,
+    provider_base_url_id=None,
+    provider_api_key_id=None,
 ) -> dict:
-    normalized = _normalize_embedding_connection(location, adapter, base_url)
     now = _now()
     with _connect() as conn:
         try:
+            provider_refs = None
+            if provider_id not in (None, ""):
+                provider_refs = _resolve_provider_connection(
+                    conn,
+                    provider_id,
+                    provider_base_url_id,
+                    provider_api_key_id,
+                    require_url=True,
+                )
+                base_url = provider_refs["base_url"]
+                api_key = provider_refs["api_key"]
+            normalized = _normalize_embedding_connection(location, adapter, base_url)
             cur = conn.execute(
                 """
                 INSERT INTO models
                     (name, model_type, location, provider, model, base_url, api_key,
+                     provider_id, provider_base_url_id, provider_api_key_id,
                      created_at, updated_at)
-                VALUES (?, 'embedding', ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, 'embedding', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _required(name, "name"),
@@ -4987,6 +5722,9 @@ def add_embedding_model(
                     _required(model, "model ID"),
                     normalized[2],
                     api_key or "",
+                    provider_refs["provider_id"] if provider_refs else None,
+                    provider_refs["provider_base_url_id"] if provider_refs else None,
+                    provider_refs["provider_api_key_id"] if provider_refs else None,
                     now,
                     now,
                 ),
@@ -5009,10 +5747,16 @@ def add_embedding_model(
 def _embedding_model_query() -> str:
     return """
         SELECT m.id, m.name, m.location, e.adapter, m.model, m.base_url, m.api_key,
+               m.provider_id, m.provider_base_url_id, m.provider_api_key_id,
+               p.name AS provider_name, u.name AS provider_base_url_name,
+               k.name AS provider_api_key_name,
                e.dimensions, e.connection_status, e.last_tested_at, e.last_error,
                m.created_at, m.updated_at
         FROM models m
         JOIN embedding_model_details e ON e.model_id = m.id
+        LEFT JOIN providers p ON p.id = m.provider_id
+        LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
+        LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
     """
 
 
@@ -5044,7 +5788,10 @@ def list_embedding_models() -> list[dict]:
 
 
 def update_embedding_model(model_id: int, **kwargs) -> dict | None:
-    allowed = {"name", "location", "adapter", "model", "base_url", "api_key"}
+    allowed = {
+        "name", "location", "adapter", "model", "base_url", "api_key",
+        "provider_id", "provider_base_url_id", "provider_api_key_id",
+    }
     fields = {key: value for key, value in kwargs.items() if key in allowed and value is not None}
     with _connect() as conn:
         current = conn.execute(
@@ -5059,6 +5806,24 @@ def update_embedding_model(model_id: int, **kwargs) -> dict | None:
             fields["name"] = _required(fields["name"], "name")
         if "model" in fields:
             fields["model"] = _required(fields["model"], "model ID")
+        if any(
+            key in kwargs
+            for key in ("provider_id", "provider_base_url_id", "provider_api_key_id")
+        ):
+            refs = _resolve_provider_connection(
+                conn,
+                kwargs.get("provider_id", current["provider_id"]),
+                kwargs.get("provider_base_url_id", current["provider_base_url_id"]),
+                kwargs.get("provider_api_key_id", current["provider_api_key_id"]),
+                require_url=True,
+            )
+            fields.update(
+                base_url=refs["base_url"],
+                api_key=refs["api_key"],
+                provider_id=refs["provider_id"],
+                provider_base_url_id=refs["provider_base_url_id"],
+                provider_api_key_id=refs["provider_api_key_id"],
+            )
         location, adapter, base_url = _normalize_embedding_connection(
             fields.get("location", current["location"]),
             fields.get("adapter", current["adapter"]),
@@ -5068,6 +5833,10 @@ def update_embedding_model(model_id: int, **kwargs) -> dict | None:
         connection_changed = any(
             fields.get(key, current[key]) != current[key]
             for key in ("location", "adapter", "model", "base_url", "api_key")
+        )
+        connection_changed = connection_changed or any(
+            fields.get(key, current[key]) != current[key]
+            for key in ("provider_id", "provider_base_url_id", "provider_api_key_id")
         )
         if connection_changed:
             active = conn.execute(
@@ -5092,7 +5861,10 @@ def update_embedding_model(model_id: int, **kwargs) -> dict | None:
         try:
             base_fields = {
                 key: fields[key]
-                for key in ("name", "location", "model", "base_url", "api_key")
+                for key in (
+                    "name", "location", "model", "base_url", "api_key",
+                    "provider_id", "provider_base_url_id", "provider_api_key_id",
+                )
                 if key in fields
             }
             base_fields["provider"] = adapter

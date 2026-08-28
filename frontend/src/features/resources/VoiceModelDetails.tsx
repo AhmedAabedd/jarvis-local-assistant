@@ -17,6 +17,7 @@ export function VoiceModelDetails({ item }: { item: VoiceModelRecord }) {
         <Detail label="Name" value={item.name} />
         <Detail label="Location" value={readable(item.location)} />
         <Detail label="Engine" value={readable(item.provider)} />
+        {item.provider_name && <Detail label="Provider" value={item.provider_name} />}
         <Detail label="Language" value={item.language} />
         <Detail
           label={item.provider === 'google' ? 'Voice name' : 'Model'}
@@ -24,10 +25,15 @@ export function VoiceModelDetails({ item }: { item: VoiceModelRecord }) {
           full
         />
         {item.voice && <Detail label="Voice" value={item.voice} full />}
-        {item.base_url && <Detail label="Base URL" value={item.base_url} full />}
+        {item.base_url && (
+          <Detail label={item.provider_base_url_name || 'Base URL'} value={item.base_url} full />
+        )}
         <Detail
           label="Credential"
-          value={item.api_key_configured ? 'API key saved' : 'No API key saved'}
+          value={
+            item.provider_api_key_name ||
+            (item.api_key_configured ? 'API key saved' : 'No API key saved')
+          }
           full
         />
       </div>

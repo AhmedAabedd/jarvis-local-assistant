@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  Building2,
   BookOpen,
   ChevronLeft,
   Database,
@@ -24,11 +25,14 @@ const primary = [
   { to: '/admin/workflows', label: 'Workflows', icon: Workflow },
 ]
 const settings = [
+  { to: '/admin/providers', label: 'Providers', icon: Building2 },
   { to: '/admin/voice', label: 'Voice', icon: Mic2 },
-  { to: '/admin/telegram', label: 'Telegram', icon: Radio },
-  { to: '/admin/whatsapp', label: 'WhatsApp', icon: MessageCircle },
   { to: '/admin/heartbeat', label: 'Heartbeat', icon: Activity },
   { to: '/admin/profile', label: 'Profile', icon: UserRound },
+]
+const connections = [
+  { to: '/admin/telegram', label: 'Telegram', icon: Radio },
+  { to: '/admin/whatsapp', label: 'WhatsApp', icon: MessageCircle },
 ]
 
 export function StudioLayout() {
@@ -57,8 +61,15 @@ export function StudioLayout() {
               <span>{item.label}</span>
             </NavLink>
           ))}
-          <span className="nav-label">Connections & settings</span>
+          <span className="nav-label">Settings</span>
           {settings.map(({ icon: Icon, ...item }) => (
+            <NavLink key={item.to} {...item}>
+              <Icon size={18} />
+              <span>{item.label}</span>
+            </NavLink>
+          ))}
+          <span className="nav-label">Connections</span>
+          {connections.map(({ icon: Icon, ...item }) => (
             <NavLink key={item.to} {...item}>
               <Icon size={18} />
               <span>{item.label}</span>

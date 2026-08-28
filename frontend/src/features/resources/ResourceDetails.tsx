@@ -47,12 +47,20 @@ export function ResourceDetails({
       <section className="card resource-workspace">
         <div className="card__body detail-grid">
           <Detail label="Name" value={model.name} />
-          <Detail label="Provider" value={model.provider} />
+          <Detail label="Provider" value={model.provider_name || model.provider} />
           <Detail label="Model ID" value={model.model} full mono />
-          <Detail label="Base URL" value={model.base_url} full mono />
+          <Detail
+            label={model.provider_base_url_name || 'Base URL'}
+            value={model.base_url}
+            full
+            mono
+          />
           <Detail
             label="Credential"
-            value={model.api_key_configured || model.api_key ? 'API key saved' : 'No API key saved'}
+            value={
+              model.provider_api_key_name ||
+              (model.api_key_configured || model.api_key ? 'API key saved' : 'No API key saved')
+            }
             full
           />
         </div>

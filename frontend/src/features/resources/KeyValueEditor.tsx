@@ -2,24 +2,35 @@ import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '../../components/ui/Button'
 
 export interface Entry {
+  id?: number
   key: string
   value: string
+  configured?: boolean
 }
 export function KeyValueEditor({
   title,
   entries,
   onChange,
   secret = true,
+  hint,
+  namePlaceholder = 'Name',
+  valuePlaceholder = 'Value',
 }: {
   title: string
   entries: Entry[]
   onChange: (entries: Entry[]) => void
   secret?: boolean
+  hint?: string
+  namePlaceholder?: string
+  valuePlaceholder?: string
 }) {
   return (
     <div className="key-value-editor">
       <div className="key-value-editor__title">
-        <strong>{title}</strong>
+        <span>
+          <strong>{title}</strong>
+          {hint && <small>{hint}</small>}
+        </span>
         <Button
           type="button"
           icon={<Plus size={13} />}
@@ -33,7 +44,7 @@ export function KeyValueEditor({
         <div className="key-value-row" key={index}>
           <input
             aria-label={`${title} name`}
-            placeholder="Name"
+            placeholder={namePlaceholder}
             value={entry.key}
             onChange={(e) =>
               onChange(entries.map((v, i) => (i === index ? { ...v, key: e.target.value } : v)))
@@ -42,7 +53,9 @@ export function KeyValueEditor({
           <input
             aria-label={`${title} value`}
             type={secret ? 'password' : 'text'}
-            placeholder="Value"
+            placeholder={
+              entry.configured && !entry.value ? 'Saved — enter to replace' : valuePlaceholder
+            }
             value={entry.value}
             onChange={(e) =>
               onChange(entries.map((v, i) => (i === index ? { ...v, value: e.target.value } : v)))
