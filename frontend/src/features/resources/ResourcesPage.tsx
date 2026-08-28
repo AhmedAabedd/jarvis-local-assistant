@@ -1,18 +1,21 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Bot,
+  AudioLines,
+  Boxes,
   Cable,
   ChevronLeft,
   Cpu,
   Edit3,
   Layers3,
+  Mic2,
   Plus,
   Save,
   Search,
   Trash2,
+  Type,
   Workflow,
   Wrench,
-  X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
@@ -24,17 +27,20 @@ import type {
   ModelRecord,
   SkillRecord,
   Subagent,
+  VoiceModelRecord,
 } from '../../api/types'
 import { McpIcon } from '../../components/icons/McpIcon'
 import { Button } from '../../components/ui/Button'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
 import { Loading } from '../../components/ui/Loading'
+import { Modal } from '../../components/ui/Modal'
 import { Status } from '../../components/ui/Status'
 import {
   useAgents,
   useBuiltins,
   useEmbeddingModels,
+  useModelCatalog,
   useModels,
   useServers,
   useSkills,
@@ -48,11 +54,55 @@ import { EmbeddingModelForm } from './EmbeddingModelForm'
 import { ModelForm } from './ModelForm'
 import { ResourceDetails } from './ResourceDetails'
 import { ServerForm } from './ServerForm'
+import { VoiceModelDetails } from './VoiceModelDetails'
+import { VoiceModelForm } from './VoiceModelForm'
 
 type Kind = 'models' | 'servers' | 'agents'
-type Item = ModelRecord | EmbeddingModelRecord | McpServer | Subagent | BuiltinAgent
+type Item =
+  ModelRecord | EmbeddingModelRecord | VoiceModelRecord | McpServer | Subagent | BuiltinAgent
 type ResourceMode = 'built-in' | 'dynamic'
-type ModelMode = 'language' | 'embedding'
+type ModelType = 'all' | 'llm' | 'tts' | 'stt' | 'embedding'
+
+const modelTypes: Array<{
+  id: ModelType
+  label: string
+  description?: string
+  icon?: typeof Type
+}> = [
+  { id: 'all', label: 'All' },
+  {
+    id: 'llm',
+    label: 'Text',
+    description: 'Chat, reasoning, and tool-calling models.',
+    icon: Type,
+  },
+  {
+    id: 'tts',
+    label: 'Speech',
+    description: 'Turn generated text into spoken audio.',
+    icon: AudioLines,
+  },
+  {
+    id: 'stt',
+    label: 'Transcription',
+    description: 'Turn recorded speech into text.',
+    icon: Mic2,
+  },
+  {
+    id: 'embedding',
+    label: 'Embeddings',
+    description: 'Generate vectors for search and knowledge.',
+    icon: Boxes,
+  },
+]
+
+function modelItemType(
+  item: ModelRecord | EmbeddingModelRecord | VoiceModelRecord,
+): Exclude<ModelType, 'all'> {
+  if ('kind' in item) return item.kind
+  if ('adapter' in item) return 'embedding'
+  return 'llm'
+}
 
 const meta = {
   models: {
@@ -87,49 +137,76 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const [params, setParams] = useSearchParams()
   const location = useLocation()
   const models = useModels()
+  const modelCatalog = useModelCatalog()
   const embeddingModels = useEmbeddingModels()
   const servers = useServers()
   const skills = useSkills()
   const agents = useAgents()
   const builtins = useBuiltins()
   const resourceMode: ResourceMode = params.get('view') === 'built-in' ? 'built-in' : 'dynamic'
-  const modelMode: ModelMode = params.get('view') === 'embedding' ? 'embedding' : 'language'
-  const hasTypePicker = kind === 'agents' || kind === 'servers'
-  const isEmbeddingMode = kind === 'models' && modelMode === 'embedding'
+  const requestedModelType = params.get('type') as ModelType | null
+  const modelType: ModelType = modelTypes.some((option) => option.id === requestedModelType)
+    ? (requestedModelType as ModelType)
+    : 'all'
+  const hasTypePicker = kind === 'agents'
   const isBuiltins = kind === 'agents' && resourceMode === 'built-in'
-  const isBuiltinServerMode = kind === 'servers' && resourceMode === 'built-in'
   const query = isBuiltins
     ? builtins
-    : isEmbeddingMode
-      ? embeddingModels
-      : kind === 'models'
-        ? models
-        : kind === 'servers'
-          ? servers
-          : agents
-  const queryData = (query.data || []) as Item[]
+    : kind === 'models'
+      ? modelCatalog
+      : kind === 'servers'
+        ? servers
+        : kind === 'agents'
+          ? agents
+          : models
+  const modelData = useMemo(
+    () =>
+      ([...(modelCatalog.data || [])] as Item[]).sort((left, right) =>
+        left.name.localeCompare(right.name),
+      ),
+    [modelCatalog.data],
+  )
+  const queryData = (kind === 'models' ? modelData : query.data || []) as Item[]
   const data = useMemo(
     () =>
-      kind === 'servers'
-        ? queryData.filter((item) => Boolean((item as McpServer).managed) === isBuiltinServerMode)
+      kind === 'models'
+        ? queryData.filter(
+            (item) =>
+              modelType === 'all' ||
+              modelItemType(item as ModelRecord | EmbeddingModelRecord | VoiceModelRecord) ===
+                modelType,
+          )
         : queryData,
-    [isBuiltinServerMode, kind, queryData],
+    [kind, modelType, queryData],
   )
   const [selected, setSelected] = useState<Item | null>(null)
   const [editing, setEditing] = useState<Item | null | undefined>(undefined)
   const [deleting, setDeleting] = useState(false)
   const [search, setSearch] = useState('')
-  const [builtinDirty, setBuiltinDirty] = useState(false)
-  const [builtinDraftVersion, setBuiltinDraftVersion] = useState(0)
-  const [formDirty, setFormDirty] = useState(false)
-  const [formDraftVersion, setFormDraftVersion] = useState(0)
+  const [createModelType, setCreateModelType] = useState<Exclude<ModelType, 'all'> | null>(null)
+  const [modelCreateStage, setModelCreateStage] = useState<'closed' | 'type' | 'form'>('closed')
+  const activeModelType: Exclude<ModelType, 'all'> =
+    kind === 'models'
+      ? modelCreateStage === 'form' && createModelType
+        ? createModelType
+        : editing === null
+          ? createModelType || (modelType === 'all' ? 'llm' : modelType)
+          : editing
+            ? modelItemType(editing as ModelRecord | EmbeddingModelRecord | VoiceModelRecord)
+            : selected
+              ? modelItemType(selected as ModelRecord | EmbeddingModelRecord | VoiceModelRecord)
+              : modelType === 'all'
+                ? createModelType || 'llm'
+                : modelType
+      : 'llm'
+  const isEmbeddingMode = kind === 'models' && activeModelType === 'embedding'
+  const isVoiceModelMode =
+    kind === 'models' && (activeModelType === 'tts' || activeModelType === 'stt')
   const builtinDetailsRef = useRef<BuiltinAgentDetailsHandle>(null)
   const formId = `${kind}-form`
   const info = meta[kind]
   const selectedAgentPlacements =
     kind === 'agents' && !isBuiltins ? ((selected as Subagent | null)?.placement_count ?? 0) : 0
-  const selectedIsManagedServer =
-    kind === 'servers' && Boolean((selected as McpServer | null)?.managed)
 
   useEffect(() => {
     if ((location.state as { resetResourceList?: boolean } | null)?.resetResourceList) {
@@ -139,7 +216,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     }
   }, [location.key, location.state])
 
-  useEffect(() => setSearch(''), [resourceMode, modelMode, kind])
+  useEffect(() => setSearch(''), [resourceMode, kind])
 
   useEffect(() => {
     if (isBuiltins) {
@@ -151,14 +228,26 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     }
     const id = Number(params.get('open'))
     if (!id || !data.length) return
-    const found = data.find((item) => 'id' in item && item.id === id)
+    const openType = params.get('model') as Exclude<ModelType, 'all'> | null
+    const found = data.find(
+      (item) =>
+        'id' in item &&
+        item.id === id &&
+        (kind !== 'models' ||
+          !openType ||
+          modelItemType(item as ModelRecord | EmbeddingModelRecord | VoiceModelRecord) ===
+            openType),
+    )
     if (found) setSelected(found)
-  }, [params, data, isBuiltins])
+  }, [params, data, isBuiltins, kind])
 
   const refresh = async () =>
     Promise.all([
       client.invalidateQueries({ queryKey: keys[kind] }),
       client.invalidateQueries({ queryKey: keys.embeddingModels }),
+      client.invalidateQueries({ queryKey: keys.voiceModels }),
+      client.invalidateQueries({ queryKey: keys.modelCatalog }),
+      client.invalidateQueries({ queryKey: keys.voice }),
       client.invalidateQueries({ queryKey: keys.builtins }),
       client.invalidateQueries({ queryKey: keys.skills }),
       client.invalidateQueries({ queryKey: keys.overview }),
@@ -177,6 +266,10 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         }
         return api.embeddingModels.create(body)
       }
+      if (isVoiceModelMode) {
+        if (editing) return api.voiceModels.update((editing as VoiceModelRecord).id, body)
+        return api.voiceModels.create(body)
+      }
       if (editing) {
         return api[kind].update((editing as ModelRecord | McpServer | Subagent).id, body)
       }
@@ -184,8 +277,12 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     },
     onSuccess: async (saved) => {
       await refresh()
-      setFormDirty(false)
+      if (kind === 'models') setModelCreateStage('closed')
       const item = saved as Item
+      const savedModelType =
+        kind === 'models'
+          ? modelItemType(item as ModelRecord | EmbeddingModelRecord | VoiceModelRecord)
+          : null
       setEditing(undefined)
       setSelected(item)
       setParams(
@@ -196,8 +293,9 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
             : kind === 'servers'
               ? { view: resourceMode, open: String((item as McpServer).id) }
               : {
-                  ...(isEmbeddingMode ? { view: 'embedding' } : {}),
-                  open: String((item as ModelRecord | EmbeddingModelRecord).id),
+                  ...(modelType === 'all' ? {} : { type: savedModelType as string }),
+                  model: savedModelType as string,
+                  open: String((item as ModelRecord | EmbeddingModelRecord | VoiceModelRecord).id),
                 },
       )
     },
@@ -208,11 +306,16 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
       if (isEmbeddingMode) {
         return api.embeddingModels.remove((selected as EmbeddingModelRecord).id)
       }
+      if (isVoiceModelMode) return api.voiceModels.remove((selected as VoiceModelRecord).id)
       return api[kind].remove((selected as ModelRecord | McpServer | Subagent).id)
     },
     onSuccess: async () => {
       setParams(
-        hasTypePicker ? { view: resourceMode } : isEmbeddingMode ? { view: 'embedding' } : {},
+        hasTypePicker
+          ? { view: resourceMode }
+          : kind === 'models' && modelType !== 'all'
+            ? { type: modelType }
+            : {},
       )
       await refresh()
       setSelected(null)
@@ -227,6 +330,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     onSuccess: async (saved) => {
       await refresh()
       setSelected(saved)
+      setEditing((current) => (current && 'key' in current ? saved : current))
     },
   })
   const builtinConfig = useMutation<
@@ -235,7 +339,6 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     {
       model_id: number | null
       generation_model_id?: number | null
-      mcp_server_id?: number | null
       automatic_knowledge_enabled?: boolean
       embedding_enabled?: boolean
       embedding_model_id?: number | null
@@ -249,8 +352,8 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     },
     onSuccess: async (saved) => {
       await refresh()
-      setBuiltinDirty(false)
       setSelected(saved)
+      setEditing(undefined)
     },
   })
 
@@ -279,9 +382,14 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         }
         const model = item as ModelRecord
         const embedding = item as EmbeddingModelRecord
+        const voiceModel = item as VoiceModelRecord
         const server = item as McpServer
         const agent = item as Subagent
-        if (isEmbeddingMode)
+        const itemModelType =
+          kind === 'models'
+            ? modelItemType(item as ModelRecord | EmbeddingModelRecord | VoiceModelRecord)
+            : null
+        if (itemModelType === 'embedding')
           return {
             title: embedding.name,
             subtitle: '',
@@ -300,6 +408,24 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
               },
             ],
             status: embedding.connection_status,
+          }
+        if (itemModelType === 'tts' || itemModelType === 'stt')
+          return {
+            title: voiceModel.name,
+            subtitle: '',
+            facts: [
+              {
+                value: itemModelType === 'tts' ? 'Speech' : 'Transcription',
+                title: `Type: ${itemModelType === 'tts' ? 'Text-to-speech' : 'Speech-to-text'}`,
+                icon: itemModelType === 'tts' ? AudioLines : Mic2,
+              },
+              {
+                value: voiceModel.model,
+                title: `Model: ${voiceModel.model}`,
+                icon: Cpu,
+              },
+            ],
+            status: undefined,
           }
         if (kind === 'models')
           return {
@@ -355,7 +481,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           status: undefined,
         }
       }),
-    [data, isBuiltins, isEmbeddingMode, kind],
+    [data, isBuiltins, kind],
   )
   const listed = useMemo(() => {
     const term = search.trim().toLocaleLowerCase()
@@ -380,21 +506,45 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
   const openList = () => {
     setEditing(undefined)
     setSelected(null)
-    setBuiltinDirty(false)
-    setParams(hasTypePicker ? { view: resourceMode } : isEmbeddingMode ? { view: 'embedding' } : {})
+    setParams(
+      hasTypePicker
+        ? { view: resourceMode }
+        : kind === 'models' && modelType !== 'all'
+          ? { type: modelType }
+          : {},
+    )
   }
   const openCreate = () => {
     setSelected(null)
-    setFormDirty(false)
+    save.reset()
+    if (kind === 'models') {
+      setCreateModelType(modelType === 'all' ? null : modelType)
+      setModelCreateStage('type')
+      return
+    }
     setEditing(null)
-    setParams(hasTypePicker ? { view: 'dynamic' } : isEmbeddingMode ? { view: 'embedding' } : {})
+    setParams(hasTypePicker ? { view: 'dynamic' } : {})
+  }
+  const chooseModelType = (next: Exclude<ModelType, 'all'>) => {
+    setCreateModelType(next)
+    setModelCreateStage('form')
+    save.reset()
+  }
+  const closeModelCreate = () => {
+    setModelCreateStage('closed')
+    setCreateModelType(null)
+    save.reset()
   }
   const cancelForm = () => {
-    setFormDirty(false)
+    save.reset()
     setEditing(undefined)
     if (!selected)
       setParams(
-        hasTypePicker ? { view: resourceMode } : isEmbeddingMode ? { view: 'embedding' } : {},
+        hasTypePicker
+          ? { view: resourceMode }
+          : kind === 'models' && modelType !== 'all'
+            ? { type: modelType }
+            : {},
       )
   }
   const submit = async (body: object) => {
@@ -407,99 +557,51 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
     if (mode === resourceMode) return
     setEditing(undefined)
     setSelected(null)
-    setBuiltinDirty(false)
     setDeleting(false)
     setSearch('')
     setParams({ view: mode })
   }
 
-  const switchModelMode = (mode: ModelMode) => {
-    if (mode === modelMode) return
+  const switchModelType = (next: ModelType) => {
+    if (next === modelType) return
     setEditing(undefined)
     setSelected(null)
     setDeleting(false)
-    setSearch('')
-    setParams(mode === 'embedding' ? { view: 'embedding' } : {})
+    setParams(next === 'all' ? {} : { type: next })
   }
 
   const singular = isBuiltins
     ? 'built-in subagent'
-    : isBuiltinServerMode
-      ? 'built-in MCP server'
-      : isEmbeddingMode
-        ? 'embedding model'
+    : isEmbeddingMode
+      ? 'embedding model'
+      : isVoiceModelMode
+        ? `${activeModelType === 'tts' ? 'speech' : 'transcription'} model`
         : info.singular
-  const collectionTitle = isEmbeddingMode ? 'Embedding models' : info.title
+  const collectionTitle = info.title
 
-  const inForm = editing !== undefined
-  const headerTitle = inForm
-    ? `${editing ? 'Edit' : 'Add'} ${singular}`
-    : selected
-      ? selected.name
-      : info.title
-  const headerDescription = inForm
-    ? editing
-      ? `Update the complete ${editing.name} configuration`
-      : `Create a new ${singular}`
-    : selected
-      ? `Saved ${singular} configuration`
-      : info.description
+  const isModelEdit = kind === 'models' && Boolean(editing)
+  const isAgentWrite = kind === 'agents' && !isBuiltins && editing !== undefined
+  const isBuiltinAgentEdit = isBuiltins && Boolean(editing)
+  const isServerWrite = kind === 'servers' && editing !== undefined
+  const headerTitle = selected ? selected.name : info.title
+  const headerDescription = selected ? `Saved ${singular} configuration` : info.description
 
-  const headerActions = inForm ? (
-    <>
-      {formDirty && (
+  const headerActions = selected ? (
+    <div className="resource-header-actions">
+      {isBuiltins && (
         <Button
           className="resource-header-action"
-          icon={<X size={15} />}
+          variant="primary"
+          icon={<Edit3 size={15} />}
           onClick={() => {
-            save.reset()
-            setFormDirty(false)
-            setFormDraftVersion((version) => version + 1)
+            builtinConfig.reset()
+            setEditing(selected)
           }}
-          aria-label="Discard changes"
-          title="Discard changes"
+          aria-label="Edit built-in subagent"
+          title="Edit built-in subagent"
         />
       )}
-      {(kind !== 'agents' || editing !== null) && (
-        <Button
-          variant="primary"
-          icon={<Save size={14} />}
-          type="submit"
-          form={formId}
-          busy={save.isPending}
-        >
-          {editing ? 'Save changes' : 'Create'}
-        </Button>
-      )}
-    </>
-  ) : selected ? (
-    <div className="resource-header-actions">
-      {isBuiltins && builtinDirty && (
-        <>
-          <Button
-            className="resource-header-action"
-            icon={<X size={15} />}
-            disabled={builtinConfig.isPending}
-            onClick={() => {
-              builtinConfig.reset()
-              setBuiltinDirty(false)
-              setBuiltinDraftVersion((version) => version + 1)
-            }}
-            aria-label="Discard changes"
-            title="Discard changes"
-          />
-          <Button
-            className="resource-header-action"
-            variant="primary"
-            icon={<Save size={15} />}
-            busy={builtinConfig.isPending}
-            onClick={() => builtinDetailsRef.current?.save()}
-            aria-label="Save changes"
-            title="Save changes"
-          />
-        </>
-      )}
-      {!isBuiltins && !selectedIsManagedServer && (
+      {!isBuiltins && (
         <Button
           className="resource-header-action"
           icon={<Trash2 size={15} />}
@@ -511,13 +613,13 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
           title={`Delete ${singular}`}
         />
       )}
-      {!isBuiltins && !selectedIsManagedServer && (
+      {!isBuiltins && (
         <Button
           className="resource-header-action"
           variant="primary"
           icon={<Edit3 size={15} />}
           onClick={() => {
-            setFormDirty(false)
+            save.reset()
             setEditing(selected)
           }}
           aria-label={`Edit ${singular}`}
@@ -525,7 +627,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         />
       )}
     </div>
-  ) : !isBuiltins && !isBuiltinServerMode ? (
+  ) : !isBuiltins ? (
     <Button variant="primary" icon={<Plus size={15} />} onClick={openCreate}>
       Add {singular}
     </Button>
@@ -537,57 +639,20 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         title={headerTitle}
         description={headerDescription}
         leading={
-          selected && !inForm ? (
+          selected ? (
             <Button
               icon={<ChevronLeft size={15} />}
               onClick={openList}
               aria-label={`Back to ${collectionTitle.toLowerCase()}`}
               title={`Back to ${collectionTitle.toLowerCase()}`}
             />
-          ) : inForm ? (
-            <Button
-              icon={<ChevronLeft size={15} />}
-              onClick={cancelForm}
-              aria-label={`Back to ${selected ? selected.name : collectionTitle.toLowerCase()}`}
-              title={`Back to ${selected ? selected.name : collectionTitle.toLowerCase()}`}
-            />
           ) : undefined
         }
         actions={headerActions}
       />
       <div className={`page-content ${hasTypePicker || kind === 'models' ? 'stack' : ''}`}>
-        {kind === 'models' && !inForm && !selected && (
-          <div className="model-location-picker" role="tablist" aria-label="Model type">
-            <span
-              className={`model-location-picker__indicator ${modelMode === 'embedding' ? 'is-local' : ''}`}
-              aria-hidden="true"
-            />
-            <button
-              type="button"
-              role="tab"
-              className={modelMode === 'language' ? 'is-active' : ''}
-              aria-selected={modelMode === 'language'}
-              onClick={() => switchModelMode('language')}
-            >
-              Language
-            </button>
-            <button
-              type="button"
-              role="tab"
-              className={modelMode === 'embedding' ? 'is-active' : ''}
-              aria-selected={modelMode === 'embedding'}
-              onClick={() => switchModelMode('embedding')}
-            >
-              Embeddings
-            </button>
-          </div>
-        )}
-        {hasTypePicker && !inForm && !selected && (
-          <div
-            className="model-location-picker"
-            role="tablist"
-            aria-label={kind === 'agents' ? 'Subagent type' : 'MCP server type'}
-          >
+        {hasTypePicker && !selected && (
+          <div className="model-location-picker" role="tablist" aria-label="Subagent type">
             <span
               className={`model-location-picker__indicator ${resourceMode === 'built-in' ? 'is-local' : ''}`}
               aria-hidden="true"
@@ -612,86 +677,26 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
             </button>
           </div>
         )}
-        {inForm ? (
-          <section
-            key={`resource-form:${formDraftVersion}`}
-            className="card resource-workspace resource-workspace--form"
-            onChangeCapture={() => setFormDirty(true)}
-            onInputCapture={() => setFormDirty(true)}
-            onClickCapture={(event) => {
-              const button = (event.target as HTMLElement).closest('button[type="button"]')
-              if (
-                button &&
-                !button.closest('.section-tabs, .subagent-wizard__steps, .subagent-form-footer')
-              )
-                setFormDirty(true)
-            }}
-          >
-            <div className="card__body">
-              {kind === 'models' && !isEmbeddingMode && (
-                <ModelForm
-                  item={editing as ModelRecord | undefined}
-                  formId={formId}
-                  onSubmit={submit}
-                />
-              )}
-              {isEmbeddingMode && (
-                <EmbeddingModelForm
-                  item={editing as EmbeddingModelRecord | undefined}
-                  formId={formId}
-                  onSubmit={submit}
-                />
-              )}
-              {kind === 'servers' && (
-                <ServerForm
-                  item={editing as McpServer | undefined}
-                  formId={formId}
-                  onSubmit={submit}
-                />
-              )}
-              {kind === 'agents' && !isBuiltins && (
-                <AgentForm
-                  key={(editing as Subagent | undefined)?.id || 'new-agent'}
-                  item={editing as Subagent | undefined}
-                  models={models.data || []}
-                  servers={servers.data || []}
-                  formId={formId}
-                  busy={save.isPending}
-                  onSubmit={submit}
-                />
-              )}
-            </div>
-          </section>
-        ) : selected ? (
+        {selected ? (
           <section className="resource-detail-page">
             {isBuiltins ? (
               <BuiltinAgentDetails
-                key={`${(selected as BuiltinAgent).key}:${builtinDraftVersion}`}
-                ref={builtinDetailsRef}
+                key={(selected as BuiltinAgent).key}
+                readOnly
                 item={selected as BuiltinAgent}
                 models={models.data || []}
                 embeddingModels={embeddingModels.data || []}
                 skills={(skills.data || []) as SkillRecord[]}
                 skillsLoading={skills.isLoading}
                 skillsError={skills.error instanceof Error ? skills.error.message : ''}
-                saving={builtinConfig.isPending}
-                connecting={builtinConnect.isPending}
-                error={
-                  builtinConfig.error instanceof Error
-                    ? builtinConfig.error.message
-                    : builtinConnect.error instanceof Error
-                      ? builtinConnect.error.message
-                      : ''
-                }
-                onConnect={(connected) => builtinConnect.mutate(connected)}
-                onDirtyChange={setBuiltinDirty}
-                onSave={(body) => builtinConfig.mutateAsync(body)}
               />
             ) : isEmbeddingMode ? (
               <EmbeddingModelDetails
                 item={selected as EmbeddingModelRecord}
                 onTested={(saved) => setSelected(saved)}
               />
+            ) : isVoiceModelMode ? (
+              <VoiceModelDetails item={selected as VoiceModelRecord} />
             ) : (
               <ResourceDetails
                 kind={kind}
@@ -704,8 +709,12 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         ) : query.isLoading ? (
           <Loading />
         ) : query.error ? (
-          <Feedback message={(query.error as Error).message} />
-        ) : !data.length ? (
+          <Feedback
+            message={
+              query.error instanceof Error ? query.error.message : 'Models could not be loaded.'
+            }
+          />
+        ) : !data.length && kind !== 'models' ? (
           <div className="card empty-state">No {collectionTitle.toLowerCase()} saved yet.</div>
         ) : (
           <div className="resource-browser">
@@ -719,29 +728,75 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                 aria-label={`Search ${collectionTitle.toLowerCase()}`}
               />
             </label>
+            {kind === 'models' && (
+              <div className="model-type-filters" role="group" aria-label="Filter models by type">
+                {modelTypes.map((option) => {
+                  const Icon = option.icon
+                  return (
+                    <button
+                      type="button"
+                      key={option.id}
+                      className={`model-type-filter model-type-filter--${option.id} ${modelType === option.id ? 'is-active' : ''}`}
+                      aria-pressed={modelType === option.id}
+                      onClick={() => switchModelType(option.id)}
+                    >
+                      {Icon && <Icon size={13} aria-hidden="true" />}
+                      {option.label}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
             {listed.length ? (
               <div className="resource-list">
                 {listed.map(({ item, row }) => {
                   const isAgent = kind === 'agents'
+                  const itemModelType =
+                    kind === 'models'
+                      ? modelItemType(item as ModelRecord | EmbeddingModelRecord | VoiceModelRecord)
+                      : null
+                  const itemModelTypeOption = itemModelType
+                    ? modelTypes.find((option) => option.id === itemModelType)
+                    : null
+                  const ModelTypeIcon = itemModelTypeOption?.icon
                   return (
                     <button
                       className={`resource-row resource-row--${kind} ${row.status ? '' : 'resource-row--without-status'}`}
                       type="button"
-                      key={'key' in item ? item.key : item.id}
+                      key={
+                        'key' in item
+                          ? item.key
+                          : kind === 'models'
+                            ? `${modelItemType(item as ModelRecord | EmbeddingModelRecord | VoiceModelRecord)}:${item.id}`
+                            : item.id
+                      }
                       onClick={() => {
                         setEditing(undefined)
-                        setBuiltinDirty(false)
                         setSelected(item)
                         setParams(
                           isBuiltins
                             ? { view: 'built-in', builtin: (item as BuiltinAgent).key }
                             : {
                                 ...(hasTypePicker ? { view: resourceMode } : {}),
-                                ...(isEmbeddingMode ? { view: 'embedding' } : {}),
+                                ...(kind === 'models' && modelType !== 'all'
+                                  ? { type: modelType }
+                                  : {}),
+                                ...(kind === 'models'
+                                  ? {
+                                      model: modelItemType(
+                                        item as
+                                          ModelRecord | EmbeddingModelRecord | VoiceModelRecord,
+                                      ),
+                                    }
+                                  : {}),
                                 open: String(
                                   (
                                     item as
-                                      ModelRecord | EmbeddingModelRecord | McpServer | Subagent
+                                      | ModelRecord
+                                      | EmbeddingModelRecord
+                                      | VoiceModelRecord
+                                      | McpServer
+                                      | Subagent
                                   ).id,
                                 ),
                               },
@@ -758,8 +813,19 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                             )}
                           </span>
                         )}
-                        <span>
-                          <strong>{row.title}</strong>
+                        <span className="resource-row__identity-copy">
+                          <span className="resource-row__title">
+                            <strong>{row.title}</strong>
+                            {itemModelType && itemModelTypeOption && ModelTypeIcon && (
+                              <span
+                                className={`model-card-type-badge model-card-type-badge--${itemModelType}`}
+                                title={`${itemModelTypeOption.label} model`}
+                                aria-label={`${itemModelTypeOption.label} model`}
+                              >
+                                <ModelTypeIcon size={13} aria-hidden="true" />
+                              </span>
+                            )}
+                          </span>
                           {row.subtitle && <small>{row.subtitle}</small>}
                         </span>
                       </div>
@@ -780,12 +846,238 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
               </div>
             ) : (
               <div className="card empty-state resource-search-empty">
-                No {collectionTitle.toLowerCase()} match “{search.trim()}”.
+                {search.trim()
+                  ? `No ${collectionTitle.toLowerCase()} match “${search.trim()}”.`
+                  : kind === 'models' && modelType !== 'all'
+                    ? `No ${modelTypes.find((option) => option.id === modelType)?.label.toLowerCase()} models saved yet.`
+                    : `No ${collectionTitle.toLowerCase()} saved yet.`}
               </div>
             )}
           </div>
         )}
       </div>
+      <Modal
+        open={isAgentWrite}
+        wide
+        integrated
+        className="modal--compact-write-form modal--subagent-write-form"
+        title={editing ? `Edit ${editing.name}` : 'Add subagent'}
+        description={
+          editing
+            ? 'Update its role, skills, tools, and security.'
+            : 'Configure its role, skills, tools, and security.'
+        }
+        headingActions={
+          editing ? (
+            <Button
+              className="modal-heading-save-button"
+              variant="primary"
+              type="submit"
+              form={formId}
+              icon={<Save size={15} />}
+              busy={save.isPending}
+              aria-label="Save subagent changes"
+              title="Save changes"
+            />
+          ) : undefined
+        }
+        onClose={cancelForm}
+      >
+        <div className="compact-write-modal-form subagent-write-modal-form">
+          <AgentForm
+            key={(editing as Subagent | undefined)?.id || 'new-agent'}
+            item={(editing as Subagent | undefined) || undefined}
+            models={models.data || []}
+            servers={servers.data || []}
+            formId={formId}
+            busy={save.isPending}
+            onSubmit={submit}
+          />
+        </div>
+      </Modal>
+      <Modal
+        open={isServerWrite}
+        wide
+        integrated
+        className="modal--compact-write-form modal--mcp-write-form"
+        title={editing ? `Edit ${editing.name}` : 'Add MCP server'}
+        description={
+          editing
+            ? 'Update this server connection and its private configuration.'
+            : 'Configure a reusable MCP server connection.'
+        }
+        onClose={cancelForm}
+      >
+        <div className="compact-write-modal-form">
+          <ServerForm
+            key={(editing as McpServer | undefined)?.id || 'new-server'}
+            item={(editing as McpServer | undefined) || undefined}
+            formId={formId}
+            onSubmit={submit}
+          />
+        </div>
+        <div className="compact-form-actions">
+          <Button variant="primary" type="submit" form={formId} busy={save.isPending}>
+            {editing ? 'Save changes' : 'Add server'}
+          </Button>
+        </div>
+      </Modal>
+      <Modal
+        open={isBuiltinAgentEdit}
+        wide
+        integrated
+        className="modal--compact-write-form modal--subagent-write-form modal--builtin-agent-write-form"
+        title={`Edit ${editing?.name || 'built-in subagent'}`}
+        description="Update this built-in specialist's models, skills, and security."
+        headingActions={
+          <Button
+            className="modal-heading-save-button"
+            variant="primary"
+            type="button"
+            icon={<Save size={15} />}
+            busy={builtinConfig.isPending}
+            onClick={() => builtinDetailsRef.current?.save()}
+            aria-label="Save built-in subagent changes"
+            title="Save changes"
+          />
+        }
+        onClose={cancelForm}
+      >
+        {editing && (
+          <div className="compact-write-modal-form">
+            <BuiltinAgentDetails
+              key={`${(editing as BuiltinAgent).key}:edit`}
+              ref={builtinDetailsRef}
+              compact
+              item={editing as BuiltinAgent}
+              models={models.data || []}
+              embeddingModels={embeddingModels.data || []}
+              skills={(skills.data || []) as SkillRecord[]}
+              skillsLoading={skills.isLoading}
+              skillsError={skills.error instanceof Error ? skills.error.message : ''}
+              saving={builtinConfig.isPending}
+              connecting={builtinConnect.isPending}
+              error={
+                builtinConfig.error instanceof Error
+                  ? builtinConfig.error.message
+                  : builtinConnect.error instanceof Error
+                    ? builtinConnect.error.message
+                    : ''
+              }
+              onConnect={(connected) => builtinConnect.mutate(connected)}
+              onSave={(body) => builtinConfig.mutateAsync(body)}
+            />
+          </div>
+        )}
+      </Modal>
+      <Modal
+        open={isModelEdit}
+        wide
+        integrated
+        className="modal--compact-write-form modal--model-write-form"
+        title={`Edit ${editing?.name || 'model'}`}
+        description="Update this model connection. Its model type cannot be changed."
+        onClose={cancelForm}
+      >
+        <div className="compact-write-modal-form model-write-modal-form">
+          {activeModelType === 'llm' && (
+            <ModelForm
+              item={editing as ModelRecord | undefined}
+              formId={formId}
+              onSubmit={submit}
+            />
+          )}
+          {activeModelType === 'embedding' && (
+            <EmbeddingModelForm
+              item={editing as EmbeddingModelRecord | undefined}
+              formId={formId}
+              onSubmit={submit}
+            />
+          )}
+          {(activeModelType === 'tts' || activeModelType === 'stt') && (
+            <VoiceModelForm
+              key={activeModelType}
+              kind={activeModelType}
+              item={editing as VoiceModelRecord | undefined}
+              formId={formId}
+              onSubmit={submit}
+            />
+          )}
+        </div>
+        <div className="compact-form-actions">
+          <Button variant="primary" type="submit" form={formId} busy={save.isPending}>
+            Save changes
+          </Button>
+        </div>
+      </Modal>
+      <Modal
+        open={kind === 'models' && modelCreateStage !== 'closed'}
+        wide={modelCreateStage === 'form'}
+        integrated={modelCreateStage === 'form'}
+        className={
+          modelCreateStage === 'type'
+            ? 'modal--model-choice'
+            : 'modal--compact-write-form modal--model-write-form'
+        }
+        title={
+          modelCreateStage === 'type'
+            ? 'Add model'
+            : `Add ${modelTypes.find((option) => option.id === createModelType)?.label.toLowerCase() || ''} model`
+        }
+        description={
+          modelCreateStage === 'type'
+            ? 'Choose the kind of model you want to configure.'
+            : 'Configure this model connection. Its type cannot be changed after creation.'
+        }
+        onClose={closeModelCreate}
+      >
+        {modelCreateStage === 'type' ? (
+          <div className="subagent-start model-create-chooser">
+            <div className="subagent-start__choices model-create-choices">
+              {modelTypes.slice(1).map((option) => {
+                const Icon = option.icon
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`subagent-start__choice model-create-choice model-create-choice--${option.id} ${createModelType === option.id ? 'is-selected' : ''}`}
+                    aria-pressed={createModelType === option.id}
+                    onClick={() => chooseModelType(option.id as Exclude<ModelType, 'all'>)}
+                  >
+                    <span className="subagent-start__choice-title">
+                      {Icon && <Icon size={18} aria-hidden="true" />}
+                      <strong>{option.label}</strong>
+                    </span>
+                    <small>{option.description}</small>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        ) : createModelType ? (
+          <>
+            <div key={`model-create-form:${createModelType}`} className="model-write-modal-form">
+              {createModelType === 'llm' && <ModelForm formId={formId} onSubmit={submit} />}
+              {createModelType === 'embedding' && (
+                <EmbeddingModelForm formId={formId} onSubmit={submit} />
+              )}
+              {(createModelType === 'tts' || createModelType === 'stt') && (
+                <VoiceModelForm
+                  key={createModelType}
+                  kind={createModelType}
+                  formId={formId}
+                  onSubmit={submit}
+                />
+              )}
+            </div>
+            <div className="compact-form-actions">
+              <Button variant="primary" type="submit" form={formId} busy={save.isPending}>
+                Create model
+              </Button>
+            </div>
+          </>
+        ) : null}
+      </Modal>
       <ConfirmDialog
         open={deleting}
         title={`Delete ${singular}?`}

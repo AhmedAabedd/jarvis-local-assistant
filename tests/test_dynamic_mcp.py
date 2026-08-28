@@ -121,6 +121,23 @@ class DatabaseTests(TemporaryDatabaseTest):
             dedupe_tools=["send_email"],
         )
 
+    def test_text_model_location_is_saved_explicitly(self):
+        db.init()
+        saved = db.add_model(
+            "Remote tunnel",
+            "custom/model",
+            "Private gateway",
+            "http://localhost:9000/v1",
+            "",
+            location="cloud",
+        )
+        self.assertEqual(saved["location"], "cloud")
+
+        updated = db.update_model(saved["id"], location="local")
+        self.assertEqual(updated["location"], "local")
+        with self.assertRaisesRegex(ValueError, "cloud or local"):
+            db.update_model(saved["id"], location="somewhere")
+
     def test_telegram_settings_migrate_env_and_never_expose_token(self):
         with (
             patch.object(config, "TELEGRAM_BOT_TOKEN", "123:secret"),
@@ -179,6 +196,56 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
         self.assertEqual(db.get_voice_runtime("stt")["api_key"], "groq-voice-key")
         self.assertEqual(db.get_voice_runtime("stt")["language"], "fr")
+
+    def test_legacy_voice_settings_are_promoted_to_reusable_models(self):
+        db.init()
+
+        models = db.list_voice_models()
+        settings = db.get_voice_settings()
+
+        self.assertEqual({model["kind"] for model in models}, {"stt", "tts"})
+        self.assertIn(settings["stt"]["model_id"], {model["id"] for model in models})
+        self.assertIn(settings["tts"]["model_id"], {model["id"] for model in models})
+        self.assertNotIn("api_key", db.voice_model_for_api(models[0]))
+
+    def test_voice_page_can_select_reusable_models_and_protect_active_records(self):
+        db.init()
+        transcription = db.add_voice_model(
+            "Studio transcription",
+            "stt",
+            provider="openai_compatible",
+            model="whisper-studio",
+            base_url="https://speech.example.test/v1",
+            api_key="speech-key",
+            language="en",
+        )
+        speech = db.add_voice_model(
+            "Studio speech",
+            "tts",
+            provider="openai_compatible",
+            model="voice-studio",
+            voice="calm",
+            base_url="https://voice.example.test/v1",
+            api_key="voice-key",
+            language="auto",
+        )
+
+        saved = db.update_voice_settings(
+            stt_model_id=transcription["id"],
+            tts_model_id=speech["id"],
+        )
+
+        self.assertEqual(saved["stt"]["model_id"], transcription["id"])
+        self.assertEqual(saved["tts"]["model_id"], speech["id"])
+        self.assertEqual(db.get_voice_runtime("stt")["api_key"], "speech-key")
+        self.assertEqual(db.get_voice_runtime("tts")["voice"], "calm")
+        self.assertEqual(
+            db.delete_voice_model_result(speech["id"]).status,
+            "in_use",
+        )
+
+        db.update_voice_model(speech["id"], voice="bright")
+        self.assertEqual(db.get_voice_runtime("tts")["voice"], "bright")
 
     def test_voice_bootstrap_does_not_borrow_an_unrelated_openai_key(self):
         with (
@@ -939,14 +1006,7 @@ class DatabaseTests(TemporaryDatabaseTest):
     def test_fresh_database_keeps_user_registry_empty(self):
         db.init()
         self.assertEqual(db.list_models(), [])
-        servers = db.list_servers()
-        self.assertEqual(len(servers), 1)
-        self.assertEqual(
-            servers[0]["setup_type"], knowledge_protocol.BUILTIN_SETUP_TYPE
-        )
-        self.assertEqual(
-            servers[0]["connection"], knowledge_protocol.BUILTIN_SERVER_COMMAND
-        )
+        self.assertEqual(db.list_servers(), [])
         self.assertEqual(db.list_subagents(), [])
         self.assertIsNone(db.get_supervisor_config()["model_id"])
         self.assertEqual(db.get_supervisor_config()["model_options"], [])
@@ -970,32 +1030,26 @@ class DatabaseTests(TemporaryDatabaseTest):
             [item["name"] for item in db.list_models()], ["User model"]
         )
         self.assertEqual(
-            [item["setup_type"] for item in db.list_servers()],
-            [knowledge_protocol.BUILTIN_SETUP_TYPE],
+            db.list_servers(),
+            [],
         )
         self.assertEqual(
             [item["name"] for item in db.list_subagents()], ["Helper"]
         )
 
-    def test_existing_empty_database_only_seeds_required_builtin_resources(self):
-        # Existing databases follow the same user-owned registry policy as new
-        # installations. Only the required managed GBrain service is seeded.
+    def test_existing_empty_database_keeps_the_user_mcp_registry_empty(self):
+        # Knowledge owns its local service, so the reusable MCP registry stays
+        # entirely user-controlled on both new and existing installations.
         with db._connect() as conn:
             db._init_schema(conn)
 
         db.init()
         self.assertEqual(db.list_models(), [])
-        self.assertEqual(
-            [item["setup_type"] for item in db.list_servers()],
-            [knowledge_protocol.BUILTIN_SETUP_TYPE],
-        )
+        self.assertEqual(db.list_servers(), [])
         self.assertEqual(db.list_subagents(), [])
         db.init()
         self.assertEqual(db.list_models(), [])
-        self.assertEqual(
-            [item["setup_type"] for item in db.list_servers()],
-            [knowledge_protocol.BUILTIN_SETUP_TYPE],
-        )
+        self.assertEqual(db.list_servers(), [])
         self.assertEqual(db.list_subagents(), [])
 
     def test_legacy_gmail_setup_marker_is_removed_without_deleting_server(self):
@@ -1017,10 +1071,7 @@ class DatabaseTests(TemporaryDatabaseTest):
         db.init()
         self.assertEqual(db.list_models(), [])
         servers = db.list_servers()
-        self.assertEqual(
-            {item["id"] for item in servers},
-            {server_id, db.get_builtin_gbrain_server()["id"]},
-        )
+        self.assertEqual({item["id"] for item in servers}, {server_id})
         self.assertEqual(db.list_subagents(), [])
 
     def test_private_mcp_files_are_masked_materialized_and_removable(self):

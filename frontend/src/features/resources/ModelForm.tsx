@@ -2,13 +2,13 @@ import { useState, type FormEvent } from 'react'
 import type { ModelRecord } from '../../api/types'
 import { Field } from '../../components/ui/Field'
 import { Feedback } from '../../components/ui/Feedback'
-
-type ModelLocation = 'cloud' | 'local'
+import { ModelLocationOptions, type ModelLocation } from './ModelLocationOptions'
 
 const LOCAL_PROVIDER_NAMES = ['local', 'ollama', 'lm studio', 'vllm', 'llama.cpp']
 
 function inferLocation(item?: ModelRecord): ModelLocation {
   if (!item) return 'cloud'
+  if (item.location === 'cloud' || item.location === 'local') return item.location
   const provider = String(item.provider || '').toLowerCase()
   if (LOCAL_PROVIDER_NAMES.some((name) => provider.includes(name))) return 'local'
   try {
@@ -61,28 +61,7 @@ export function ModelForm({
   }
   return (
     <form id={formId} className="form-grid" onSubmit={submit}>
-      <div className="model-location-picker" role="group" aria-label="Model location">
-        <span
-          className={`model-location-picker__indicator ${location === 'local' ? 'is-local' : ''}`}
-          aria-hidden="true"
-        />
-        <button
-          type="button"
-          className={location === 'cloud' ? 'is-active' : ''}
-          aria-pressed={location === 'cloud'}
-          onClick={() => setLocation('cloud')}
-        >
-          Cloud LLM
-        </button>
-        <button
-          type="button"
-          className={location === 'local' ? 'is-active' : ''}
-          aria-pressed={location === 'local'}
-          onClick={() => setLocation('local')}
-        >
-          Local LLM
-        </button>
-      </div>
+      <ModelLocationOptions value={location} onChange={setLocation} />
       <div className="guidance">
         {location === 'cloud' ? (
           <>

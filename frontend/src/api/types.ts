@@ -10,6 +10,7 @@ export interface Profile {
 export interface ModelRecord {
   id: Id
   name: string
+  location: 'cloud' | 'local'
   model: string
   provider: string
   base_url: string
@@ -30,6 +31,20 @@ export interface EmbeddingModelRecord {
   connection_status: 'untested' | 'connected' | 'stale' | 'failed'
   last_tested_at?: string | null
   last_error?: string
+}
+
+export interface VoiceModelRecord {
+  id: Id
+  name: string
+  kind: 'tts' | 'stt'
+  location: 'cloud' | 'local'
+  provider: 'piper' | 'moss_onnx' | 'openai_compatible' | 'google' | 'local_whisper' | string
+  model: string
+  voice?: string
+  base_url: string
+  language: string
+  api_key?: string
+  api_key_configured?: boolean
 }
 
 export interface ToolInfo {
@@ -65,11 +80,70 @@ export interface McpServer {
   env_configured?: boolean
   credentials_configured?: boolean
   setup_configured?: boolean
-  managed?: boolean
   credential_files?: McpCredentialFile[]
   connection_status?: string
   tool_count?: number
   last_error?: string
+  source_type?: 'manual' | 'registry'
+  source_name?: string
+  source_ref?: string
+  source_version?: string
+  source_url?: string
+}
+
+export interface McpRegistryInstallOption {
+  id: string
+  kind: 'remote' | 'package'
+  label: string
+  transport: McpServer['transport']
+  connection: string
+  headers: Record<string, string>
+  env: Record<string, string>
+  auth_scheme: string
+  requirements: string[]
+}
+
+export interface McpRegistryPublishedOption {
+  id: string
+  kind: 'remote' | 'package'
+  label: string
+  transport: string
+  address: string
+  registry: string
+  version: string
+  runtime: string
+  requirements: string[]
+  integrity_available: boolean
+  configurable: boolean
+}
+
+export interface McpRegistryServer {
+  provider: string
+  provider_name: string
+  reference: string
+  name: string
+  description: string
+  version: string
+  repository_url: string
+  repository_source: string
+  repository_subfolder: string
+  website_url: string
+  status: string
+  status_message: string
+  status_changed_at?: string | null
+  published_at?: string | null
+  updated_at?: string | null
+  is_latest: boolean | null
+  publisher_contact: string
+  install_options: McpRegistryInstallOption[]
+  published_options: McpRegistryPublishedOption[]
+}
+
+export interface McpRegistryPage {
+  provider: string
+  provider_name: string
+  items: McpRegistryServer[]
+  next_cursor: string
 }
 
 export interface McpCredentialFile {
@@ -206,10 +280,9 @@ export interface BuiltinAgent {
   model_id?: Id | null
   generation_model?: string | null
   generation_model_id?: Id | null
-  mcp_server_id?: Id | null
-  mcp_server_name?: string | null
-  mcp_server_transport?: McpServer['transport'] | null
-  mcp_server_status?: string | null
+  knowledge_service_status?: string | null
+  knowledge_service_last_tested_at?: string | null
+  knowledge_service_last_error?: string
   knowledge_protocol?: string | null
   knowledge_protocol_compatible?: boolean | null
   knowledge_protocol_missing_tools?: string[]
@@ -326,6 +399,8 @@ export interface AgentOverview {
 }
 
 export interface VoiceProvider {
+  model_id: Id | null
+  name?: string
   provider: string
   model: string
   voice?: string

@@ -1,4 +1,4 @@
-"""Shared lifecycle for Mounir's managed local GBrain MCP process.
+"""Shared lifecycle for Knowledge's local GBrain MCP process.
 
 GBrain's PGLite store must have a single process owner.  When automatic
 knowledge is active, this module keeps one stdio session alive and lends a

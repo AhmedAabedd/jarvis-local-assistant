@@ -12,6 +12,8 @@ interface Props {
   wide?: boolean
   side?: boolean
   className?: string
+  integrated?: boolean
+  headingActions?: ReactNode
 }
 
 export function Modal({
@@ -24,6 +26,8 @@ export function Modal({
   wide,
   side,
   className,
+  integrated,
+  headingActions,
 }: Props) {
   const titleId = useId()
   useEffect(() => {
@@ -40,17 +44,43 @@ export function Modal({
       aria-modal={side ? 'false' : 'true'}
       aria-labelledby={titleId}
     >
-      <header className="modal__header">
-        <div>
-          <h2 id={titleId}>{title}</h2>
-          {description && <p>{description}</p>}
+      {integrated ? (
+        <div className="modal__scroll-frame">
+          <div className="modal__body modal__body--integrated">
+            <div className="modal__body-heading">
+              <div>
+                <h2 id={titleId}>{title}</h2>
+                {description && <p>{description}</p>}
+              </div>
+              <div className="modal__body-heading-actions">
+                {headingActions}
+                <button
+                  className="icon-button panel-close-button modal__integrated-close"
+                  onClick={onClose}
+                  aria-label="Close"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+            {children}
+          </div>
         </div>
-        <button className="icon-button panel-close-button" onClick={onClose} aria-label="Close">
-          <X size={14} />
-        </button>
-      </header>
-      <div className="modal__body">{children}</div>
-      {footer && <footer className="modal__footer">{footer}</footer>}
+      ) : (
+        <>
+          <header className="modal__header">
+            <div>
+              <h2 id={titleId}>{title}</h2>
+              {description && <p>{description}</p>}
+            </div>
+            <button className="icon-button panel-close-button" onClick={onClose} aria-label="Close">
+              <X size={14} />
+            </button>
+          </header>
+          <div className="modal__body">{children}</div>
+          {footer && <footer className="modal__footer">{footer}</footer>}
+        </>
+      )}
     </section>
   )
   return createPortal(

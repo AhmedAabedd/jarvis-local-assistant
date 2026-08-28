@@ -56,6 +56,7 @@ from mounir import (
     embedding_models,
     gbrain_runtime,
     llm,
+    mcp_registry,
     mcp_oauth,
     skill_store,
     trace,
@@ -161,16 +162,12 @@ def _reconcile_gbrain_runtime_sync() -> None:
             return
         if gbrain_runtime.runtime.start(spec):
             return
-        server_id = int(spec["server_id"])
         error = (
             gbrain_runtime.runtime.last_error
             or "The persistent GBrain runtime could not start."
         )
         gbrain_runtime.runtime.stop()
-        db.record_server_test_failure(
-            server_id,
-            error,
-        )
+        db.record_knowledge_service_failure(error)
 
 
 async def _reconcile_gbrain_runtime() -> None:
@@ -181,39 +178,43 @@ async def _stop_gbrain_runtime() -> None:
     await _run_gbrain_lifecycle_call(gbrain_runtime.runtime.stop)
 
 
-async def _prepare_builtin_gbrain() -> None:
-    """Install, initialize, and discover the required local Knowledge service."""
+async def _refresh_knowledge_service(*, install: bool) -> dict:
+    """Set up or test the local service owned by Knowledge."""
     from mounir import knowledge_protocol
     from mounir.setup_gbrain import ensure_local_gbrain
 
-    server = db.get_builtin_gbrain_server()
-    if server is None:
-        return
-    server_id = int(server["id"])
-    try:
-        spec = db.build_server_spec(server_id)
-        if spec is None:
-            raise RuntimeError("The built-in GBrain server configuration is missing.")
+    spec = db.build_knowledge_service_spec()
+    if install:
+        if gbrain_runtime.runtime.owns(spec):
+            await _stop_gbrain_runtime()
         if _gbrain_lifecycle_active and db.is_automatic_knowledge_enabled():
             gbrain_runtime.runtime.reserve(spec)
         await _run_gbrain_lifecycle_call(ensure_local_gbrain)
-        # Setup owns the reservation, so this is the one allowed temporary
-        # session before the persistent runtime takes over.
+        # A reservation has no live session yet, so setup performs one direct
+        # discovery before the persistent runtime takes ownership.
         discovered = await asyncio.wait_for(discover_tools(spec), timeout=60)
-        names = {str(tool.get("name") or "") for tool in discovered}
-        missing = knowledge_protocol.missing_tools(names)
-        if missing:
-            raise RuntimeError(
-                "GBrain did not advertise its required local interface. Missing: "
-                + ", ".join(missing)
-            )
-        db.save_server_tools(server_id, discovered)
+    else:
+        discovered = await asyncio.wait_for(_discover_server_tools(spec), timeout=45)
+    names = {str(tool.get("name") or "") for tool in discovered}
+    missing = knowledge_protocol.missing_tools(names)
+    if missing:
+        raise RuntimeError(
+            "GBrain did not advertise its required local interface. Missing: "
+            + ", ".join(missing)
+        )
+    return db.save_knowledge_service_tools(discovered)
+
+
+async def _prepare_builtin_gbrain() -> None:
+    """Prepare Knowledge's service during startup without blocking the app."""
+    try:
+        await _refresh_knowledge_service(install=True)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         from mounir.specialists.mcp_agent import _exc_detail
 
-        db.record_server_test_failure(server_id, _exc_detail(exc))
+        db.record_knowledge_service_failure(_exc_detail(exc))
     finally:
         await _reconcile_gbrain_runtime()
 
@@ -705,9 +706,56 @@ async def get_tts_voices(provider: str, model: str):
 @app.put("/api/voice-settings")
 async def update_voice_settings(req: dict):
     try:
-        return db.update_voice_settings(stt=req.get("stt"), tts=req.get("tts"))
+        return db.update_voice_settings(
+            stt=req.get("stt"),
+            tts=req.get("tts"),
+            stt_model_id=req.get("stt_model_id"),
+            tts_model_id=req.get("tts_model_id"),
+        )
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/api/voice-models")
+async def list_voice_models(kind: str | None = None):
+    try:
+        return [
+            db.voice_model_for_api(model)
+            for model in db.list_voice_models(kind)
+        ]
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/voice-models")
+async def create_voice_model(req: dict):
+    try:
+        model = db.add_voice_model(
+            req.get("name", ""),
+            req.get("kind", ""),
+            **{key: value for key, value in req.items() if key not in {"name", "kind"}},
+        )
+        return db.voice_model_for_api(model)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/voice-models/{model_id}")
+async def update_voice_model(model_id: int, req: dict):
+    try:
+        model = db.update_voice_model(model_id, **req)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if model is None:
+        return JSONResponse({"error": "Voice model not found."}, status_code=404)
+    return db.voice_model_for_api(model)
+
+
+@app.delete("/api/voice-models/{model_id}")
+async def delete_voice_model(model_id: int):
+    return _restricted_delete_response(
+        db.delete_voice_model_result(model_id), "Voice model"
+    )
 
 @app.get("/api/profile")
 async def get_profile():
@@ -1086,8 +1134,6 @@ async def update_builtin_agent(agent_key: str, req: dict):
             changes["model_id"] = req.get("model_id")
         if "generation_model_id" in req:
             changes["generation_model_id"] = req.get("generation_model_id")
-        if "mcp_server_id" in req:
-            changes["mcp_server_id"] = req.get("mcp_server_id")
         if "connected" in req:
             changes["connected"] = req.get("connected")
         if "enabled" in req:
@@ -1155,6 +1201,37 @@ async def update_builtin_agent(agent_key: str, req: dict):
         return JSONResponse({"error": str(exc)}, status_code=400)
     await _reconcile_gbrain_runtime()
     return saved
+
+
+async def _knowledge_service_action(*, install: bool):
+    try:
+        await _refresh_knowledge_service(install=install)
+    except TimeoutError:
+        error = "Knowledge service connection timed out."
+        db.record_knowledge_service_failure(error)
+        await _reconcile_gbrain_runtime()
+        return JSONResponse({"error": error}, status_code=504)
+    except Exception as exc:
+        from mounir.specialists.mcp_agent import _exc_detail
+
+        error = _exc_detail(exc)
+        db.record_knowledge_service_failure(error)
+        await _reconcile_gbrain_runtime()
+        return JSONResponse({"error": error}, status_code=400)
+    await _reconcile_gbrain_runtime()
+    return next(
+        item for item in db.list_builtin_agents() if item["key"] == "knowledge"
+    )
+
+
+@app.post("/api/builtin-agents/knowledge/service/setup")
+async def setup_knowledge_service():
+    return await _knowledge_service_action(install=True)
+
+
+@app.post("/api/builtin-agents/knowledge/service/test")
+async def test_knowledge_service():
+    return await _knowledge_service_action(install=False)
 
 
 @app.get("/api/builtin-agents")
@@ -1275,6 +1352,11 @@ async def list_models():
     return [db.model_for_api(model) for model in db.list_models()]
 
 
+@app.get("/api/model-catalog")
+async def list_model_catalog():
+    return [db.model_for_api(model) for model in db.list_model_catalog()]
+
+
 @app.post("/api/models")
 async def create_model(req: dict):
     try:
@@ -1284,6 +1366,7 @@ async def create_model(req: dict):
             req.get("provider", ""),
             req.get("base_url", ""),
             req.get("api_key", ""),
+            req.get("location", ""),
         )
         return db.model_for_api(model)
     except (TypeError, ValueError) as exc:
@@ -1427,6 +1510,27 @@ async def list_servers():
     return [db.server_for_api(server) for server in db.list_servers()]
 
 
+@app.get("/api/mcp-registry/providers")
+async def list_mcp_registry_providers():
+    return mcp_registry.providers()
+
+
+@app.get("/api/mcp-registry")
+async def browse_mcp_registry(query: str = "", cursor: str = "", limit: int = 24):
+    try:
+        return await mcp_registry.browse(query, cursor, limit)
+    except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/api/mcp-registry/details")
+async def get_mcp_registry_server(reference: str, version: str = "latest"):
+    try:
+        return await mcp_registry.details(reference, version)
+    except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
 def _server_file_changes(req: dict) -> tuple[list[dict], list[str]]:
     uploads = []
     raw_uploads = req.pop("credential_files", []) or []
@@ -1530,6 +1634,9 @@ async def create_server(req: dict):
     try:
         req = dict(req)
         uploads, removals = _server_file_changes(req)
+        source_type = str(req.get("source_type") or "manual").strip().lower()
+        if source_type not in {"manual", "registry"}:
+            source_type = "manual"
         server = db.add_server(
             req.get("name", ""),
             req.get("connection", ""),
@@ -1539,6 +1646,11 @@ async def create_server(req: dict):
             description=req.get("description", ""),
             auth_scheme=req.get("auth_scheme", ""),
             setup_command=req.get("setup_command", ""),
+            source_type=source_type,
+            source_name=req.get("source_name", ""),
+            source_ref=req.get("source_ref", ""),
+            source_version=req.get("source_version", ""),
+            source_url=req.get("source_url", ""),
         )
         created_id = int(server["id"])
         if uploads or removals:
@@ -1666,15 +1778,7 @@ async def run_server_setup_action(server_id: int, action_id: str, request: Reque
         return JSONResponse({"error": "Server not found."}, status_code=404)
     try:
         if action_id == "run_command":
-            managed = db.get_builtin_gbrain_server()
-            is_gbrain = bool(managed and int(managed["id"]) == server_id)
-            if is_gbrain and _gbrain_lifecycle_active:
-                await _stop_gbrain_runtime()
-            try:
-                return await _run_local_setup_command(server_id)
-            finally:
-                if is_gbrain:
-                    await _prepare_builtin_gbrain()
+            return await _run_local_setup_command(server_id)
         if action_id == "disconnect_oauth":
             run = _oauth_setup_runs.pop(server_id, None)
             if run and run.task and not run.task.done():

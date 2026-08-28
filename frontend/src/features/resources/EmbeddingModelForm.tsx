@@ -5,8 +5,8 @@ import type { EmbeddingModelRecord } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Field } from '../../components/ui/Field'
 import { Feedback } from '../../components/ui/Feedback'
+import { ModelLocationOptions, type ModelLocation } from './ModelLocationOptions'
 
-type Location = EmbeddingModelRecord['location']
 type Adapter = EmbeddingModelRecord['adapter']
 
 export function EmbeddingModelForm({
@@ -22,14 +22,14 @@ export function EmbeddingModelForm({
   const [discoveryError, setDiscoveryError] = useState('')
   const [discovering, setDiscovering] = useState(false)
   const [models, setModels] = useState<string[]>([])
-  const [location, setLocation] = useState<Location>(item?.location || 'cloud')
+  const [location, setLocation] = useState<ModelLocation>(item?.location || 'cloud')
   const [adapter, setAdapter] = useState<Adapter>(item?.adapter || 'openai_compatible')
   const [baseUrl, setBaseUrl] = useState(
     item?.base_url || (location === 'local' ? 'http://localhost:11434/v1' : ''),
   )
   const [apiKey, setApiKey] = useState('')
 
-  const changeLocation = (next: Location) => {
+  const changeLocation = (next: ModelLocation) => {
     setLocation(next)
     if (!item && !baseUrl) {
       setBaseUrl(next === 'local' ? 'http://localhost:11434/v1' : '')
@@ -72,29 +72,7 @@ export function EmbeddingModelForm({
 
   return (
     <form id={formId} className="form-grid" onSubmit={submit}>
-      <input type="hidden" name="location" value={location} />
-      <div className="model-location-picker" role="group" aria-label="Embedding model location">
-        <span
-          className={`model-location-picker__indicator ${location === 'local' ? 'is-local' : ''}`}
-          aria-hidden="true"
-        />
-        <button
-          type="button"
-          className={location === 'cloud' ? 'is-active' : ''}
-          aria-pressed={location === 'cloud'}
-          onClick={() => changeLocation('cloud')}
-        >
-          Cloud
-        </button>
-        <button
-          type="button"
-          className={location === 'local' ? 'is-active' : ''}
-          aria-pressed={location === 'local'}
-          onClick={() => changeLocation('local')}
-        >
-          Local
-        </button>
-      </div>
+      <ModelLocationOptions value={location} onChange={changeLocation} />
       <div className="guidance">
         Save a reusable embedding connection, then test it so Mounir can detect the vector
         dimensions required by GBrain.

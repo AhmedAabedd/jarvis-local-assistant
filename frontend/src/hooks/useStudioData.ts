@@ -6,7 +6,9 @@ export const keys = {
   overview: ['overview'] as const,
   builtins: ['builtins'] as const,
   models: ['models'] as const,
+  modelCatalog: ['model-catalog'] as const,
   embeddingModels: ['embedding-models'] as const,
+  voiceModels: ['voice-models'] as const,
   servers: ['servers'] as const,
   skills: ['skills'] as const,
   skillTargets: ['skill-targets'] as const,
@@ -32,8 +34,14 @@ export function useBuiltins() {
 export function useModels() {
   return useQuery({ queryKey: keys.models, queryFn: api.models.list })
 }
+export function useModelCatalog() {
+  return useQuery({ queryKey: keys.modelCatalog, queryFn: api.modelCatalog.list })
+}
 export function useEmbeddingModels() {
   return useQuery({ queryKey: keys.embeddingModels, queryFn: api.embeddingModels.list })
+}
+export function useVoiceModels() {
+  return useQuery({ queryKey: keys.voiceModels, queryFn: api.voiceModels.list })
 }
 export function useServers() {
   return useQuery({ queryKey: keys.servers, queryFn: api.servers.list })

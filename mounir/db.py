@@ -2,8 +2,8 @@
 
 Core tables include:
 
-- ``models``       reusable LLM presets (name, provider, base_url, api_key)
-- ``embedding_models`` reusable embedding connections used by knowledge systems
+- ``models``       canonical registry for every configured model
+- ``*_model_details`` one-to-one, type-specific model configuration
 - ``mcp_servers``  reusable MCP server connections (transport + command/URL)
 - ``subagents``    reusable specialist configurations (prompt, model, MCP, tools)
 - ``subagent_connections`` legacy compatibility projection
@@ -187,30 +187,46 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS models (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            model TEXT,
-            provider TEXT,
-            base_url TEXT NOT NULL,
-            api_key TEXT,
-            created_at TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS embedding_models (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
+            model_type TEXT NOT NULL DEFAULT 'text'
+                CHECK (model_type IN ('text', 'embedding', 'speech', 'transcription')),
             location TEXT NOT NULL DEFAULT 'cloud'
                 CHECK (location IN ('cloud', 'local')),
+            model TEXT NOT NULL,
+            provider TEXT NOT NULL DEFAULT '',
+            base_url TEXT NOT NULL DEFAULT '',
+            api_key TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS text_model_details (
+            model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
+            provider_options TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS embedding_model_details (
+            model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
             adapter TEXT NOT NULL DEFAULT 'openai_compatible'
                 CHECK (adapter IN ('openai_compatible', 'ollama')),
-            model TEXT NOT NULL,
-            base_url TEXT NOT NULL,
-            api_key TEXT NOT NULL DEFAULT '',
             dimensions INTEGER,
             connection_status TEXT NOT NULL DEFAULT 'untested'
                 CHECK (connection_status IN ('untested', 'connected', 'stale', 'failed')),
             last_tested_at TEXT,
             last_error TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            provider_options TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS speech_model_details (
+            model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
+            voice TEXT NOT NULL DEFAULT '',
+            language TEXT NOT NULL DEFAULT 'auto',
+            provider_options TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS transcription_model_details (
+            model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
+            language TEXT NOT NULL DEFAULT 'auto',
+            provider_options TEXT NOT NULL DEFAULT '{}'
         );
 
         CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -248,6 +264,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
             -- Optional user-defined local initialization or authorization command.
             setup_command TEXT NOT NULL DEFAULT '',
+
+            -- Origin metadata keeps installed, Registry, and manually configured
+            -- servers in one collection without changing their runtime behavior.
+            source_type TEXT NOT NULL DEFAULT 'manual',
+            source_name TEXT NOT NULL DEFAULT '',
+            source_ref TEXT NOT NULL DEFAULT '',
+            source_version TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
 
             oauth_redirect_uri TEXT NOT NULL DEFAULT '',
             oauth_tokens TEXT NOT NULL DEFAULT '',
@@ -458,6 +482,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             tts_base_url TEXT NOT NULL DEFAULT '',
             tts_api_key TEXT NOT NULL DEFAULT '',
             tts_language TEXT NOT NULL DEFAULT 'en-US',
+            stt_model_id INTEGER REFERENCES transcription_model_details(model_id) ON DELETE RESTRICT,
+            tts_model_id INTEGER REFERENCES speech_model_details(model_id) ON DELETE RESTRICT,
             updated_at TEXT NOT NULL
         );
 
@@ -467,11 +493,16 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             model_id INTEGER REFERENCES models(id),
             generation_model_id INTEGER REFERENCES models(id),
             mcp_server_id INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT,
+            knowledge_service_status TEXT NOT NULL DEFAULT 'untested'
+                CHECK (knowledge_service_status IN ('untested', 'connected', 'stale', 'failed')),
+            knowledge_service_last_tested_at TEXT,
+            knowledge_service_last_error TEXT NOT NULL DEFAULT '',
+            knowledge_service_tools TEXT NOT NULL DEFAULT '[]',
             automatic_knowledge_enabled INTEGER NOT NULL DEFAULT 1
                 CHECK (automatic_knowledge_enabled IN (0, 1)),
             embedding_enabled INTEGER NOT NULL DEFAULT 0
                 CHECK (embedding_enabled IN (0, 1)),
-            embedding_model_id INTEGER REFERENCES embedding_models(id) ON DELETE RESTRICT,
+            embedding_model_id INTEGER REFERENCES embedding_model_details(model_id) ON DELETE RESTRICT,
             confirm_tools TEXT NOT NULL DEFAULT '[]',
             connected INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1)),
             enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
@@ -702,18 +733,30 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # CREATE TABLE does not add columns to an existing SQLite table. Keep the
     # migrations explicit so upgrading an earlier feature-branch DB works.
     migrations = {
-        "models": {"model": "TEXT"},
+        "models": {
+            "model": "TEXT",
+            "model_type": "TEXT NOT NULL DEFAULT 'text' CHECK (model_type IN ('text', 'embedding', 'speech', 'transcription'))",
+            "location": "TEXT NOT NULL DEFAULT 'cloud' CHECK (location IN ('cloud', 'local'))",
+            "updated_at": "TEXT",
+        },
         "skills": {"source_name": "TEXT NOT NULL DEFAULT ''"},
         "builtin_agent_settings": {
             "model_id": "INTEGER REFERENCES models(id)",
             "generation_model_id": "INTEGER REFERENCES models(id)",
             "mcp_server_id": "INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT",
+            "knowledge_service_status": (
+                "TEXT NOT NULL DEFAULT 'untested' "
+                "CHECK (knowledge_service_status IN ('untested', 'connected', 'stale', 'failed'))"
+            ),
+            "knowledge_service_last_tested_at": "TEXT",
+            "knowledge_service_last_error": "TEXT NOT NULL DEFAULT ''",
+            "knowledge_service_tools": "TEXT NOT NULL DEFAULT '[]'",
             "automatic_knowledge_enabled": (
                 "INTEGER NOT NULL DEFAULT 1 "
                 "CHECK (automatic_knowledge_enabled IN (0, 1))"
             ),
             "embedding_enabled": "INTEGER NOT NULL DEFAULT 0 CHECK (embedding_enabled IN (0, 1))",
-            "embedding_model_id": "INTEGER REFERENCES embedding_models(id) ON DELETE RESTRICT",
+            "embedding_model_id": "INTEGER REFERENCES embedding_model_details(model_id) ON DELETE RESTRICT",
             "confirm_tools": "TEXT NOT NULL DEFAULT '[]'",
             "connected": "INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1))",
             "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
@@ -726,6 +769,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "env": "TEXT NOT NULL DEFAULT '{}'",
             "auth_scheme": "TEXT NOT NULL DEFAULT ''",
             "setup_command": "TEXT NOT NULL DEFAULT ''",
+            "source_type": "TEXT NOT NULL DEFAULT 'manual'",
+            "source_name": "TEXT NOT NULL DEFAULT ''",
+            "source_ref": "TEXT NOT NULL DEFAULT ''",
+            "source_version": "TEXT NOT NULL DEFAULT ''",
+            "source_url": "TEXT NOT NULL DEFAULT ''",
             "oauth_redirect_uri": "TEXT NOT NULL DEFAULT ''",
             "oauth_tokens": "TEXT NOT NULL DEFAULT ''",
             "oauth_token_expires_at": "REAL NOT NULL DEFAULT 0",
@@ -761,6 +809,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         },
         "voice_settings": {
             "tts_voice": "TEXT NOT NULL DEFAULT ''",
+            "stt_model_id": "INTEGER REFERENCES transcription_model_details(model_id) ON DELETE RESTRICT",
+            "tts_model_id": "INTEGER REFERENCES speech_model_details(model_id) ON DELETE RESTRICT",
         },
         "telegram_settings": {
             "reply_mode": "TEXT NOT NULL DEFAULT 'text' CHECK (reply_mode IN ('text', 'voice'))",
@@ -1040,6 +1090,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE models SET model = name WHERE model IS NULL OR trim(model) = ''"
     )
+    conn.execute(
+        "UPDATE models SET provider = '' WHERE provider IS NULL"
+    )
+    conn.execute(
+        "UPDATE models SET api_key = '' WHERE api_key IS NULL"
+    )
+    conn.execute(
+        "UPDATE models SET created_at = ? WHERE created_at IS NULL OR trim(created_at) = ''",
+        (_now(),),
+    )
+    conn.execute(
+        "UPDATE models SET updated_at = COALESCE(updated_at, created_at, ?)",
+        (_now(),),
+    )
     # Groq uses the same audio-transcriptions contract as the generic transport.
     # Preserve old installations while removing the provider-specific runtime.
     conn.execute(
@@ -1055,6 +1119,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         """,
         (cfg.OPENAI_TTS_VOICE,),
     )
+    _migrate_unified_models(conn)
+    _bootstrap_voice_models(conn)
+    _ensure_model_detail_triggers(conn)
     confirmation_filter = (
         "" if ("subagents", "confirm_tools") in added_columns
         else "WHERE confirm_tools IS NULL OR trim(confirm_tools) = ''"
@@ -1106,91 +1173,73 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 "UPDATE models SET base_url = ? WHERE id = ?",
                 (normalized, row["id"]),
             )
-    _ensure_builtin_gbrain(conn)
+    _migrate_builtin_gbrain_to_knowledge(conn)
     conn.commit()
 
 
-def _ensure_builtin_gbrain(conn: sqlite3.Connection) -> int:
-    """Seed and enforce Knowledge's required local GBrain MCP connection."""
-    managed_env = json.dumps(
-        {"GBRAIN_HOME": str(knowledge_protocol.local_home_parent())},
-        sort_keys=True,
-    )
+def _migrate_builtin_gbrain_to_knowledge(conn: sqlite3.Connection) -> None:
+    """Move legacy managed-GBrain state under the Knowledge subagent."""
     row = conn.execute(
-        "SELECT id FROM mcp_servers WHERE setup_type = ?",
-        (knowledge_protocol.BUILTIN_SETUP_TYPE,),
+        "SELECT * FROM mcp_servers WHERE setup_type = ?",
+        (knowledge_protocol.LEGACY_MCP_SETUP_TYPE,),
     ).fetchone()
     if row is None:
-        desired_name = knowledge_protocol.BUILTIN_SERVER_NAME
-        collision = conn.execute(
-            "SELECT 1 FROM mcp_servers WHERE lower(name) = lower(?)",
-            (desired_name,),
-        ).fetchone()
-        name = f"{desired_name} (built-in)" if collision else desired_name
-        cursor = conn.execute(
-            """
-            INSERT INTO mcp_servers
-                (name, description, setup_type, transport, connection, headers, env,
-                 auth_scheme, setup_command, connection_status, last_error, created_at)
-            VALUES (?, ?, ?, 'stdio', ?, '{}', ?, '', ?, 'untested', '', ?)
-            """,
-            (
-                name,
-                knowledge_protocol.BUILTIN_SERVER_DESCRIPTION,
-                knowledge_protocol.BUILTIN_SETUP_TYPE,
-                knowledge_protocol.BUILTIN_SERVER_COMMAND,
-                managed_env,
-                knowledge_protocol.BUILTIN_SETUP_COMMAND,
-                _now(),
-            ),
-        )
-        server_id = int(cursor.lastrowid)
-    else:
-        server_id = int(row["id"])
-        current = conn.execute(
-            """
-            SELECT transport, connection, setup_command, env
-            FROM mcp_servers WHERE id = ?
-            """,
-            (server_id,),
-        ).fetchone()
-        changed = bool(
-            current
-            and (
-                current["transport"] != "stdio"
-                or current["connection"] != knowledge_protocol.BUILTIN_SERVER_COMMAND
-                or current["setup_command"] != knowledge_protocol.BUILTIN_SETUP_COMMAND
-                or current["env"] != managed_env
-            )
-        )
         conn.execute(
-            """
-            UPDATE mcp_servers
-            SET description = ?, transport = 'stdio', connection = ?,
-                headers = '{}', env = ?, auth_scheme = '', setup_command = ?,
-                connection_status = CASE WHEN ? THEN 'stale' ELSE connection_status END,
-                last_error = CASE WHEN ? THEN '' ELSE last_error END
-            WHERE id = ?
-            """,
-            (
-                knowledge_protocol.BUILTIN_SERVER_DESCRIPTION,
-                knowledge_protocol.BUILTIN_SERVER_COMMAND,
-                managed_env,
-                knowledge_protocol.BUILTIN_SETUP_COMMAND,
-                int(changed),
-                int(changed),
-                server_id,
-            ),
+            "UPDATE builtin_agent_settings SET mcp_server_id = NULL "
+            "WHERE agent_key = 'knowledge'"
+        )
+        return
+
+    server_id = int(row["id"])
+    tools = []
+    for tool in conn.execute(
+        """
+        SELECT name, description, input_schema
+        FROM mcp_server_tools
+        WHERE mcp_server_id = ?
+        ORDER BY position, id
+        """,
+        (server_id,),
+    ):
+        try:
+            input_schema = json.loads(tool["input_schema"] or "{}")
+        except json.JSONDecodeError:
+            input_schema = {}
+        tools.append(
+            {
+                "name": tool["name"],
+                "description": tool["description"] or "",
+                "input_schema": input_schema,
+            }
         )
     conn.execute(
         """
         UPDATE builtin_agent_settings
-        SET mcp_server_id = ?, updated_at = ?
+        SET mcp_server_id = NULL,
+            knowledge_service_status = ?,
+            knowledge_service_last_tested_at = ?,
+            knowledge_service_last_error = ?,
+            knowledge_service_tools = ?,
+            updated_at = ?
         WHERE agent_key = 'knowledge'
         """,
-        (server_id, _now()),
+        (
+            row["connection_status"] or "untested",
+            row["last_tested_at"],
+            row["last_error"] or "",
+            json.dumps(tools, ensure_ascii=False, sort_keys=True),
+            _now(),
+        ),
     )
-    return server_id
+    conn.execute(
+        "DELETE FROM subagent_mcp_sources WHERE mcp_server_id = ?", (server_id,)
+    )
+    conn.execute(
+        "UPDATE subagents SET mcp_server_id = NULL, enabled_tools = NULL "
+        "WHERE mcp_server_id = ?",
+        (server_id,),
+    )
+    conn.execute("DELETE FROM mcp_servers WHERE id = ?", (server_id,))
 
 
 def _required(value, field: str) -> str:
@@ -1331,9 +1380,6 @@ def server_for_api(server: dict | None) -> dict | None:
     if server is None:
         return None
     result = dict(server)
-    result["managed"] = (
-        result.get("setup_type") == knowledge_protocol.BUILTIN_SETUP_TYPE
-    )
     result.pop("setup_type", None)
     result["headers"], headers_configured = _masked_json_object(result.get("headers"))
     result["env"], env_configured = _masked_json_object(result.get("env"))
@@ -1782,6 +1828,371 @@ def update_profile(**kwargs) -> dict:
 
 
 # -----------------------------------------------------------------------------
+# Unified model registry migration
+# -----------------------------------------------------------------------------
+
+MODEL_TYPES = {"text", "embedding", "speech", "transcription"}
+MODEL_MIGRATION_KEY = "unified_model_registry_v1"
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone() is not None
+
+
+def _infer_model_location(provider: str, base_url: str) -> str:
+    provider_name = str(provider or "").lower()
+    address = str(base_url or "").lower()
+    local_markers = ("local", "ollama", "lm studio", "vllm", "llama.cpp")
+    local_hosts = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+    return "local" if any(value in provider_name for value in local_markers) or any(
+        value in address for value in local_hosts
+    ) else "cloud"
+
+
+def _normalize_model_location(location: str, provider: str, base_url: str) -> str:
+    normalized = str(location or "").strip().lower()
+    if not normalized:
+        return _infer_model_location(provider, base_url)
+    if normalized not in {"cloud", "local"}:
+        raise ValueError("location must be cloud or local.")
+    return normalized
+
+
+def _unique_model_name(conn: sqlite3.Connection, requested: str, type_label: str) -> str:
+    base = _required(requested, "name")
+    if conn.execute("SELECT 1 FROM models WHERE name = ?", (base,)).fetchone() is None:
+        return base
+    candidate = f"{base} ({type_label})"
+    suffix = 2
+    while conn.execute("SELECT 1 FROM models WHERE name = ?", (candidate,)).fetchone():
+        candidate = f"{base} ({type_label} {suffix})"
+        suffix += 1
+    return candidate
+
+
+def _insert_migrated_model(
+    conn: sqlite3.Connection,
+    row: dict,
+    model_type: str,
+    type_label: str,
+    *,
+    provider: str | None = None,
+) -> int:
+    now = _now()
+    cur = conn.execute(
+        """
+        INSERT INTO models
+            (name, model_type, location, model, provider, base_url, api_key,
+             created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _unique_model_name(conn, row.get("name") or type_label, type_label),
+            model_type,
+            row.get("location") or _infer_model_location(
+                provider or row.get("provider") or "", row.get("base_url") or ""
+            ),
+            _required(row.get("model"), "model ID"),
+            str(provider if provider is not None else row.get("provider") or "").strip(),
+            row.get("base_url") or "",
+            row.get("api_key") or "",
+            row.get("created_at") or now,
+            row.get("updated_at") or row.get("created_at") or now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _rebuild_model_reference_tables(
+    conn: sqlite3.Connection,
+    embedding_ids: dict[int, int],
+    voice_ids: dict[int, int],
+    *,
+    rebuild_builtin: bool,
+    rebuild_voice: bool,
+) -> None:
+    builtin_rows = (
+        [dict(row) for row in conn.execute("SELECT * FROM builtin_agent_settings")]
+        if rebuild_builtin
+        else []
+    )
+    voice_row = (
+        conn.execute("SELECT * FROM voice_settings WHERE id = 1").fetchone()
+        if rebuild_voice
+        else None
+    )
+    voice_data = dict(voice_row) if voice_row is not None else None
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if rebuild_builtin:
+            conn.execute("DROP TABLE IF EXISTS builtin_agent_settings_unified_upgrade")
+            conn.execute(
+                """
+                CREATE TABLE builtin_agent_settings_unified_upgrade (
+                    agent_key TEXT PRIMARY KEY,
+                    model TEXT NOT NULL,
+                    model_id INTEGER REFERENCES models(id),
+                    generation_model_id INTEGER REFERENCES models(id),
+                    mcp_server_id INTEGER REFERENCES mcp_servers(id) ON DELETE RESTRICT,
+                    knowledge_service_status TEXT NOT NULL DEFAULT 'untested'
+                        CHECK (knowledge_service_status IN ('untested', 'connected', 'stale', 'failed')),
+                    knowledge_service_last_tested_at TEXT,
+                    knowledge_service_last_error TEXT NOT NULL DEFAULT '',
+                    knowledge_service_tools TEXT NOT NULL DEFAULT '[]',
+                    automatic_knowledge_enabled INTEGER NOT NULL DEFAULT 1
+                        CHECK (automatic_knowledge_enabled IN (0, 1)),
+                    embedding_enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK (embedding_enabled IN (0, 1)),
+                    embedding_model_id INTEGER
+                        REFERENCES embedding_model_details(model_id) ON DELETE RESTRICT,
+                    confirm_tools TEXT NOT NULL DEFAULT '[]',
+                    connected INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1)),
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            for row in builtin_rows:
+                legacy_embedding_id = row.get("embedding_model_id")
+                row["embedding_model_id"] = (
+                    embedding_ids.get(int(legacy_embedding_id))
+                    if legacy_embedding_id is not None
+                    else None
+                )
+                conn.execute(
+                    """
+                    INSERT INTO builtin_agent_settings_unified_upgrade
+                        (agent_key, model, model_id, generation_model_id, mcp_server_id,
+                         knowledge_service_status, knowledge_service_last_tested_at,
+                         knowledge_service_last_error, knowledge_service_tools,
+                         automatic_knowledge_enabled, embedding_enabled,
+                         embedding_model_id, confirm_tools, connected, enabled, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    tuple(
+                        row.get(column)
+                        for column in (
+                            "agent_key", "model", "model_id", "generation_model_id",
+                            "mcp_server_id", "knowledge_service_status",
+                            "knowledge_service_last_tested_at",
+                            "knowledge_service_last_error", "knowledge_service_tools",
+                            "automatic_knowledge_enabled",
+                            "embedding_enabled", "embedding_model_id", "confirm_tools",
+                            "connected", "enabled", "updated_at",
+                        )
+                    ),
+                )
+            conn.execute("DROP TABLE builtin_agent_settings")
+            conn.execute(
+                "ALTER TABLE builtin_agent_settings_unified_upgrade RENAME TO builtin_agent_settings"
+            )
+        if rebuild_voice:
+            conn.execute("DROP TABLE IF EXISTS voice_settings_unified_upgrade")
+            conn.execute(
+                """
+                CREATE TABLE voice_settings_unified_upgrade (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    stt_provider TEXT NOT NULL,
+                    stt_model TEXT NOT NULL,
+                    stt_base_url TEXT NOT NULL DEFAULT '',
+                    stt_api_key TEXT NOT NULL DEFAULT '',
+                    stt_language TEXT NOT NULL DEFAULT 'auto',
+                    tts_provider TEXT NOT NULL,
+                    tts_model TEXT NOT NULL,
+                    tts_voice TEXT NOT NULL DEFAULT '',
+                    tts_base_url TEXT NOT NULL DEFAULT '',
+                    tts_api_key TEXT NOT NULL DEFAULT '',
+                    tts_language TEXT NOT NULL DEFAULT 'en-US',
+                    stt_model_id INTEGER
+                        REFERENCES transcription_model_details(model_id) ON DELETE RESTRICT,
+                    tts_model_id INTEGER
+                        REFERENCES speech_model_details(model_id) ON DELETE RESTRICT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            if voice_data is not None:
+                stt_id = voice_data.get("stt_model_id")
+                tts_id = voice_data.get("tts_model_id")
+                voice_data["stt_model_id"] = (
+                    voice_ids.get(int(stt_id)) if stt_id is not None else None
+                )
+                voice_data["tts_model_id"] = (
+                    voice_ids.get(int(tts_id)) if tts_id is not None else None
+                )
+                columns = (
+                    "id", "stt_provider", "stt_model", "stt_base_url", "stt_api_key",
+                    "stt_language", "tts_provider", "tts_model", "tts_voice",
+                    "tts_base_url", "tts_api_key", "tts_language", "stt_model_id",
+                    "tts_model_id", "updated_at",
+                )
+                conn.execute(
+                    f"INSERT INTO voice_settings_unified_upgrade ({', '.join(columns)}) "
+                    f"VALUES ({', '.join('?' for _ in columns)})",
+                    tuple(voice_data.get(column) for column in columns),
+                )
+            conn.execute("DROP TABLE voice_settings")
+            conn.execute(
+                "ALTER TABLE voice_settings_unified_upgrade RENAME TO voice_settings"
+            )
+        if _table_exists(conn, "embedding_models"):
+            conn.execute("DROP TABLE embedding_models")
+        if _table_exists(conn, "voice_models"):
+            conn.execute("DROP TABLE voice_models")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+    if violation is not None:
+        raise sqlite3.IntegrityError(
+            f"Foreign key check failed after model migration: {tuple(violation)}"
+        )
+
+
+def _migrate_unified_models(conn: sqlite3.Connection) -> None:
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?", (MODEL_MIGRATION_KEY,)
+    ).fetchone():
+        return
+
+    for row in conn.execute("SELECT * FROM models WHERE model_type = 'text'").fetchall():
+        item = dict(row)
+        location = item.get("location") or _infer_model_location(
+            item.get("provider") or "", item.get("base_url") or ""
+        )
+        conn.execute(
+            """
+            UPDATE models
+            SET location = ?, updated_at = COALESCE(updated_at, created_at, ?)
+            WHERE id = ?
+            """,
+            (location, _now(), item["id"]),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO text_model_details (model_id) VALUES (?)",
+            (item["id"],),
+        )
+
+    embedding_ids: dict[int, int] = {}
+    had_embedding_table = _table_exists(conn, "embedding_models")
+    if had_embedding_table:
+        for legacy in conn.execute("SELECT * FROM embedding_models ORDER BY id"):
+            row = dict(legacy)
+            mapping_key = f"legacy_embedding_model:{int(row['id'])}"
+            mapped = conn.execute(
+                "SELECT value FROM app_meta WHERE key = ?", (mapping_key,)
+            ).fetchone()
+            new_id = int(mapped["value"]) if mapped else _insert_migrated_model(
+                conn, row, "embedding", "Embeddings", provider=row.get("adapter") or ""
+            )
+            embedding_ids[int(row["id"])] = new_id
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO embedding_model_details
+                    (model_id, adapter, dimensions, connection_status,
+                     last_tested_at, last_error)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id, row.get("adapter") or "openai_compatible",
+                    row.get("dimensions"), row.get("connection_status") or "untested",
+                    row.get("last_tested_at"), row.get("last_error") or "",
+                ),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                (mapping_key, str(new_id)),
+            )
+
+    voice_ids: dict[int, int] = {}
+    had_voice_table = _table_exists(conn, "voice_models")
+    if had_voice_table:
+        for legacy in conn.execute("SELECT * FROM voice_models ORDER BY id"):
+            row = dict(legacy)
+            is_tts = row.get("kind") == "tts"
+            model_type = "speech" if is_tts else "transcription"
+            mapping_key = f"legacy_voice_model:{int(row['id'])}"
+            mapped = conn.execute(
+                "SELECT value FROM app_meta WHERE key = ?", (mapping_key,)
+            ).fetchone()
+            new_id = int(mapped["value"]) if mapped else _insert_migrated_model(
+                conn, row, model_type, "Speech" if is_tts else "Transcription"
+            )
+            voice_ids[int(row["id"])] = new_id
+            if is_tts:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO speech_model_details (model_id, voice, language)
+                    VALUES (?, ?, ?)
+                    """,
+                    (new_id, row.get("voice") or "", row.get("language") or "auto"),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO transcription_model_details (model_id, language)
+                    VALUES (?, ?)
+                    """,
+                    (new_id, row.get("language") or "auto"),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                (mapping_key, str(new_id)),
+            )
+
+    if had_embedding_table or had_voice_table:
+        _rebuild_model_reference_tables(
+            conn,
+            embedding_ids,
+            voice_ids,
+            rebuild_builtin=had_embedding_table,
+            rebuild_voice=had_voice_table,
+        )
+    conn.execute(
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+        (MODEL_MIGRATION_KEY, _now()),
+    )
+
+
+def _ensure_model_detail_triggers(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS text_model_details_type_guard
+        BEFORE INSERT ON text_model_details
+        WHEN COALESCE((SELECT model_type FROM models WHERE id = NEW.model_id), '') != 'text'
+        BEGIN SELECT RAISE(ABORT, 'text model details require a text model'); END;
+
+        CREATE TRIGGER IF NOT EXISTS embedding_model_details_type_guard
+        BEFORE INSERT ON embedding_model_details
+        WHEN COALESCE((SELECT model_type FROM models WHERE id = NEW.model_id), '') != 'embedding'
+        BEGIN SELECT RAISE(ABORT, 'embedding model details require an embedding model'); END;
+
+        CREATE TRIGGER IF NOT EXISTS speech_model_details_type_guard
+        BEFORE INSERT ON speech_model_details
+        WHEN COALESCE((SELECT model_type FROM models WHERE id = NEW.model_id), '') != 'speech'
+        BEGIN SELECT RAISE(ABORT, 'speech model details require a speech model'); END;
+
+        CREATE TRIGGER IF NOT EXISTS transcription_model_details_type_guard
+        BEFORE INSERT ON transcription_model_details
+        WHEN COALESCE((SELECT model_type FROM models WHERE id = NEW.model_id), '') != 'transcription'
+        BEGIN SELECT RAISE(ABORT, 'transcription model details require a transcription model'); END;
+
+        CREATE TRIGGER IF NOT EXISTS models_type_immutable
+        BEFORE UPDATE OF model_type ON models
+        WHEN OLD.model_type != NEW.model_type
+        BEGIN SELECT RAISE(ABORT, 'a saved model type cannot be changed'); END;
+        """
+    )
+
+
+# -----------------------------------------------------------------------------
 # Voice configuration
 # -----------------------------------------------------------------------------
 
@@ -1790,7 +2201,7 @@ VOICE_PROVIDERS = {
     "tts": {"piper", "moss_onnx", "openai_compatible", "google"},
 }
 
-STT_LANGUAGES = {"auto", "en", "fr", "ar"}
+STT_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$", re.IGNORECASE)
 
 VOICE_PROVIDER_ALIASES = {
     "stt": {
@@ -1806,23 +2217,331 @@ VOICE_PROVIDER_ALIASES = {
 }
 
 
+def _voice_location(kind: str, provider: str) -> str:
+    local = provider == "local_whisper" if kind == "stt" else provider in {"piper", "moss_onnx"}
+    return "local" if local else "cloud"
+
+
+def _validate_voice_model(kind: str, supplied: dict, current: dict | None = None) -> dict:
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind not in VOICE_PROVIDERS:
+        raise ValueError("voice type is not supported")
+    provider = str(supplied.get("provider") or (current or {}).get("provider") or "").strip().lower()
+    provider = VOICE_PROVIDER_ALIASES[normalized_kind].get(provider, provider)
+    if provider not in VOICE_PROVIDERS[normalized_kind]:
+        raise ValueError(f"{normalized_kind.upper()} provider is not supported")
+    model = _required(
+        supplied.get("model", (current or {}).get("model")),
+        f"{normalized_kind.upper()} model",
+    )
+    language = str(
+        supplied.get("language", (current or {}).get("language") or "auto") or "auto"
+    ).strip()
+    if normalized_kind == "stt":
+        language = language.lower()
+        if language != "auto" and not STT_LANGUAGE_RE.fullmatch(language):
+            raise ValueError("STT language is not supported; use auto or a valid language code")
+    elif len(language) > 32:
+        raise ValueError("TTS language is too long")
+    base_url = str(
+        supplied.get("base_url", (current or {}).get("base_url") or "") or ""
+    ).strip()
+    remote = provider in {"openai_compatible", "google"}
+    if remote:
+        if not base_url:
+            raise ValueError(f"{normalized_kind.upper()} API URL is required for this provider")
+        if not base_url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"{normalized_kind.upper()} API URL must start with http:// or https://"
+            )
+        base_url = base_url.rstrip("/")
+    else:
+        base_url = ""
+    voice = str(
+        supplied.get("voice", (current or {}).get("voice") or "") or ""
+    ).strip()
+    if len(voice) > 160:
+        raise ValueError("TTS voice is too long")
+    if normalized_kind == "tts" and provider in {"openai_compatible", "moss_onnx"} and not voice:
+        raise ValueError("TTS voice is required for this provider")
+    if normalized_kind != "tts" or provider not in {"openai_compatible", "moss_onnx"}:
+        voice = ""
+    api_key = supplied.get("api_key", _UNSET)
+    if api_key is _UNSET or (current is not None and not str(api_key or "").strip()):
+        api_key = (current or {}).get("api_key") or ""
+    else:
+        api_key = str(api_key or "").strip()
+    if provider == "google" and not api_key:
+        raise ValueError("TTS API key is required for this provider")
+    return {
+        "kind": normalized_kind,
+        "location": _voice_location(normalized_kind, provider),
+        "provider": provider,
+        "model": model,
+        "voice": voice,
+        "base_url": base_url,
+        "api_key": api_key,
+        "language": language or "auto",
+    }
+
+
+def _voice_settings_snapshot(kind: str, model: dict) -> dict:
+    prefix = kind.lower()
+    return {
+        f"{prefix}_provider": model["provider"],
+        f"{prefix}_model": model["model"],
+        f"{prefix}_base_url": model.get("base_url") or "",
+        f"{prefix}_api_key": model.get("api_key") or "",
+        f"{prefix}_language": model.get("language") or "auto",
+        **({"tts_voice": model.get("voice") or ""} if prefix == "tts" else {}),
+        f"{prefix}_model_id": int(model["id"]),
+    }
+
+
+def _bootstrap_voice_models(conn: sqlite3.Connection) -> None:
+    """Promote the two legacy singleton voice configurations to reusable records."""
+    row = conn.execute("SELECT * FROM voice_settings WHERE id = 1").fetchone()
+    if row is None:
+        return
+    updates: dict[str, object] = {}
+    for kind, base_name in (("stt", "Default transcription"), ("tts", "Default speech")):
+        if row[f"{kind}_model_id"] is not None:
+            continue
+        now = _now()
+        cur = conn.execute(
+            """
+            INSERT INTO models
+                (name, model_type, location, provider, model, base_url, api_key,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _unique_model_name(
+                    conn, base_name, "Transcription" if kind == "stt" else "Speech"
+                ),
+                "transcription" if kind == "stt" else "speech",
+                _voice_location(kind, row[f"{kind}_provider"]),
+                row[f"{kind}_provider"],
+                row[f"{kind}_model"],
+                row[f"{kind}_base_url"] or "",
+                row[f"{kind}_api_key"] or "",
+                now,
+                now,
+            ),
+        )
+        model_id = int(cur.lastrowid)
+        if kind == "tts":
+            conn.execute(
+                "INSERT INTO speech_model_details (model_id, voice, language) VALUES (?, ?, ?)",
+                (model_id, row["tts_voice"] or "", row["tts_language"] or "auto"),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO transcription_model_details (model_id, language) VALUES (?, ?)",
+                (model_id, row["stt_language"] or "auto"),
+            )
+        updates[f"{kind}_model_id"] = model_id
+    if updates:
+        sets = ", ".join(f"{key} = ?" for key in updates)
+        conn.execute(
+            f"UPDATE voice_settings SET {sets}, updated_at = ? WHERE id = 1",
+            (*updates.values(), _now()),
+        )
+
+
+def add_voice_model(name: str, kind: str, **kwargs) -> dict:
+    fields = _validate_voice_model(kind, kwargs)
+    now = _now()
+    with _connect() as conn:
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO models
+                    (name, model_type, location, provider, model, base_url, api_key,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _required(name, "name"),
+                    "speech" if fields["kind"] == "tts" else "transcription",
+                    fields["location"], fields["provider"], fields["model"],
+                    fields["base_url"], fields["api_key"], now, now,
+                ),
+            )
+            model_id = int(cur.lastrowid)
+            if fields["kind"] == "tts":
+                conn.execute(
+                    "INSERT INTO speech_model_details (model_id, voice, language) VALUES (?, ?, ?)",
+                    (model_id, fields["voice"], fields["language"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO transcription_model_details (model_id, language) VALUES (?, ?)",
+                    (model_id, fields["language"]),
+                )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+    return get_voice_model(model_id)
+
+
+def _voice_model_query() -> str:
+    return """
+        SELECT m.id, m.name,
+               CASE m.model_type WHEN 'speech' THEN 'tts' ELSE 'stt' END AS kind,
+               m.location, m.provider, m.model,
+               COALESCE(s.voice, '') AS voice,
+               m.base_url, m.api_key,
+               COALESCE(s.language, t.language, 'auto') AS language,
+               m.created_at, m.updated_at
+        FROM models m
+        LEFT JOIN speech_model_details s ON s.model_id = m.id
+        LEFT JOIN transcription_model_details t ON t.model_id = m.id
+    """
+
+
+def _get_voice_model_with_conn(conn: sqlite3.Connection, model_id: int) -> dict | None:
+    row = conn.execute(
+        _voice_model_query()
+        + " WHERE m.id = ? AND m.model_type IN ('speech', 'transcription')",
+        (model_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_voice_model(model_id: int) -> dict | None:
+    with _connect() as conn:
+        return _get_voice_model_with_conn(conn, model_id)
+
+
+def list_voice_models(kind: str | None = None) -> list[dict]:
+    with _connect() as conn:
+        if kind is None:
+            rows = conn.execute(
+                _voice_model_query()
+                + " WHERE m.model_type IN ('speech', 'transcription') ORDER BY m.name"
+            ).fetchall()
+        else:
+            normalized = str(kind).strip().lower()
+            if normalized not in VOICE_PROVIDERS:
+                raise ValueError("voice type is not supported")
+            model_type = "speech" if normalized == "tts" else "transcription"
+            rows = conn.execute(
+                _voice_model_query() + " WHERE m.model_type = ? ORDER BY m.name",
+                (model_type,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_voice_model(model_id: int, *, _clear_api_key: bool = False, **kwargs) -> dict | None:
+    current = get_voice_model(model_id)
+    if current is None:
+        return None
+    requested_kind = str(kwargs.get("kind") or current["kind"]).strip().lower()
+    if requested_kind != current["kind"]:
+        raise ValueError("A saved voice model's type cannot be changed")
+    fields = _validate_voice_model(current["kind"], kwargs, current)
+    if _clear_api_key:
+        fields["api_key"] = ""
+    if kwargs.get("name") is not None:
+        fields["name"] = _required(kwargs["name"], "name")
+    now = _now()
+    with _connect() as conn:
+        try:
+            base_fields = {
+                key: fields[key]
+                for key in ("name", "location", "provider", "model", "base_url", "api_key")
+                if key in fields
+            }
+            base_fields["updated_at"] = now
+            sets = ", ".join(f"{key} = ?" for key in base_fields)
+            conn.execute(
+                f"UPDATE models SET {sets} WHERE id = ?",
+                (*base_fields.values(), model_id),
+            )
+            if current["kind"] == "tts":
+                conn.execute(
+                    "UPDATE speech_model_details SET voice = ?, language = ? WHERE model_id = ?",
+                    (fields["voice"], fields["language"], model_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE transcription_model_details SET language = ? WHERE model_id = ?",
+                    (fields["language"], model_id),
+                )
+            refreshed = _get_voice_model_with_conn(conn, model_id)
+            if refreshed is not None:
+                selected_column = f"{current['kind']}_model_id"
+                selected = conn.execute(
+                    f"SELECT 1 FROM voice_settings WHERE id = 1 AND {selected_column} = ?",
+                    (model_id,),
+                ).fetchone()
+                if selected:
+                    snapshot = _voice_settings_snapshot(current["kind"], refreshed)
+                    snapshot.pop(selected_column, None)
+                    snapshot["updated_at"] = _now()
+                    snapshot_sets = ", ".join(f"{key} = ?" for key in snapshot)
+                    conn.execute(
+                        f"UPDATE voice_settings SET {snapshot_sets} WHERE id = 1",
+                        tuple(snapshot.values()),
+                    )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+    return get_voice_model(model_id)
+
+
+def delete_voice_model_result(model_id: int) -> DeletionResult:
+    with _connect() as conn:
+        model = _get_voice_model_with_conn(conn, model_id)
+        if model is None:
+            return DeletionResult("not_found")
+        selected = conn.execute(
+            f"SELECT 1 FROM voice_settings WHERE id = 1 AND {model['kind']}_model_id = ?",
+            (model_id,),
+        ).fetchone()
+        if selected:
+            label = "text-to-speech" if model["kind"] == "tts" else "speech-to-text"
+            return DeletionResult("in_use", (f"the active {label} setting",))
+        conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
+        conn.commit()
+    return DeletionResult("deleted")
+
+
+def voice_model_for_api(model: dict | None) -> dict | None:
+    if model is None:
+        return None
+    result = dict(model)
+    result["api_key_configured"] = bool(result.pop("api_key", ""))
+    return result
+
+
 def get_voice_settings(*, include_secrets: bool = False) -> dict:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM voice_settings WHERE id = 1").fetchone()
+        selected = {
+            kind: _get_voice_model_with_conn(conn, int(row[f"{kind}_model_id"]))
+            if row is not None and row[f"{kind}_model_id"] is not None
+            else None
+            for kind in ("stt", "tts")
+        }
     if row is None:
         return {"stt": {}, "tts": {}}
     result = {}
     for kind in ("stt", "tts"):
-        secret = row[f"{kind}_api_key"] or ""
+        model = selected[kind]
+        secret = (model or {}).get("api_key", row[f"{kind}_api_key"]) or ""
         item = {
-            "provider": row[f"{kind}_provider"],
-            "model": row[f"{kind}_model"],
-            "base_url": row[f"{kind}_base_url"] or "",
-            "language": row[f"{kind}_language"] or "auto",
+            "model_id": int(model["id"]) if model else None,
+            "name": model["name"] if model else "",
+            "provider": (model or {}).get("provider", row[f"{kind}_provider"]),
+            "model": (model or {}).get("model", row[f"{kind}_model"]),
+            "base_url": (model or {}).get("base_url", row[f"{kind}_base_url"]) or "",
+            "language": (model or {}).get("language", row[f"{kind}_language"]) or "auto",
             "api_key_configured": bool(secret),
         }
         if kind == "tts":
-            item["voice"] = row["tts_voice"] or ""
+            item["voice"] = (model or {}).get("voice", row["tts_voice"]) or ""
         if include_secrets:
             item["api_key"] = secret
         result[kind] = item
@@ -1839,62 +2558,54 @@ def get_voice_runtime(kind: str) -> dict:
     return settings
 
 
-def update_voice_settings(*, stt=None, tts=None) -> dict:
+def update_voice_settings(*, stt=None, tts=None, stt_model_id=None, tts_model_id=None) -> dict:
     updates: dict[str, object] = {}
-    current = get_voice_settings(include_secrets=True)
     for kind, supplied in (("stt", stt), ("tts", tts)):
         if supplied is None:
             continue
         if not isinstance(supplied, dict):
             raise ValueError(f"{kind.upper()} configuration must be an object")
-        provider = str(supplied.get("provider") or "").strip().lower()
-        provider = VOICE_PROVIDER_ALIASES[kind].get(provider, provider)
-        if provider not in VOICE_PROVIDERS[kind]:
-            raise ValueError(f"{kind.upper()} provider is not supported")
-        model = _required(supplied.get("model"), f"{kind.upper()} model")
-        language = str(supplied.get("language") or "auto").strip()
-        if kind == "stt":
-            language = language.lower()
-            if language not in STT_LANGUAGES:
-                raise ValueError("STT language is not supported")
-        elif len(language) > 32:
-            raise ValueError("TTS language is too long")
-        base_url = str(supplied.get("base_url") or "").strip()
-        remote = provider in {"openai_compatible", "google"}
-        if remote:
-            if not base_url:
-                raise ValueError(f"{kind.upper()} API URL is required for this provider")
-            if not base_url.startswith(("http://", "https://")):
-                raise ValueError(
-                    f"{kind.upper()} API URL must start with http:// or https://"
-                )
-            base_url = base_url.rstrip("/")
-        else:
-            base_url = ""
-        updates.update(
-            {
-                f"{kind}_provider": provider,
-                f"{kind}_model": model,
-                f"{kind}_base_url": base_url,
-                f"{kind}_language": language or "auto",
-            }
-        )
-        if kind == "tts":
-            voice = str(
-                supplied.get("voice", current[kind].get("voice") or "") or ""
-            ).strip()
-            if len(voice) > 160:
-                raise ValueError("TTS voice is too long")
-            if provider in {"openai_compatible", "moss_onnx"} and not voice:
-                raise ValueError("TTS voice is required for this provider")
-            updates["tts_voice"] = (
-                voice if provider in {"openai_compatible", "moss_onnx"} else ""
+        selected_id = get_voice_settings().get(kind, {}).get("model_id")
+        current_model = get_voice_model(int(selected_id)) if selected_id else None
+        if current_model is not None:
+            # The legacy update contract used the singleton snapshot as its
+            # source of truth. Keep that behavior for callers upgrading in
+            # place, while the new selection-only API uses model IDs below.
+            with _connect() as conn:
+                legacy = conn.execute(
+                    f"SELECT {kind}_api_key FROM voice_settings WHERE id = 1"
+                ).fetchone()
+            if legacy is not None:
+                current_model["api_key"] = legacy[f"{kind}_api_key"] or ""
+        fields = _validate_voice_model(kind, supplied, current_model)
+        if current_model is None:
+            current_model = add_voice_model(
+                "Default transcription" if kind == "stt" else "Default speech",
+                kind,
+                **fields,
             )
-        api_key = supplied.get("api_key")
-        if api_key is not None and str(api_key).strip():
-            updates[f"{kind}_api_key"] = str(api_key).strip()
-        elif provider == "google" and not current[kind].get("api_key"):
-            raise ValueError(f"{kind.upper()} API key is required for this provider")
+        else:
+            supplied_key = supplied.get("api_key", _UNSET)
+            current_model = update_voice_model(
+                int(current_model["id"]),
+                _clear_api_key=(
+                    not bool(current_model.get("api_key"))
+                    and (supplied_key is _UNSET or not str(supplied_key or "").strip())
+                ),
+                **fields,
+            )
+        updates.update(_voice_settings_snapshot(kind, current_model))
+
+    for kind, requested_id in (("stt", stt_model_id), ("tts", tts_model_id)):
+        if requested_id is None:
+            continue
+        try:
+            model = get_voice_model(int(requested_id))
+        except (TypeError, ValueError):
+            model = None
+        if model is None or model["kind"] != kind:
+            raise ValueError(f"Select a saved {kind.upper()} model")
+        updates.update(_voice_settings_snapshot(kind, model))
     if not updates:
         return get_voice_settings()
     updates["updated_at"] = _now()
@@ -2540,9 +3251,12 @@ def get_knowledge_embedding_runtime() -> dict | None:
         with _connect() as conn:
             row = conn.execute(
                 """
-                SELECT e.*
+                SELECT m.id, m.name, m.location, e.adapter, m.model, m.base_url,
+                       m.api_key, e.dimensions, e.connection_status,
+                       e.last_tested_at, e.last_error, m.created_at, m.updated_at
                 FROM builtin_agent_settings s
-                JOIN embedding_models e ON e.id = s.embedding_model_id
+                JOIN models m ON m.id = s.embedding_model_id
+                JOIN embedding_model_details e ON e.model_id = m.id
                 WHERE s.agent_key = 'knowledge' AND s.embedding_enabled = 1
                 """
             ).fetchone()
@@ -2553,6 +3267,95 @@ def get_knowledge_embedding_runtime() -> dict | None:
     result = dict(row)
     result["api_key"] = _resolve_key(result.get("api_key") or "")
     return result
+
+
+def get_knowledge_service_state() -> dict:
+    """Return GBrain discovery state owned by the Knowledge subagent."""
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT knowledge_service_status, knowledge_service_last_tested_at,
+                   knowledge_service_last_error, knowledge_service_tools
+            FROM builtin_agent_settings
+            WHERE agent_key = 'knowledge'
+            """
+        ).fetchone()
+    if row is None:
+        return {
+            "status": "untested",
+            "last_tested_at": None,
+            "last_error": "",
+            "tools": [],
+        }
+    try:
+        tools = json.loads(row["knowledge_service_tools"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        tools = []
+    if not isinstance(tools, list):
+        tools = []
+    return {
+        "status": row["knowledge_service_status"] or "untested",
+        "last_tested_at": row["knowledge_service_last_tested_at"],
+        "last_error": row["knowledge_service_last_error"] or "",
+        "tools": [tool for tool in tools if isinstance(tool, dict)],
+    }
+
+
+def save_knowledge_service_tools(tools: list[dict]) -> dict:
+    """Persist a successful GBrain discovery under Knowledge itself."""
+    normalized = []
+    seen = set()
+    for tool in tools:
+        name = _required((tool or {}).get("name"), "tool name")
+        if name in seen:
+            continue
+        seen.add(name)
+        schema = (tool or {}).get("input_schema") or {}
+        normalized.append(
+            {
+                "name": name,
+                "description": str((tool or {}).get("description") or ""),
+                "input_schema": schema if isinstance(schema, dict) else {},
+            }
+        )
+    tested_at = _now()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE builtin_agent_settings
+            SET knowledge_service_status = 'connected',
+                knowledge_service_last_tested_at = ?,
+                knowledge_service_last_error = '',
+                knowledge_service_tools = ?, updated_at = ?
+            WHERE agent_key = 'knowledge'
+            """,
+            (
+                tested_at,
+                json.dumps(normalized, ensure_ascii=False, sort_keys=True),
+                tested_at,
+            ),
+        )
+        conn.commit()
+    return get_knowledge_service_state()
+
+
+def record_knowledge_service_failure(error: str) -> dict:
+    """Record a GBrain failure without discarding its last tool snapshot."""
+    tested_at = _now()
+    detail = " ".join(str(error or "Connection failed").split())[:1000]
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE builtin_agent_settings
+            SET knowledge_service_status = 'failed',
+                knowledge_service_last_tested_at = ?,
+                knowledge_service_last_error = ?, updated_at = ?
+            WHERE agent_key = 'knowledge'
+            """,
+            (tested_at, detail, tested_at),
+        )
+        conn.commit()
+    return get_knowledge_service_state()
 
 
 def get_builtin_confirmation_tools(agent_key: str) -> list[str]:
@@ -2626,47 +3429,38 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
         with _connect() as conn:
             setting = conn.execute(
                 """
-                SELECT s.model_id, s.generation_model_id, s.mcp_server_id,
+                SELECT s.model_id, s.generation_model_id,
                        s.automatic_knowledge_enabled,
                        s.embedding_enabled, s.embedding_model_id,
                        s.confirm_tools, s.connected, s.enabled,
                        COALESCE(m.model, s.model) AS model,
-                       gm.model AS generation_model,
-                       server.name AS mcp_server_name,
-                       server.transport AS mcp_server_transport,
-                       server.connection_status AS mcp_server_status
+                       gm.model AS generation_model
                 FROM builtin_agent_settings s
                 LEFT JOIN models m ON m.id = s.model_id
                 LEFT JOIN models gm ON gm.id = s.generation_model_id
-                LEFT JOIN mcp_servers server ON server.id = s.mcp_server_id
                 WHERE s.agent_key = ?
                 """,
                 (key,),
             ).fetchone()
         capability = capabilities[key]
         default_prompt = builtin_agents.system_prompt(key)
-        server_id = (
-            int(setting["mcp_server_id"])
-            if setting and setting["mcp_server_id"] is not None
-            else None
-        )
+        knowledge_state = get_knowledge_service_state() if key == "knowledge" else None
         protocol_missing: list[str] = []
         advertised_names: set[str] = set()
         exposed_tools = capability["tools"]
-        if key == "knowledge" and server_id is not None:
-            state = get_server_tools_state(server_id)
+        if key == "knowledge" and knowledge_state is not None:
             protocol_missing = knowledge_protocol.missing_tools(
-                tool["name"] for tool in ((state or {}).get("tools") or [])
+                tool["name"] for tool in knowledge_state["tools"]
             )
             advertised_names = {
-                tool["name"] for tool in ((state or {}).get("tools") or [])
+                str(tool.get("name") or "") for tool in knowledge_state["tools"]
             }
             exposed_tools = (
                 [
                     tool for tool in capability["tools"]
                     if tool["name"] in advertised_names
                 ]
-                if (state or {}).get("status") == "connected"
+                if knowledge_state["status"] == "connected"
                 else []
             )
         result.append(
@@ -2684,23 +3478,22 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                     setting["generation_model"] if setting else None
                 ) if key == "media" else None,
                 "generation_model_options": options if key == "media" else [],
-                "mcp_server_id": server_id if key == "knowledge" else None,
-                "mcp_server_name": (
-                    setting["mcp_server_name"] if setting else None
-                ) if key == "knowledge" else None,
-                "mcp_server_transport": (
-                    setting["mcp_server_transport"] if setting else None
-                ) if key == "knowledge" else None,
-                "mcp_server_status": (
-                    setting["mcp_server_status"] if setting else None
-                ) if key == "knowledge" else None,
+                "knowledge_service_status": (
+                    knowledge_state["status"] if knowledge_state else None
+                ),
+                "knowledge_service_last_tested_at": (
+                    knowledge_state["last_tested_at"] if knowledge_state else None
+                ),
+                "knowledge_service_last_error": (
+                    knowledge_state["last_error"] if knowledge_state else ""
+                ),
                 "knowledge_protocol": (
                     f"{knowledge_protocol.PROTOCOL_NAME} v{knowledge_protocol.PROTOCOL_VERSION}"
                     if key == "knowledge" else None
                 ),
                 "knowledge_protocol_compatible": (
-                    server_id is not None
-                    and setting["mcp_server_status"] == "connected"
+                    knowledge_state is not None
+                    and knowledge_state["status"] == "connected"
                     and not protocol_missing
                 ) if key == "knowledge" else None,
                 "knowledge_protocol_missing_tools": (
@@ -2711,8 +3504,8 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                     if setting else True
                 ) if key == "knowledge" else None,
                 "automatic_knowledge_available": (
-                    setting is not None
-                    and setting["mcp_server_status"] == "connected"
+                    knowledge_state is not None
+                    and knowledge_state["status"] == "connected"
                     and knowledge_protocol.AUTOMATIC_CONTEXT_TOOL in advertised_names
                 ) if key == "knowledge" else None,
                 "embedding_enabled": (
@@ -2752,7 +3545,6 @@ def update_builtin_agent(
     *,
     model_id: int | None | object = _UNSET,
     generation_model_id: int | None | object = _UNSET,
-    mcp_server_id: int | None | object = _UNSET,
     automatic_knowledge_enabled: bool | None = None,
     embedding_enabled: bool | None = None,
     embedding_model_id: int | None | object = _UNSET,
@@ -2767,7 +3559,6 @@ def update_builtin_agent(
     if (
         model_id is _UNSET
         and generation_model_id is _UNSET
-        and mcp_server_id is _UNSET
         and embedding_model_id is _UNSET
         and confirm_tools is _UNSET
         and skill_ids is _UNSET
@@ -2800,20 +3591,6 @@ def update_builtin_agent(
                 raise ValueError("choose a generation model") from exc
             if get_model(requested_generation_id) is None:
                 raise ValueError("choose a configured generation model")
-    server_requested = mcp_server_id is not _UNSET
-    requested_server_id = None
-    if server_requested:
-        if definition["key"] != "knowledge":
-            raise ValueError("only Knowledge supports a knowledge MCP server")
-        managed = get_builtin_gbrain_server()
-        if managed is None:
-            raise ValueError("the built-in GBrain server is unavailable")
-        try:
-            requested_server_id = int(mcp_server_id)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Knowledge must use its built-in GBrain server") from exc
-        if requested_server_id != int(managed["id"]):
-            raise ValueError("Knowledge must use its built-in GBrain server")
     embedding_requested = embedding_model_id is not _UNSET
     requested_embedding_id = None
     if embedding_requested:
@@ -2925,15 +3702,6 @@ def update_builtin_agent(
                 """,
                 (requested_generation_id, _now(), definition["key"]),
             )
-        if server_requested:
-            conn.execute(
-                """
-                UPDATE builtin_agent_settings
-                SET mcp_server_id = ?, updated_at = ?
-                WHERE agent_key = ?
-                """,
-                (requested_server_id, _now(), definition["key"]),
-            )
         if embedding_requested:
             conn.execute(
                 """
@@ -3029,21 +3797,15 @@ def is_automatic_knowledge_enabled() -> bool:
 
 
 def is_automatic_knowledge_available() -> bool:
-    """Return whether the managed server advertises per-turn context."""
-    with _connect() as conn:
-        row = conn.execute(
-            """
-            SELECT 1
-            FROM builtin_agent_settings setting
-            JOIN mcp_servers server ON server.id = setting.mcp_server_id
-            JOIN mcp_server_tools tool ON tool.mcp_server_id = server.id
-            WHERE setting.agent_key = 'knowledge'
-              AND server.connection_status = 'connected'
-              AND tool.name = ?
-            """,
-            (knowledge_protocol.AUTOMATIC_CONTEXT_TOOL,),
-        ).fetchone()
-    return row is not None
+    """Return whether Knowledge's service advertises per-turn context."""
+    state = get_knowledge_service_state()
+    return bool(
+        state["status"] == "connected"
+        and any(
+            tool.get("name") == knowledge_protocol.AUTOMATIC_CONTEXT_TOOL
+            for tool in state["tools"]
+        )
+    )
 
 
 def enabled_builtin_agent_keys() -> set[str]:
@@ -3924,18 +4686,31 @@ def _add_model(
     provider: str,
     base_url: str,
     api_key: str,
+    location: str = "",
 ) -> int:
+    now = _now()
     try:
         cur = conn.execute(
-            "INSERT INTO models (name, model, provider, base_url, api_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO models
+                (name, model_type, location, model, provider, base_url, api_key,
+                 created_at, updated_at)
+            VALUES (?, 'text', ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 _required(name, "name"),
+                _normalize_model_location(location, provider, base_url),
                 _required(model, "model ID"),
                 (provider or "").strip(),
                 _normalize_model_base_url(base_url),
                 api_key or "",
-                _now(),
+                now,
+                now,
             ),
+        )
+        conn.execute(
+            "INSERT INTO text_model_details (model_id) VALUES (?)",
+            (int(cur.lastrowid),),
         )
     except sqlite3.IntegrityError as exc:
         raise _friendly_integrity_error(exc) from exc
@@ -3944,20 +4719,31 @@ def _add_model(
 
 
 def _get_model_by_name(conn: sqlite3.Connection, name: str) -> dict | None:
-    cur = conn.execute("SELECT * FROM models WHERE name = ?", (name.strip(),))
+    cur = conn.execute(
+        "SELECT * FROM models WHERE name = ? AND model_type = 'text'", (name.strip(),)
+    )
     row = cur.fetchone()
     return dict(row) if row else None
 
 
-def add_model(name: str, model: str, provider: str, base_url: str, api_key: str) -> dict:
+def add_model(
+    name: str,
+    model: str,
+    provider: str,
+    base_url: str,
+    api_key: str,
+    location: str = "",
+) -> dict:
     with _connect() as conn:
-        mid = _add_model(conn, name, model, provider, base_url, api_key)
+        mid = _add_model(conn, name, model, provider, base_url, api_key, location)
         return get_model(mid)
 
 
 def get_model(model_id: int) -> dict | None:
     with _connect() as conn:
-        cur = conn.execute("SELECT * FROM models WHERE id = ?", (model_id,))
+        cur = conn.execute(
+            "SELECT * FROM models WHERE id = ? AND model_type = 'text'", (model_id,)
+        )
         row = cur.fetchone()
         return dict(row) if row else None
 
@@ -3983,12 +4769,62 @@ def get_model_by_name(name: str) -> dict | None:
 
 def list_models() -> list[dict]:
     with _connect() as conn:
-        cur = conn.execute("SELECT * FROM models ORDER BY name")
+        cur = conn.execute("SELECT * FROM models WHERE model_type = 'text' ORDER BY name")
         return [dict(r) for r in cur.fetchall()]
 
 
+def list_model_catalog() -> list[dict]:
+    """Return every model type from the canonical registry in one collection."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT m.*,
+                   e.adapter, e.dimensions, e.connection_status,
+                   e.last_tested_at, e.last_error,
+                   s.voice AS speech_voice, s.language AS speech_language,
+                   t.language AS transcription_language
+            FROM models m
+            LEFT JOIN embedding_model_details e ON e.model_id = m.id
+            LEFT JOIN speech_model_details s ON s.model_id = m.id
+            LEFT JOIN transcription_model_details t ON t.model_id = m.id
+            ORDER BY m.name
+            """
+        ).fetchall()
+    result = []
+    for stored in rows:
+        row = dict(stored)
+        model_type = row["model_type"]
+        item = {
+            key: row[key]
+            for key in (
+                "id", "name", "model", "provider", "location", "base_url",
+                "api_key", "created_at", "updated_at",
+            )
+        }
+        if model_type == "embedding":
+            item.update(
+                adapter=row["adapter"],
+                dimensions=row["dimensions"],
+                connection_status=row["connection_status"],
+                last_tested_at=row["last_tested_at"],
+                last_error=row["last_error"] or "",
+            )
+        elif model_type in {"speech", "transcription"}:
+            item.update(
+                kind="tts" if model_type == "speech" else "stt",
+                voice=row["speech_voice"] or "" if model_type == "speech" else "",
+                language=(
+                    row["speech_language"]
+                    if model_type == "speech"
+                    else row["transcription_language"]
+                ) or "auto",
+            )
+        result.append(item)
+    return result
+
+
 def update_model(model_id: int, **kwargs) -> dict | None:
-    allowed = {"name", "model", "provider", "base_url", "api_key"}
+    allowed = {"name", "location", "model", "provider", "base_url", "api_key"}
     fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not fields:
         return get_model(model_id)
@@ -4004,6 +4840,20 @@ def update_model(model_id: int, **kwargs) -> dict | None:
         ).fetchone()
         if current is None:
             return None
+        if current["model_type"] != "text":
+            return None
+        if "location" in fields:
+            fields["location"] = _normalize_model_location(
+                fields["location"],
+                fields.get("provider", current["provider"]),
+                fields.get("base_url", current["base_url"]),
+            )
+        elif "provider" in fields or "base_url" in fields:
+            fields["location"] = _infer_model_location(
+                fields.get("provider", current["provider"]),
+                fields.get("base_url", current["base_url"]),
+            )
+        fields["updated_at"] = _now()
         sets = ", ".join(f"{k} = ?" for k in fields)
         try:
             conn.execute(
@@ -4033,7 +4883,7 @@ def delete_model_result(model_id: int) -> DeletionResult:
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute(
-            "SELECT 1 FROM models WHERE id = ?", (model_id,)
+            "SELECT 1 FROM models WHERE id = ? AND model_type = 'text'", (model_id,)
         ).fetchone() is None:
             conn.rollback()
             return DeletionResult("not_found")
@@ -4125,10 +4975,10 @@ def add_embedding_model(
         try:
             cur = conn.execute(
                 """
-                INSERT INTO embedding_models
-                    (name, location, adapter, model, base_url, api_key,
-                     connection_status, last_error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'untested', '', ?, ?)
+                INSERT INTO models
+                    (name, model_type, location, provider, model, base_url, api_key,
+                     created_at, updated_at)
+                VALUES (?, 'embedding', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _required(name, "name"),
@@ -4141,16 +4991,36 @@ def add_embedding_model(
                     now,
                 ),
             )
+            model_id = int(cur.lastrowid)
+            conn.execute(
+                """
+                INSERT INTO embedding_model_details
+                    (model_id, adapter, connection_status, last_error)
+                VALUES (?, ?, 'untested', '')
+                """,
+                (model_id, normalized[1]),
+            )
             conn.commit()
         except sqlite3.IntegrityError as exc:
             raise _friendly_integrity_error(exc) from exc
-        return get_embedding_model(int(cur.lastrowid))
+        return get_embedding_model(model_id)
+
+
+def _embedding_model_query() -> str:
+    return """
+        SELECT m.id, m.name, m.location, e.adapter, m.model, m.base_url, m.api_key,
+               e.dimensions, e.connection_status, e.last_tested_at, e.last_error,
+               m.created_at, m.updated_at
+        FROM models m
+        JOIN embedding_model_details e ON e.model_id = m.id
+    """
 
 
 def get_embedding_model(model_id: int) -> dict | None:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT * FROM embedding_models WHERE id = ?", (model_id,)
+            _embedding_model_query() + " WHERE m.id = ? AND m.model_type = 'embedding'",
+            (model_id,),
         ).fetchone()
     return dict(row) if row else None
 
@@ -4167,7 +5037,9 @@ def get_embedding_model_runtime(model_id: int) -> dict | None:
 
 def list_embedding_models() -> list[dict]:
     with _connect() as conn:
-        rows = conn.execute("SELECT * FROM embedding_models ORDER BY name").fetchall()
+        rows = conn.execute(
+            _embedding_model_query() + " WHERE m.model_type = 'embedding' ORDER BY m.name"
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -4176,7 +5048,8 @@ def update_embedding_model(model_id: int, **kwargs) -> dict | None:
     fields = {key: value for key, value in kwargs.items() if key in allowed and value is not None}
     with _connect() as conn:
         current = conn.execute(
-            "SELECT * FROM embedding_models WHERE id = ?", (model_id,)
+            _embedding_model_query() + " WHERE m.id = ? AND m.model_type = 'embedding'",
+            (model_id,),
         ).fetchone()
         if current is None:
             return None
@@ -4215,12 +5088,32 @@ def update_embedding_model(model_id: int, **kwargs) -> dict | None:
                 last_tested_at=None,
                 last_error="",
             )
-        fields["updated_at"] = _now()
-        sets = ", ".join(f"{key} = ?" for key in fields)
+        now = _now()
         try:
+            base_fields = {
+                key: fields[key]
+                for key in ("name", "location", "model", "base_url", "api_key")
+                if key in fields
+            }
+            base_fields["provider"] = adapter
+            base_fields["updated_at"] = now
+            sets = ", ".join(f"{key} = ?" for key in base_fields)
             conn.execute(
-                f"UPDATE embedding_models SET {sets} WHERE id = ?",
-                (*fields.values(), model_id),
+                f"UPDATE models SET {sets} WHERE id = ?",
+                (*base_fields.values(), model_id),
+            )
+            detail_fields = {"adapter": adapter}
+            if connection_changed:
+                detail_fields.update(
+                    dimensions=None,
+                    connection_status="stale",
+                    last_tested_at=None,
+                    last_error="",
+                )
+            detail_sets = ", ".join(f"{key} = ?" for key in detail_fields)
+            conn.execute(
+                f"UPDATE embedding_model_details SET {detail_sets} WHERE model_id = ?",
+                (*detail_fields.values(), model_id),
             )
             conn.commit()
         except sqlite3.IntegrityError as exc:
@@ -4238,13 +5131,14 @@ def save_embedding_test(
     with _connect() as conn:
         conn.execute(
             """
-            UPDATE embedding_models
+            UPDATE embedding_model_details
             SET dimensions = COALESCE(?, dimensions), connection_status = ?, last_tested_at = ?,
-                last_error = ?, updated_at = ?
-            WHERE id = ?
+                last_error = ?
+            WHERE model_id = ?
             """,
-            (dimensions, status, _now(), str(error or "")[:2000], _now(), model_id),
+            (dimensions, status, _now(), str(error or "")[:2000], model_id),
         )
+        conn.execute("UPDATE models SET updated_at = ? WHERE id = ?", (_now(), model_id))
         conn.commit()
     return get_embedding_model(model_id)
 
@@ -4253,7 +5147,7 @@ def delete_embedding_model_result(model_id: int) -> DeletionResult:
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute(
-            "SELECT 1 FROM embedding_models WHERE id = ?", (model_id,)
+            "SELECT 1 FROM models WHERE id = ? AND model_type = 'embedding'", (model_id,)
         ).fetchone() is None:
             conn.rollback()
             return DeletionResult("not_found")
@@ -4277,7 +5171,7 @@ def delete_embedding_model_result(model_id: int) -> DeletionResult:
                 """,
                 (_now(), model_id),
             )
-            conn.execute("DELETE FROM embedding_models WHERE id = ?", (model_id,))
+            conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
             conn.commit()
             return DeletionResult("deleted")
         except sqlite3.IntegrityError:
@@ -4533,6 +5427,11 @@ def _add_server(
     setup_type: str = "",
     auth_scheme: str = "",
     setup_command: str = "",
+    source_type: str = "manual",
+    source_name: str = "",
+    source_ref: str = "",
+    source_version: str = "",
+    source_url: str = "",
 ) -> int:
     transport, connection = _validate_transport(transport, connection)
     auth_scheme = str(auth_scheme or "").strip()
@@ -4543,13 +5442,17 @@ def _add_server(
     setup_command = str(setup_command or "").strip()
     if transport != "stdio" and setup_command:
         raise ValueError("Setup commands are available only for local MCP servers.")
+    source_type = str(source_type or "manual").strip().lower()
+    if source_type not in {"manual", "registry"}:
+        raise ValueError("MCP server source type is not supported.")
     try:
         cur = conn.execute(
             """
             INSERT INTO mcp_servers
                 (name, description, setup_type, transport, connection, headers, env,
-                 auth_scheme, setup_command, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 auth_scheme, setup_command, source_type, source_name, source_ref,
+                 source_version, source_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
@@ -4561,6 +5464,11 @@ def _add_server(
                 _json_object(env, "environment"),
                 auth_scheme,
                 setup_command,
+                source_type,
+                str(source_name or "").strip(),
+                str(source_ref or "").strip(),
+                str(source_version or "").strip(),
+                str(source_url or "").strip(),
                 _now(),
             ),
         )
@@ -4579,6 +5487,11 @@ def add_server(
     description: str = "",
     auth_scheme: str = "",
     setup_command: str = "",
+    source_type: str = "manual",
+    source_name: str = "",
+    source_ref: str = "",
+    source_version: str = "",
+    source_url: str = "",
 ) -> dict:
     with _connect() as conn:
         sid = _add_server(
@@ -4591,6 +5504,11 @@ def add_server(
             description,
             auth_scheme=auth_scheme,
             setup_command=setup_command,
+            source_type=source_type,
+            source_name=source_name,
+            source_ref=source_ref,
+            source_version=source_version,
+            source_url=source_url,
         )
         return get_server(sid)
 
@@ -4602,24 +5520,6 @@ def get_server(server_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def get_builtin_gbrain_server() -> dict | None:
-    """Return the required managed server backing the Knowledge specialist."""
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM mcp_servers WHERE setup_type = ?",
-            (knowledge_protocol.BUILTIN_SETUP_TYPE,),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def is_managed_server(server_id: int) -> bool:
-    server = get_server(server_id)
-    return bool(
-        server
-        and server.get("setup_type") == knowledge_protocol.BUILTIN_SETUP_TYPE
-    )
-
-
 def list_servers() -> list[dict]:
     with _connect() as conn:
         cur = conn.execute("SELECT * FROM mcp_servers ORDER BY name")
@@ -4627,8 +5527,6 @@ def list_servers() -> list[dict]:
 
 
 def update_server(server_id: int, **kwargs) -> dict | None:
-    if is_managed_server(server_id):
-        raise ValueError("This built-in MCP server is managed by Mounir.")
     allowed = {
         "name",
         "connection",
@@ -4733,12 +5631,6 @@ def delete_server_result(server_id: int) -> DeletionResult:
         ).fetchone() is None:
             conn.rollback()
             return DeletionResult("not_found")
-        managed = conn.execute(
-            "SELECT setup_type FROM mcp_servers WHERE id = ?", (server_id,)
-        ).fetchone()
-        if managed and managed["setup_type"] == knowledge_protocol.BUILTIN_SETUP_TYPE:
-            conn.rollback()
-            return DeletionResult("in_use", ("the built-in Knowledge subagent",))
         agent_rows = conn.execute(
             """
             SELECT DISTINCT subagents.name
@@ -4750,15 +5642,6 @@ def delete_server_result(server_id: int) -> DeletionResult:
             (server_id,),
         ).fetchall()
         dependencies = tuple(f"the {row['name']} subagent" for row in agent_rows)
-        knowledge_setting = conn.execute(
-            """
-            SELECT 1 FROM builtin_agent_settings
-            WHERE agent_key = 'knowledge' AND mcp_server_id = ?
-            """,
-            (server_id,),
-        ).fetchone()
-        if knowledge_setting:
-            dependencies += ("the Knowledge built-in subagent",)
         if dependencies:
             conn.rollback()
             return DeletionResult("in_use", dependencies)
@@ -6544,12 +7427,6 @@ def build_server_spec(server_id: int) -> dict | None:
         return None
     env = _resolved_json_object(server.get("env") or "{}")
     env.update(_materialized_server_file_env(server_id))
-    if server.get("setup_type") == knowledge_protocol.BUILTIN_SETUP_TYPE:
-        embedding = get_knowledge_embedding_runtime()
-        if embedding is not None:
-            from .embedding_models import gbrain_provider_environment
-
-            env.update(gbrain_provider_environment(embedding))
     return {
         "server_id": server_id,
         "name": server["name"],
@@ -6563,24 +7440,34 @@ def build_server_spec(server_id: int) -> dict | None:
     }
 
 
+def build_knowledge_service_spec() -> dict:
+    """Build the internal GBrain connection owned by Knowledge."""
+    env = {"GBRAIN_HOME": str(knowledge_protocol.local_home_parent())}
+    embedding = get_knowledge_embedding_runtime()
+    if embedding is not None:
+        from .embedding_models import gbrain_provider_environment
+
+        env.update(gbrain_provider_environment(embedding))
+    return {
+        "server_id": "builtin:knowledge",
+        "name": knowledge_protocol.BUILTIN_SERVER_NAME,
+        "server_name": knowledge_protocol.BUILTIN_SERVER_NAME,
+        "transport": "stdio",
+        "connection": knowledge_protocol.BUILTIN_SERVER_COMMAND,
+        "headers": {},
+        "env": env,
+        "auth_scheme": "",
+        "oauth_redirect_uri": "",
+        "setup_command": knowledge_protocol.BUILTIN_SETUP_COMMAND,
+    }
+
+
 def get_builtin_agent_server_spec(agent_key: str) -> dict | None:
-    """Resolve the MCP server selected for a built-in specialist."""
+    """Resolve an internal service owned by a built-in specialist."""
     key = str(agent_key or "").removeprefix("builtin:").strip()
-    with _connect() as conn:
-        row = conn.execute(
-            """
-            SELECT mcp_server_id
-            FROM builtin_agent_settings
-            WHERE agent_key = ?
-            """,
-            (key,),
-        ).fetchone()
-    if row is None or row["mcp_server_id"] is None:
+    if key != "knowledge":
         return None
-    spec = build_server_spec(int(row["mcp_server_id"]))
-    if spec is None:
-        return None
-    return {**spec, "server_name": spec["name"]}
+    return build_knowledge_service_spec()
 
 
 def build_specs(workflow_id: int | None = None) -> list[dict]:

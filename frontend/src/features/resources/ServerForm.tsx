@@ -73,7 +73,7 @@ export function ServerForm({
         const resolvedEnvironment = entriesObject(
           environment,
           'Environment variable',
-          new Set(Object.keys(initialEnvironment)),
+          new Set(item?.id ? Object.keys(initialEnvironment) : []),
         )
         body.env = JSON.stringify(resolvedEnvironment)
         body.headers = '{}'
@@ -106,10 +106,15 @@ export function ServerForm({
         body.auth_scheme = authMode
         if (authMode === 'oauth') {
           body.headers = JSON.stringify(
-            entriesObject(headers, 'Header', new Set(Object.keys(editableInitialHeaders))),
+            entriesObject(
+              headers,
+              'Header',
+              new Set(item?.id ? Object.keys(editableInitialHeaders) : []),
+            ),
           )
         } else if (authMode === 'credential') {
           const sameSavedCredential =
+            Boolean(item?.id) &&
             Boolean(item?.headers_configured) &&
             auth.mode === 'credential' &&
             auth.method === authMethod &&
@@ -125,7 +130,11 @@ export function ServerForm({
           }
           body.headers = JSON.stringify(resolved)
         } else if (authMode === 'custom') {
-          resolved = entriesObject(headers, 'Header', new Set(Object.keys(editableInitialHeaders)))
+          resolved = entriesObject(
+            headers,
+            'Header',
+            new Set(item?.id ? Object.keys(editableInitialHeaders) : []),
+          )
           body.headers = JSON.stringify(resolved)
         } else body.headers = '{}'
       }

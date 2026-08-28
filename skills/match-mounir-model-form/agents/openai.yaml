@@ -1,0 +1,4 @@
+interface:
+  display_name: "Match Mounir Write Form"
+  short_description: "Apply the universal compact write popup style"
+  default_prompt: "Use $match-mounir-model-form to migrate this creation or modification form to the compact Mounir write-popup style."

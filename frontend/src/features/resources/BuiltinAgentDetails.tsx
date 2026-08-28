@@ -1,10 +1,13 @@
-import { BookOpen, Settings2, ShieldCheck, Wrench } from 'lucide-react'
+import { BookOpen, Play, RefreshCw, Settings2, ShieldCheck, Wrench } from 'lucide-react'
 import { forwardRef, useEffect, useImperativeHandle, useState } from 'react'
+import { api } from '../../api/client'
 import type { BuiltinAgent, EmbeddingModelRecord, ModelRecord, SkillRecord } from '../../api/types'
+import { Button } from '../../components/ui/Button'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
 import { Field } from '../../components/ui/Field'
 import { SectionTabs } from '../../components/ui/SectionTabs'
+import { Status } from '../../components/ui/Status'
 import { stringList } from './helpers'
 import { ToolChoices } from './ToolChoices'
 import { SkillPicker } from './SkillPicker'
@@ -26,12 +29,13 @@ interface BuiltinAgentDetailsProps {
   saving?: boolean
   connecting?: boolean
   error?: string
-  onConnect: (connected: boolean) => void
+  readOnly?: boolean
+  compact?: boolean
+  onConnect?: (connected: boolean) => void
   onDirtyChange?: (dirty: boolean) => void
-  onSave: (body: {
+  onSave?: (body: {
     model_id: number | null
     generation_model_id?: number | null
-    mcp_server_id?: number | null
     automatic_knowledge_enabled?: boolean
     embedding_enabled?: boolean
     embedding_model_id?: number | null
@@ -61,6 +65,8 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
       saving,
       connecting,
       error,
+      readOnly = false,
+      compact = false,
       onConnect,
       onDirtyChange,
       onSave,
@@ -92,7 +98,13 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
     )
     const [confirmEmbedding, setConfirmEmbedding] = useState(false)
     const [validationError, setValidationError] = useState('')
-    const mcpServerId = Number(item.mcp_server_id || 0)
+    const [knowledgeServiceAgent, setKnowledgeServiceAgent] = useState<BuiltinAgent | null>(null)
+    const [knowledgeServiceAction, setKnowledgeServiceAction] = useState<'setup' | 'test' | null>(
+      null,
+    )
+    const [knowledgeServiceError, setKnowledgeServiceError] = useState('')
+    const currentKnowledge = knowledgeServiceAgent || item
+    const availableTools = currentKnowledge.tools || []
     const embeddingDirty =
       item.key === 'knowledge' &&
       (embeddingEnabled !== Boolean(item.embedding_enabled) ||
@@ -121,12 +133,11 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
       skillsDirty
 
     const saveChanges = () =>
-      onSave({
+      onSave?.({
         model_id: modelId || null,
         ...(item.key === 'media' ? { generation_model_id: generationModelId || null } : {}),
         ...(item.key === 'knowledge'
           ? {
-              mcp_server_id: mcpServerId,
               automatic_knowledge_enabled: automaticKnowledgeEnabled,
               embedding_enabled: embeddingEnabled,
               embedding_model_id: embeddingModelId || null,
@@ -134,7 +145,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
           : {}),
         confirm_tools: nextConfirmTools,
         skill_ids: nextSkillIds,
-      })
+      }) || Promise.resolve()
 
     const requestSave = () => {
       setValidationError('')
@@ -159,12 +170,30 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
       void saveChanges()
     }
 
+    const runKnowledgeServiceAction = async (action: 'setup' | 'test') => {
+      setKnowledgeServiceAction(action)
+      setKnowledgeServiceError('')
+      try {
+        const saved =
+          action === 'setup'
+            ? await api.builtins.setupKnowledge()
+            : await api.builtins.testKnowledge()
+        setKnowledgeServiceAgent(saved)
+      } catch (cause) {
+        setKnowledgeServiceError(
+          cause instanceof Error ? cause.message : 'Could not update the Knowledge service.',
+        )
+      } finally {
+        setKnowledgeServiceAction(null)
+      }
+    }
+
     useImperativeHandle(ref, () => ({ save: requestSave }))
     useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange])
     useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
 
     return (
-      <div className="stack">
+      <div className={compact ? 'builtin-agent-write-form' : 'stack'}>
         <section className="card resource-workspace">
           <div className="setting-row">
             <span>
@@ -177,8 +206,8 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
               <input
                 type="checkbox"
                 checked={item.connected}
-                disabled={connecting}
-                onChange={(event) => onConnect(event.target.checked)}
+                disabled={readOnly || connecting}
+                onChange={(event) => onConnect?.(event.target.checked)}
               />
               <span className="switch__track">
                 <span />
@@ -202,7 +231,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                   id: 'tools',
                   label: 'Tools',
                   icon: <Wrench size={14} />,
-                  count: item.tools?.length || 0,
+                  count: availableTools.length,
                 },
                 { id: 'security', label: 'Security', icon: <ShieldCheck size={14} /> },
               ]}
@@ -212,10 +241,11 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
               <>
                 <Detail label="Overview state" value={item.enabled ? 'Active' : 'Inactive'} />
                 <div className="detail">
-                  <dt>Analysis model</dt>
+                  <dt>Model</dt>
                   <dd>
                     <select
                       value={modelId || ''}
+                      disabled={readOnly}
                       onChange={(event) => setModelId(Number(event.target.value))}
                     >
                       <option value="">Installation fallback</option>
@@ -233,6 +263,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                     <dd>
                       <select
                         value={generationModelId || ''}
+                        disabled={readOnly}
                         onChange={(event) => setGenerationModelId(Number(event.target.value))}
                       >
                         <option value="">Not configured</option>
@@ -247,23 +278,54 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                 )}
                 {item.key === 'knowledge' && (
                   <>
-                    <div className="detail detail--full">
-                      <dt>MCP server</dt>
-                      <dd>
-                        <span className="detail__value-stack">
-                          <span>{item.mcp_server_name || 'GBrain'}</span>
-                          <small className="field__hint">
-                            Built-in local MCP server permanently assigned to Knowledge.
+                    <div className="detail detail--full knowledge-service-setting">
+                      <div className="knowledge-service-setting__heading">
+                        <span>
+                          <strong>Local knowledge service</strong>
+                          <small>
+                            GBrain stores and retrieves Knowledge data for this subagent. Its setup
+                            and connection are managed here.
                           </small>
-                          {item.mcp_server_id && !item.knowledge_protocol_compatible && (
-                            <small className="field__error">
-                              {item.mcp_server_status !== 'connected'
-                                ? 'GBrain is not connected yet. Open it in MCP Servers to see the setup error or test it again.'
-                                : `Missing tools: ${(item.knowledge_protocol_missing_tools || []).join(', ')}`}
-                            </small>
-                          )}
                         </span>
-                      </dd>
+                        <Status value={currentKnowledge.knowledge_service_status || 'untested'} />
+                      </div>
+                      {currentKnowledge.knowledge_service_status === 'connected' &&
+                        !currentKnowledge.knowledge_protocol_compatible && (
+                          <span className="field__error">
+                            Missing tools:{' '}
+                            {(currentKnowledge.knowledge_protocol_missing_tools || []).join(', ')}
+                          </span>
+                        )}
+                      <Feedback
+                        message={
+                          knowledgeServiceError ||
+                          currentKnowledge.knowledge_service_last_error ||
+                          ''
+                        }
+                      />
+                      {!readOnly && (
+                        <div className="knowledge-service-setting__actions">
+                          <Button
+                            type="button"
+                            icon={<Play size={13} />}
+                            busy={knowledgeServiceAction === 'setup'}
+                            disabled={knowledgeServiceAction !== null}
+                            onClick={() => void runKnowledgeServiceAction('setup')}
+                          >
+                            Set up service
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="primary"
+                            icon={<RefreshCw size={13} />}
+                            busy={knowledgeServiceAction === 'test'}
+                            disabled={knowledgeServiceAction !== null}
+                            onClick={() => void runKnowledgeServiceAction('test')}
+                          >
+                            Test connection
+                          </Button>
+                        </div>
+                      )}
                     </div>
                     <div className="detail detail--full knowledge-embedding-setting">
                       <div className="setting-row">
@@ -273,8 +335,8 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                             Add relevant saved knowledge to Mounir’s context before each user
                             request.
                           </small>
-                          {item.mcp_server_status === 'connected' &&
-                            !item.automatic_knowledge_available && (
+                          {currentKnowledge.knowledge_service_status === 'connected' &&
+                            !currentKnowledge.automatic_knowledge_available && (
                               <small className="field__error">
                                 Automatic knowledge is unavailable because this GBrain version does
                                 not provide automatic context.
@@ -285,6 +347,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                           <input
                             type="checkbox"
                             checked={automaticKnowledgeEnabled}
+                            disabled={readOnly}
                             onChange={(event) => setAutomaticKnowledgeEnabled(event.target.checked)}
                           />
                           <span className="switch__track">
@@ -307,6 +370,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                           <input
                             type="checkbox"
                             checked={embeddingEnabled}
+                            disabled={readOnly}
                             onChange={(event) => setEmbeddingEnabled(event.target.checked)}
                           />
                           <span className="switch__track">
@@ -323,6 +387,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                           </span>
                           <select
                             value={embeddingModelId || ''}
+                            disabled={readOnly}
                             onChange={(event) => setEmbeddingModelId(Number(event.target.value))}
                           >
                             <option value="">Choose an embedding model</option>
@@ -367,7 +432,8 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                   selected={selectedSkills}
                   loading={skillsLoading}
                   error={skillsError}
-                  onChange={setSelectedSkills}
+                  readOnly={readOnly}
+                  onChange={readOnly ? undefined : setSelectedSkills}
                 />
               </div>
             )}
@@ -377,7 +443,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                   Tools supplied by this built-in specialist are fixed by its installed service.
                 </p>
                 <ToolChoices
-                  tools={item.tools || []}
+                  tools={availableTools}
                   readOnly
                   empty="Connect the built-in service to discover its available tools."
                 />
@@ -392,6 +458,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                 >
                   <select
                     value={confirmationMode}
+                    disabled={readOnly}
                     onChange={(event) =>
                       setConfirmationMode(event.target.value as ConfirmationMode)
                     }
@@ -410,9 +477,10 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                       </span>
                     </div>
                     <ToolChoices
-                      tools={item.tools || []}
+                      tools={availableTools}
                       selected={confirmedTools}
-                      onChange={setConfirmedTools}
+                      readOnly={readOnly}
+                      onChange={readOnly ? undefined : setConfirmedTools}
                       empty="Connect the built-in service to discover its available tools."
                     />
                   </div>
@@ -422,20 +490,22 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
           </div>
         </section>
         <Feedback message={validationError || error || ''} />
-        <ConfirmDialog
-          open={confirmEmbedding}
-          title="Update embeddings?"
-          message="GBrain will configure this embedding model and index existing memories. This can take time, and a cloud provider may charge for the embedding requests."
-          confirmLabel="Apply and index"
-          busy={saving}
-          error={error || ''}
-          onConfirm={() => {
-            void saveChanges()
-              .then(() => setConfirmEmbedding(false))
-              .catch(() => undefined)
-          }}
-          onCancel={() => setConfirmEmbedding(false)}
-        />
+        {!readOnly && (
+          <ConfirmDialog
+            open={confirmEmbedding}
+            title="Update embeddings?"
+            message="GBrain will configure this embedding model and index existing memories. This can take time, and a cloud provider may charge for the embedding requests."
+            confirmLabel="Apply and index"
+            busy={saving}
+            error={error || ''}
+            onConfirm={() => {
+              void saveChanges()
+                .then(() => setConfirmEmbedding(false))
+                .catch(() => undefined)
+            }}
+            onCancel={() => setConfirmEmbedding(false)}
+          />
+        )}
       </div>
     )
   },

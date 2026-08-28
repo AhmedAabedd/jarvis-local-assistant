@@ -107,25 +107,21 @@ export function ServerTools({ server }: { server: McpServer }) {
             {setup.data?.command.configured && (
               <div className="setup-method-row">
                 <span className="setup-method-row__icon">
-                  {server.managed ? <RefreshCw size={16} /> : <Play size={16} />}
+                  <Play size={16} />
                 </span>
                 <span>
-                  <strong>{server.managed ? 'Automatic setup' : 'Setup command'}</strong>
-                  <small>
-                    {server.managed
-                      ? 'Mounir sets up GBrain automatically at startup. Retry only if setup failed.'
-                      : 'Runs the exact command saved in this server configuration.'}
-                  </small>
+                  <strong>Setup command</strong>
+                  <small>Runs the exact command saved in this server configuration.</small>
                 </span>
                 <div className="setup-method-row__actions">
                   <Button
                     variant="primary"
-                    icon={server.managed ? <RefreshCw size={13} /> : <Play size={13} />}
+                    icon={<Play size={13} />}
                     busy={action.isPending && action.variables === 'run_command'}
                     disabled={action.isPending}
                     onClick={() => action.mutate('run_command')}
                   >
-                    {server.managed ? 'Retry setup' : 'Run setup'}
+                    Run setup
                   </Button>
                 </div>
               </div>

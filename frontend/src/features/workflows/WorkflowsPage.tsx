@@ -14,6 +14,7 @@ import {
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronLeft,
+  Edit3,
   GitBranch,
   LayoutDashboard,
   ListChecks,
@@ -23,7 +24,6 @@ import {
   Settings2,
   Trash2,
   Workflow as WorkflowIcon,
-  X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -51,17 +51,44 @@ import { ConnectAgentModal, WorkflowPreviewModal } from '../overview/ConnectAgen
 import { PageHeader } from '../studio/PageHeader'
 
 type Tab = 'overview' | 'details'
+type WorkflowMode = Workflow['execution_mode']
 type Parent = { nodeId: number | null; name: string; position?: number }
 type PendingNode = { kind: 'subagent' | 'workflow'; id: number; name: string }
 
+const WORKFLOW_CREATE_FORM_ID = 'workflow-create-form'
+const WORKFLOW_EDIT_FORM_ID = 'workflow-edit-form'
+const workflowModes: Array<{
+  id: WorkflowMode
+  label: string
+  description: string
+  icon: typeof GitBranch
+}> = [
+  {
+    id: 'agentic',
+    label: 'Agentic',
+    description: 'Build a branching workflow coordinated by an orchestrator.',
+    icon: GitBranch,
+  },
+  {
+    id: 'direct',
+    label: 'Direct',
+    description: 'Build a predictable sequence that runs one step after another.',
+    icon: ListChecks,
+  },
+]
+
 function WorkflowForm({
   workflow,
+  initialMode,
+  formId,
   models,
   busy,
   error,
   onSubmit,
 }: {
   workflow?: Workflow
+  initialMode?: WorkflowMode
+  formId: string
   models: ModelRecord[]
   busy: boolean
   error: string
@@ -71,12 +98,14 @@ function WorkflowForm({
   const [description, setDescription] = useState(workflow?.description || '')
   const [modelId, setModelId] = useState(workflow?.model_id || 0)
   const [prompt, setPrompt] = useState(workflow?.system_prompt || '')
-  const [mode, setMode] = useState<'agentic' | 'direct'>(workflow?.execution_mode || 'agentic')
+  const [mode, setMode] = useState<WorkflowMode>(
+    workflow?.execution_mode || initialMode || 'agentic',
+  )
 
   return (
     <form
-      id="workflow-form"
-      className="workflow-form"
+      id={formId}
+      className="form-grid workflow-form"
       aria-busy={busy}
       onSubmit={(event) => {
         event.preventDefault()
@@ -89,83 +118,120 @@ function WorkflowForm({
         })
       }}
     >
-      <div className="form-grid">
-        <Field label="Name" full>
-          <input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            required
-            autoFocus={!workflow}
+      <Field label="Name" hint="Use a recognizable name for this reusable workflow." full>
+        <input value={name} onChange={(event) => setName(event.target.value)} required autoFocus />
+      </Field>
+      <Field label="Description" hint="Explain what this workflow is designed to accomplish." full>
+        <AutoTextarea
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          rows={3}
+          placeholder="Describe the workflow's purpose"
+        />
+      </Field>
+      {workflow && (
+        <Field
+          label="Execution mode"
+          hint="Changing the mode also changes how connected nodes are organized and executed."
+          full
+        >
+          <select value={mode} onChange={(event) => setMode(event.target.value as WorkflowMode)}>
+            {workflowModes.map((option) => (
+              <option value={option.id} key={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+      {mode === 'agentic' && (
+        <>
+          <Field
+            label="Orchestrator model"
+            hint="Any saved OpenAI-compatible model can orchestrate this workflow."
+            full
+          >
+            <select
+              value={modelId || ''}
+              onChange={(event) => setModelId(Number(event.target.value))}
+            >
+              <option value="">Choose a model…</option>
+              {models.map((model) => (
+                <option value={model.id} key={model.id}>
+                  {model.name} — {model.model}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field
+            label="Orchestrator system prompt"
+            hint="Explain how the orchestrator should delegate to the connected nodes."
+            full
+          >
+            <AutoTextarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              rows={8}
+            />
+          </Field>
+        </>
+      )}
+      {error && (
+        <div className="field--full">
+          <Feedback message={error} />
+        </div>
+      )}
+    </form>
+  )
+}
+
+function WorkflowDetail({
+  label,
+  value,
+  full,
+}: {
+  label: string
+  value?: string | number | null
+  full?: boolean
+}) {
+  const display = value === undefined || value === null || value === '' ? 'Not configured' : value
+  return (
+    <div className={`detail ${full ? 'detail--full' : ''}`}>
+      <dt>{label}</dt>
+      <dd>{display}</dd>
+    </div>
+  )
+}
+
+function WorkflowDetails({ workflow }: { workflow: Workflow }) {
+  const agentic = workflow.execution_mode === 'agentic'
+  const model = workflow.model_name
+    ? `${workflow.model_name}${workflow.model ? ` — ${workflow.model}` : ''}`
+    : null
+  return (
+    <section className="card resource-workspace resource-workspace--readonly">
+      <div className="card__body detail-grid">
+        <WorkflowDetail label="Name" value={workflow.name} />
+        <WorkflowDetail label="Execution mode" value={agentic ? 'Agentic' : 'Direct'} />
+        <WorkflowDetail label="Connected nodes" value={workflow.node_count} />
+        <WorkflowDetail
+          label="Orchestrator model"
+          value={agentic ? model : 'Not used by direct workflows'}
+        />
+        <WorkflowDetail
+          label="Description"
+          value={workflow.description || 'No description provided'}
+          full
+        />
+        {agentic && (
+          <WorkflowDetail
+            label="Orchestrator system prompt"
+            value={workflow.system_prompt || 'Default instructions'}
+            full
           />
-        </Field>
-        <Field label="Description" full>
-          <AutoTextarea
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            placeholder="What this workflow is designed to accomplish"
-          />
-        </Field>
-        <Field label="Execution mode" full>
-          <div className="workflow-mode-options">
-            <button
-              type="button"
-              className={mode === 'agentic' ? 'is-selected' : ''}
-              onClick={() => setMode('agentic')}
-            >
-              <GitBranch size={18} />
-              <span>
-                <strong>Agentic</strong>
-                <small>Branching workflow design</small>
-              </span>
-            </button>
-            <button
-              type="button"
-              className={mode === 'direct' ? 'is-selected' : ''}
-              onClick={() => setMode('direct')}
-            >
-              <ListChecks size={18} />
-              <span>
-                <strong>Direct</strong>
-                <small>Sequential workflow design</small>
-              </span>
-            </button>
-          </div>
-        </Field>
-        {mode === 'agentic' && (
-          <>
-            <Field
-              label="Orchestrator model"
-              hint="Any saved OpenAI-compatible model can orchestrate this workflow."
-              full
-            >
-              <select
-                value={modelId || ''}
-                onChange={(event) => setModelId(Number(event.target.value))}
-              >
-                <option value="">Choose a model…</option>
-                {models.map((model) => (
-                  <option value={model.id} key={model.id}>
-                    {model.name} — {model.model}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field
-              label="Orchestrator system prompt"
-              hint="Explain how the orchestrator should delegate to the connected nodes."
-              full
-            >
-              <AutoTextarea
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                rows={8}
-              />
-            </Field>
-          </>
         )}
       </div>
-      <Feedback message={error} />
-    </form>
+    </section>
   )
 }
 
@@ -645,10 +711,14 @@ export function WorkflowsPage() {
   const [params, setParams] = useSearchParams()
   const [query, setQuery] = useState('')
   const [pendingDelete, setPendingDelete] = useState<Workflow | null>(null)
-  const [workflowFormDirty, setWorkflowFormDirty] = useState(false)
-  const [workflowDraftVersion, setWorkflowDraftVersion] = useState(0)
+  const [editing, setEditing] = useState(false)
   const openId = Number(params.get('open') || 0)
-  const creating = params.get('new') === '1'
+  const creating = Boolean(params.get('new'))
+  const requestedCreateMode = params.get('mode') as WorkflowMode | null
+  const createMode = workflowModes.some((option) => option.id === requestedCreateMode)
+    ? requestedCreateMode
+    : null
+  const createStage = params.get('new') === 'form' && createMode ? 'form' : 'type'
   const tab: Tab = params.get('tab') === 'details' ? 'details' : 'overview'
   const selected = workflows.data?.find((item) => item.id === openId)
 
@@ -656,7 +726,6 @@ export function WorkflowsPage() {
     mutationFn: (body: object) => api.workflows.create(body),
     onSuccess: async (workflow) => {
       await client.invalidateQueries({ queryKey: keys.workflows })
-      setWorkflowFormDirty(false)
       setParams({ open: String(workflow.id), tab: 'overview' })
     },
   })
@@ -664,7 +733,7 @@ export function WorkflowsPage() {
     mutationFn: (body: object) => api.workflows.update(openId, body),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: keys.workflows })
-      setWorkflowFormDirty(false)
+      setEditing(false)
     },
   })
   const remove = useMutation({
@@ -694,50 +763,6 @@ export function WorkflowsPage() {
       </>
     )
   }
-  if (creating) {
-    return (
-      <>
-        <PageHeader
-          title="Create workflow"
-          description="Save a reusable agentic or direct workflow"
-          leading={
-            <Button
-              icon={<ChevronLeft size={14} />}
-              onClick={() => {
-                setWorkflowFormDirty(false)
-                setParams({})
-              }}
-              aria-label="Back to workflows"
-              title="Back to workflows"
-            />
-          }
-          actions={
-            <Button
-              form="workflow-form"
-              type="submit"
-              variant="primary"
-              icon={<Save size={14} />}
-              busy={create.isPending}
-            >
-              Create
-            </Button>
-          }
-        />
-        <div className="page-content">
-          <section className="card resource-workspace resource-workspace--form">
-            <div className="card__body">
-              <WorkflowForm
-                models={models.data || []}
-                busy={create.isPending}
-                error={create.error instanceof Error ? create.error.message : ''}
-                onSubmit={(body) => create.mutate(body)}
-              />
-            </div>
-          </section>
-        </div>
-      </>
-    )
-  }
   if (selected) {
     return (
       <>
@@ -753,31 +778,7 @@ export function WorkflowsPage() {
             />
           }
           actions={
-            <>
-              {tab === 'details' && workflowFormDirty && (
-                <>
-                  <Button
-                    className="resource-header-action"
-                    icon={<X size={15} />}
-                    onClick={() => {
-                      update.reset()
-                      setWorkflowFormDirty(false)
-                      setWorkflowDraftVersion((version) => version + 1)
-                    }}
-                    aria-label="Discard changes"
-                    title="Discard changes"
-                  />
-                  <Button
-                    form="workflow-form"
-                    type="submit"
-                    variant="primary"
-                    icon={<Save size={14} />}
-                    busy={update.isPending}
-                  >
-                    Save
-                  </Button>
-                </>
-              )}
+            <div className="resource-header-actions">
               <Button
                 className="resource-header-action"
                 icon={<Trash2 size={15} />}
@@ -785,7 +786,18 @@ export function WorkflowsPage() {
                 aria-label="Delete workflow"
                 title="Delete workflow"
               />
-            </>
+              <Button
+                className="resource-header-action"
+                variant="primary"
+                icon={<Edit3 size={15} />}
+                onClick={() => {
+                  update.reset()
+                  setEditing(true)
+                }}
+                aria-label="Edit workflow"
+                title="Edit workflow"
+              />
+            </div>
           }
         />
         <SectionTabs
@@ -797,7 +809,6 @@ export function WorkflowsPage() {
             { id: 'details', label: 'Details', icon: <Settings2 size={14} /> },
           ]}
           onChange={(value) => {
-            setWorkflowFormDirty(false)
             setParams({ open: String(selected.id), tab: value })
           }}
         />
@@ -805,29 +816,42 @@ export function WorkflowsPage() {
           {tab === 'overview' ? (
             <WorkflowOverview workflow={selected} workflows={workflows.data || []} />
           ) : (
-            <section
-              key={`workflow:${selected.id}:${workflowDraftVersion}`}
-              className="card resource-workspace resource-workspace--form"
-              onChangeCapture={() => setWorkflowFormDirty(true)}
-              onInputCapture={() => setWorkflowFormDirty(true)}
-              onClickCapture={(event) => {
-                if ((event.target as HTMLElement).closest('button[type="button"]'))
-                  setWorkflowFormDirty(true)
-              }}
-            >
-              <div className="card__body">
-                <WorkflowForm
-                  key={selected.id}
-                  workflow={selected}
-                  models={models.data || []}
-                  busy={update.isPending}
-                  error={update.error instanceof Error ? update.error.message : ''}
-                  onSubmit={(body) => update.mutate(body)}
-                />
-              </div>
-            </section>
+            <WorkflowDetails workflow={selected} />
           )}
         </div>
+        <Modal
+          open={editing}
+          wide
+          integrated
+          className="modal--compact-write-form modal--workflow-write-form"
+          title={`Edit ${selected.name}`}
+          description="Update this workflow's details and execution configuration."
+          onClose={() => {
+            if (!update.isPending) setEditing(false)
+          }}
+        >
+          <div className="compact-write-modal-form workflow-write-modal-form">
+            <WorkflowForm
+              key={`edit-workflow:${selected.id}:${editing}`}
+              workflow={selected}
+              formId={WORKFLOW_EDIT_FORM_ID}
+              models={models.data || []}
+              busy={update.isPending}
+              error={update.error instanceof Error ? update.error.message : ''}
+              onSubmit={(body) => update.mutate(body)}
+            />
+          </div>
+          <div className="compact-form-actions">
+            <Button
+              variant="primary"
+              type="submit"
+              form={WORKFLOW_EDIT_FORM_ID}
+              busy={update.isPending}
+            >
+              Save changes
+            </Button>
+          </div>
+        </Modal>
         <ConfirmDialog
           open={Boolean(pendingDelete)}
           title="Delete workflow?"
@@ -851,7 +875,10 @@ export function WorkflowsPage() {
           <Button
             variant="primary"
             icon={<Plus size={14} />}
-            onClick={() => setParams({ new: '1' })}
+            onClick={() => {
+              create.reset()
+              setParams({ new: 'type' })
+            }}
           >
             New workflow
           </Button>
@@ -909,6 +936,78 @@ export function WorkflowsPage() {
           )}
         </div>
       </div>
+      <Modal
+        open={creating}
+        wide
+        integrated={createStage === 'form'}
+        className={
+          createStage === 'type'
+            ? 'modal--subagent-choice'
+            : 'modal--compact-write-form modal--workflow-write-form'
+        }
+        title={createStage === 'type' ? 'Create workflow' : `Add ${createMode || ''} workflow`}
+        description={
+          createStage === 'type'
+            ? 'Choose how you want this workflow to run.'
+            : 'Configure the reusable workflow details.'
+        }
+        onClose={() => {
+          if (create.isPending) return
+          create.reset()
+          setParams({})
+        }}
+      >
+        {createStage === 'type' ? (
+          <div className="subagent-start">
+            <div className="subagent-start__choices">
+              {workflowModes.map((option) => {
+                const ModeIcon = option.icon
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className="subagent-start__choice"
+                    onClick={() => {
+                      create.reset()
+                      setParams({ new: 'form', mode: option.id })
+                    }}
+                  >
+                    <span className="subagent-start__choice-title">
+                      <ModeIcon size={18} aria-hidden="true" />
+                      <strong>{option.label}</strong>
+                    </span>
+                    <small>{option.description}</small>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        ) : createMode ? (
+          <>
+            <div className="compact-write-modal-form workflow-write-modal-form">
+              <WorkflowForm
+                key={`create-workflow:${createMode}`}
+                initialMode={createMode}
+                formId={WORKFLOW_CREATE_FORM_ID}
+                models={models.data || []}
+                busy={create.isPending}
+                error={create.error instanceof Error ? create.error.message : ''}
+                onSubmit={(body) => create.mutate(body)}
+              />
+            </div>
+            <div className="compact-form-actions">
+              <Button
+                variant="primary"
+                type="submit"
+                form={WORKFLOW_CREATE_FORM_ID}
+                busy={create.isPending}
+              >
+                Create workflow
+              </Button>
+            </div>
+          </>
+        ) : null}
+      </Modal>
     </>
   )
 }

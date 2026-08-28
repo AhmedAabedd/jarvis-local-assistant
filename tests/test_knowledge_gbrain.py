@@ -59,36 +59,31 @@ class KnowledgeConfigurationTests(unittest.TestCase):
             os.environ["MOUNIR_GBRAIN_HOME"] = self.old_gbrain_home
         self.temp_dir.cleanup()
 
-    def test_knowledge_uses_the_seeded_local_gbrain_and_real_discovery_state(self):
-        server = db.get_builtin_gbrain_server()
-        self.assertIsNotNone(server)
-        self.assertEqual(server["transport"], "stdio")
-        self.assertEqual(server["connection"], "gbrain serve")
+    def test_knowledge_owns_local_gbrain_and_real_discovery_state(self):
+        self.assertEqual(db.list_servers(), [])
+        spec = db.build_knowledge_service_spec()
+        self.assertEqual(spec["transport"], "stdio")
+        self.assertEqual(spec["connection"], "gbrain serve")
         self.assertEqual(
-            db.build_server_spec(server["id"])["env"]["GBRAIN_HOME"],
+            spec["env"]["GBRAIN_HOME"],
             str(knowledge_protocol.local_home_parent()),
         )
         initial = next(
             item for item in db.list_builtin_agents() if item["key"] == "knowledge"
         )
-        self.assertEqual(initial["mcp_server_id"], server["id"])
+        self.assertNotIn("mcp_server_id", initial)
+        self.assertEqual(initial["knowledge_service_status"], "untested")
         self.assertFalse(initial["knowledge_protocol_compatible"])
         self.assertTrue(initial["automatic_knowledge_enabled"])
         self.assertFalse(initial["automatic_knowledge_available"])
         self.assertEqual(initial["tools"], [])
 
-        other = db.add_server("Other brain", "other-memory-server")
-        with self.assertRaisesRegex(ValueError, "must use its built-in GBrain"):
-            db.update_builtin_agent("knowledge", mcp_server_id=other["id"])
-        with self.assertRaisesRegex(ValueError, "must use its built-in GBrain"):
-            db.update_builtin_agent("knowledge", mcp_server_id=None)
-
-        db.save_server_tools(server["id"], protocol_tools())
-        saved = db.update_builtin_agent("knowledge", mcp_server_id=server["id"])
-        self.assertEqual(saved["mcp_server_id"], server["id"])
+        db.save_knowledge_service_tools(protocol_tools())
+        saved = next(
+            item for item in db.list_builtin_agents() if item["key"] == "knowledge"
+        )
         self.assertTrue(saved["knowledge_protocol_compatible"])
         self.assertTrue(saved["automatic_knowledge_available"])
-        self.assertEqual(saved["mcp_server_transport"], "stdio")
         self.assertEqual(
             [tool["name"] for tool in saved["tools"]],
             list(knowledge_protocol.TOOL_NAMES),
@@ -98,7 +93,6 @@ class KnowledgeConfigurationTests(unittest.TestCase):
         reloaded = next(
             item for item in db.list_builtin_agents() if item["key"] == "knowledge"
         )
-        self.assertEqual(reloaded["mcp_server_id"], server["id"])
         self.assertEqual(
             db.get_builtin_agent_server_spec("knowledge")["connection"],
             "gbrain serve",
@@ -116,21 +110,53 @@ class KnowledgeConfigurationTests(unittest.TestCase):
         self.assertFalse(reloaded["automatic_knowledge_enabled"])
         self.assertTrue(reloaded["automatic_knowledge_available"])
 
-    def test_managed_gbrain_server_cannot_be_edited_or_deleted(self):
-        server = db.get_builtin_gbrain_server()
-        result = db.delete_server_result(server["id"])
-        self.assertEqual(result.status, "in_use")
-        self.assertIn("the built-in Knowledge subagent", result.dependencies)
-        with self.assertRaisesRegex(ValueError, "managed by Mounir"):
-            db.update_server(server["id"], connection="replacement-server")
-        self.assertTrue(db.server_for_api(server)["managed"])
+    def test_user_mcp_servers_have_no_system_classification(self):
+        server = db.add_server("Other brain", "other-memory-server")
+        public = db.server_for_api(server)
+        self.assertNotIn("managed", public)
+        updated = db.update_server(server["id"], connection="replacement-server")
+        self.assertEqual(updated["connection"], "replacement-server")
+        self.assertTrue(db.delete_server(server["id"]))
+
+    def test_legacy_managed_gbrain_state_moves_under_knowledge(self):
+        with db._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO mcp_servers
+                    (name, setup_type, connection, connection_status, last_tested_at,
+                     last_error, created_at)
+                VALUES ('Legacy GBrain', ?, 'gbrain serve', 'connected', ?, '', ?)
+                """,
+                (knowledge_protocol.LEGACY_MCP_SETUP_TYPE, "then", "then"),
+            )
+            server_id = int(cursor.lastrowid)
+            conn.execute(
+                "UPDATE builtin_agent_settings SET mcp_server_id = ? "
+                "WHERE agent_key = 'knowledge'",
+                (server_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO mcp_server_tools
+                    (mcp_server_id, name, description, input_schema, position, discovered_at)
+                VALUES (?, 'recall', 'Recall knowledge', '{}', 0, 'then')
+                """,
+                (server_id,),
+            )
+            conn.commit()
+
+        db.init()
+
+        self.assertEqual(db.list_servers(), [])
+        state = db.get_knowledge_service_state()
+        self.assertEqual(state["status"], "connected")
+        self.assertEqual([tool["name"] for tool in state["tools"]], ["recall"])
 
     def test_builtin_api_saves_the_selected_knowledge_service(self):
         import httpx
         import server as web_server
 
-        server = db.get_builtin_gbrain_server()
-        db.save_server_tools(server["id"], protocol_tools())
+        db.save_knowledge_service_tools(protocol_tools())
 
         async def exercise_api():
             transport = httpx.ASGITransport(app=web_server.app)
@@ -140,12 +166,12 @@ class KnowledgeConfigurationTests(unittest.TestCase):
                 response = await client.put(
                     "/api/builtin-agents/knowledge",
                     json={
-                        "mcp_server_id": server["id"],
                         "automatic_knowledge_enabled": False,
                     },
                 )
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["mcp_server_name"], "GBrain")
+                self.assertNotIn("mcp_server_id", response.json())
+                self.assertEqual(response.json()["knowledge_service_status"], "connected")
                 self.assertTrue(response.json()["knowledge_protocol_compatible"])
                 self.assertFalse(response.json()["automatic_knowledge_enabled"])
 
@@ -166,7 +192,6 @@ class KnowledgeConfigurationTests(unittest.TestCase):
     def test_startup_prepares_and_discovers_the_local_server(self):
         import server as web_server
 
-        server = db.get_builtin_gbrain_server()
         with (
             patch.object(
                 setup_gbrain,
@@ -181,7 +206,7 @@ class KnowledgeConfigurationTests(unittest.TestCase):
         ):
             asyncio.run(web_server._prepare_builtin_gbrain())
 
-        state = db.get_server_tools_state(server["id"])
+        state = db.get_knowledge_service_state()
         self.assertEqual(state["status"], "connected")
         self.assertEqual(
             [tool["name"] for tool in state["tools"]],
@@ -194,8 +219,7 @@ class KnowledgeConfigurationTests(unittest.TestCase):
     def test_saved_automatic_setting_controls_the_persistent_runtime(self):
         import server as web_server
 
-        server = db.get_builtin_gbrain_server()
-        db.save_server_tools(server["id"], protocol_tools())
+        db.save_knowledge_service_tools(protocol_tools())
         previous_lifecycle = web_server._gbrain_lifecycle_active
         web_server._gbrain_lifecycle_active = True
         try:

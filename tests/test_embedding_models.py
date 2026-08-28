@@ -97,7 +97,7 @@ class EmbeddingModelConfigurationTests(unittest.TestCase):
         )
         self.assertIsNone(knowledge["embedding_model_id"])
 
-    def test_gbrain_server_receives_only_the_selected_provider_environment(self):
+    def test_knowledge_service_receives_only_the_selected_provider_environment(self):
         saved = db.add_embedding_model(
             "Universal endpoint",
             "cloud",
@@ -112,8 +112,7 @@ class EmbeddingModelConfigurationTests(unittest.TestCase):
             embedding_enabled=True,
             embedding_model_id=saved["id"],
         )
-        server = db.get_builtin_gbrain_server()
-        environment = db.build_server_spec(server["id"])["env"]
+        environment = db.build_knowledge_service_spec()["env"]
         self.assertEqual(environment["LITELLM_BASE_URL"], "https://embedding.example/v1")
         self.assertEqual(environment["LITELLM_API_KEY"], "secret")
         self.assertNotIn("OPENAI_API_KEY", environment)
@@ -164,6 +163,163 @@ class EmbeddingModelConfigurationTests(unittest.TestCase):
                 apply.assert_called_once()
 
         asyncio.run(exercise_api())
+
+
+class UnifiedModelMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.old_db_path = db.DB_PATH
+        self.old_legacy_path = db.LEGACY_REGISTRY
+        db.DB_PATH = Path(self.temp_dir.name) / "mounir.db"
+        db.LEGACY_REGISTRY = Path(self.temp_dir.name) / "legacy.json"
+
+    def tearDown(self):
+        db.DB_PATH = self.old_db_path
+        db.LEGACY_REGISTRY = self.old_legacy_path
+        self.temp_dir.cleanup()
+
+    def test_current_separate_tables_migrate_to_one_registry(self):
+        with db._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    model TEXT,
+                    provider TEXT,
+                    base_url TEXT NOT NULL,
+                    api_key TEXT,
+                    created_at TEXT
+                );
+                CREATE TABLE embedding_models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    location TEXT NOT NULL,
+                    adapter TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    api_key TEXT NOT NULL DEFAULT '',
+                    dimensions INTEGER,
+                    connection_status TEXT NOT NULL,
+                    last_tested_at TEXT,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE voice_models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    kind TEXT NOT NULL,
+                    location TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    voice TEXT NOT NULL DEFAULT '',
+                    base_url TEXT NOT NULL DEFAULT '',
+                    api_key TEXT NOT NULL DEFAULT '',
+                    language TEXT NOT NULL DEFAULT 'auto',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE voice_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    stt_provider TEXT NOT NULL,
+                    stt_model TEXT NOT NULL,
+                    stt_base_url TEXT NOT NULL DEFAULT '',
+                    stt_api_key TEXT NOT NULL DEFAULT '',
+                    stt_language TEXT NOT NULL DEFAULT 'auto',
+                    tts_provider TEXT NOT NULL,
+                    tts_model TEXT NOT NULL,
+                    tts_voice TEXT NOT NULL DEFAULT '',
+                    tts_base_url TEXT NOT NULL DEFAULT '',
+                    tts_api_key TEXT NOT NULL DEFAULT '',
+                    tts_language TEXT NOT NULL DEFAULT 'en-US',
+                    stt_model_id INTEGER REFERENCES voice_models(id),
+                    tts_model_id INTEGER REFERENCES voice_models(id),
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE builtin_agent_settings (
+                    agent_key TEXT PRIMARY KEY,
+                    model TEXT NOT NULL,
+                    model_id INTEGER REFERENCES models(id),
+                    generation_model_id INTEGER REFERENCES models(id),
+                    mcp_server_id INTEGER,
+                    automatic_knowledge_enabled INTEGER NOT NULL DEFAULT 1,
+                    embedding_enabled INTEGER NOT NULL DEFAULT 0,
+                    embedding_model_id INTEGER REFERENCES embedding_models(id),
+                    confirm_tools TEXT NOT NULL DEFAULT '[]',
+                    connected INTEGER NOT NULL DEFAULT 1,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO models VALUES
+                    (1, 'Shared name', 'text-v1', 'Ollama', 'http://localhost:11434/v1', '', 'now');
+                INSERT INTO embedding_models VALUES
+                    (4, 'Shared name', 'cloud', 'openai_compatible', 'embed-v1',
+                     'https://embed.example/v1', 'embed-key', 768, 'connected',
+                     'now', '', 'now', 'now');
+                INSERT INTO voice_models VALUES
+                    (7, 'Speech model', 'tts', 'cloud', 'openai_compatible', 'speech-v1',
+                     'calm', 'https://voice.example/v1', 'voice-key', 'auto', 'now', 'now'),
+                    (8, 'Transcription model', 'stt', 'cloud', 'openai_compatible',
+                     'whisper-v1', '', 'https://stt.example/v1', 'stt-key', 'fr', 'now', 'now');
+                INSERT INTO voice_settings VALUES
+                    (1, 'openai_compatible', 'whisper-v1', 'https://stt.example/v1',
+                     'stt-key', 'fr', 'openai_compatible', 'speech-v1', 'calm',
+                     'https://voice.example/v1', 'voice-key', 'auto', 8, 7, 'now');
+                INSERT INTO builtin_agent_settings
+                    (agent_key, model, model_id, embedding_enabled,
+                     embedding_model_id, updated_at)
+                VALUES ('knowledge', 'text-v1', 1, 1, 4, 'now');
+                """
+            )
+            conn.commit()
+
+        db.init()
+
+        catalog = db.list_model_catalog()
+        self.assertEqual(len(catalog), 4)
+        self.assertEqual(len({item["id"] for item in catalog}), 4)
+        self.assertEqual(db.list_models()[0]["id"], 1)
+        embedding = db.list_embedding_models()[0]
+        self.assertEqual(embedding["dimensions"], 768)
+        self.assertEqual(embedding["api_key"], "embed-key")
+        self.assertNotEqual(embedding["name"], "Shared name")
+        knowledge = next(
+            item for item in db.list_builtin_agents() if item["key"] == "knowledge"
+        )
+        self.assertEqual(knowledge["embedding_model_id"], embedding["id"])
+        settings = db.get_voice_settings()
+        self.assertEqual(settings["stt"]["name"], "Transcription model")
+        self.assertEqual(settings["tts"]["name"], "Speech model")
+        self.assertEqual(db.get_voice_runtime("tts")["api_key"], "voice-key")
+        with db._connect() as conn:
+            tables = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            self.assertNotIn("embedding_models", tables)
+            self.assertNotIn("voice_models", tables)
+            self.assertEqual(
+                {
+                    row["table"]
+                    for row in conn.execute("PRAGMA foreign_key_list(voice_settings)")
+                    if row["from"] in {"stt_model_id", "tts_model_id"}
+                },
+                {"speech_model_details", "transcription_model_details"},
+            )
+            self.assertIn(
+                "embedding_model_details",
+                {
+                    row["table"]
+                    for row in conn.execute(
+                        "PRAGMA foreign_key_list(builtin_agent_settings)"
+                    )
+                    if row["from"] == "embedding_model_id"
+                },
+            )
+            self.assertIsNone(conn.execute("PRAGMA foreign_key_check").fetchone())
 
 
 class EmbeddingAdapterTests(unittest.TestCase):

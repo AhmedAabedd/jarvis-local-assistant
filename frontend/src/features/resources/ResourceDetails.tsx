@@ -64,9 +64,7 @@ export function ResourceDetails({
     const credentials =
       server.transport === 'stdio'
         ? [
-            ...Object.keys(objectValue(server.env)).filter(
-              (name) => !(server.managed && name === 'GBRAIN_HOME'),
-            ),
+            ...Object.keys(objectValue(server.env)),
             ...(server.credential_files || []).map((file) => file.env_var),
           ]
         : Object.keys(objectValue(server.headers))

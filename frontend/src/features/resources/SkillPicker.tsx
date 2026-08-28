@@ -22,13 +22,19 @@ export function SkillPicker({
   const [search, setSearch] = useState('')
   const visible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase()
-    return skills.filter(
-      (skill) =>
-        !query ||
-        skill.name.toLocaleLowerCase().includes(query) ||
-        skill.description.toLocaleLowerCase().includes(query),
-    )
-  }, [search, skills])
+    return skills
+      .filter(
+        (skill) =>
+          !query ||
+          skill.name.toLocaleLowerCase().includes(query) ||
+          skill.description.toLocaleLowerCase().includes(query),
+      )
+      .sort((left, right) => {
+        const selectedOrder =
+          Number(selected.has(Number(right.id))) - Number(selected.has(Number(left.id)))
+        return selectedOrder || left.name.localeCompare(right.name)
+      })
+  }, [search, selected, skills])
 
   if (loading) return <div className="guidance">Loading installed skills…</div>
   if (error) return <div className="guidance guidance--error">{error}</div>

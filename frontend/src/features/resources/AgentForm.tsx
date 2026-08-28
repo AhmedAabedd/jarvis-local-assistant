@@ -1,14 +1,5 @@
-import {
-  BookOpen,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Plus,
-  Settings2,
-  ShieldCheck,
-  Wrench,
-} from 'lucide-react'
-import { useMemo, useState, type FormEvent } from 'react'
+import { BookOpen, Check, ChevronLeft, Settings2, ShieldCheck, Wrench } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { McpServer, ModelRecord, Subagent, SubagentMcpSource } from '../../api/types'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Button } from '../../components/ui/Button'
@@ -36,6 +27,7 @@ export function AgentForm({
   formId,
   busy,
   onSubmit,
+  onDirtyChange,
 }: {
   item?: Subagent
   models: ModelRecord[]
@@ -43,7 +35,9 @@ export function AgentForm({
   formId: string
   busy?: boolean
   onSubmit: (body: object) => Promise<void>
+  onDirtyChange?: (dirty: boolean) => void
 }) {
+  const formRef = useRef<HTMLFormElement>(null)
   const existingConfirm = stringList(
     item?.confirm_tools,
     item ? (item.confirm_tool_calls ? ['*'] : []) : ['*'],
@@ -77,6 +71,20 @@ export function AgentForm({
     [toolGroups, sources],
   )
   const enabledNames = useMemo(() => enabledTools.map((tool) => tool.name), [enabledTools])
+  const selectedSourceIds = useMemo(
+    () => new Set(sources.map((source) => Number(source.mcp_server_id))),
+    [sources],
+  )
+  const selectedCatalogIsComplete = useMemo(
+    () =>
+      sources.every((source) => {
+        const group = toolGroups.find(
+          (entry) => Number(entry.server.id) === Number(source.mcp_server_id),
+        )
+        return Boolean(group && !group.loading && !group.error && group.tools.length)
+      }),
+    [sources, toolGroups],
+  )
   const confirmedSelection = useMemo(
     () => expandLegacyToolRules([...confirmed], enabledTools),
     [confirmed, enabledTools],
@@ -86,15 +94,111 @@ export function AgentForm({
     [deduped, enabledTools],
   )
 
+  const canonicalSources = (values: SubagentMcpSource[]) =>
+    values
+      .map((source) => ({
+        mcp_server_id: Number(source.mcp_server_id),
+        enabled_tools:
+          source.enabled_tools === null
+            ? null
+            : [...(source.enabled_tools || [])].map(String).sort(),
+      }))
+      .sort((left, right) => left.mcp_server_id - right.mcp_server_id)
+
+  const dirty = useMemo(() => {
+    if (!item) return false
+    const originalSources = item.mcp_sources?.length
+      ? item.mcp_sources
+      : item.mcp_server_id
+        ? [{ mcp_server_id: Number(item.mcp_server_id), enabled_tools: item.enabled_tools }]
+        : []
+    const nextConfirm = mode === 'all' ? ['*'] : mode === 'selected' ? [...confirmed].sort() : []
+    const originalConfirm = [...existingConfirm].sort()
+    const nextDedupe = [...deduped].sort()
+    const originalDedupe = stringList(item.dedupe_tools).sort()
+    const nextSkills = [...selectedSkills].sort((left, right) => left - right)
+    const originalSkills = [...(item.skill_ids || [])]
+      .map(Number)
+      .sort((left, right) => left - right)
+    const iconDirty = icon !== undefined && (icon !== '' || Boolean(item.has_icon))
+    return (
+      name.trim() !== item.name ||
+      description.trim() !== item.description ||
+      systemPrompt.trim() !== item.system_prompt ||
+      modelId !== Number(item.model_id || 0) ||
+      JSON.stringify(canonicalSources(sources)) !==
+        JSON.stringify(canonicalSources(originalSources)) ||
+      JSON.stringify(nextSkills) !== JSON.stringify(originalSkills) ||
+      JSON.stringify(nextConfirm) !== JSON.stringify(originalConfirm) ||
+      JSON.stringify(nextDedupe) !== JSON.stringify(originalDedupe) ||
+      iconDirty
+    )
+  }, [
+    confirmed,
+    deduped,
+    description,
+    existingConfirm,
+    icon,
+    item,
+    mode,
+    modelId,
+    name,
+    selectedSkills,
+    sources,
+    systemPrompt,
+  ])
+
+  useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange])
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
+
+  const savedRulesForSelectedSources = (rules: Set<string>) =>
+    [...rules].filter((rule) => {
+      const separator = rule.indexOf(':')
+      if (separator < 1) return true
+      const serverId = Number(rule.slice(0, separator))
+      return !Number.isFinite(serverId) || selectedSourceIds.has(serverId)
+    })
+
+  const pages: Array<{ id: FormPage; label: string }> = [
+    { id: 'configuration', label: 'Configuration' },
+    { id: 'skills', label: 'Skills' },
+    { id: 'tools', label: 'Tools' },
+    { id: 'security', label: 'Security' },
+  ]
+  const currentPageIndex = pages.findIndex((entry) => entry.id === page)
+  const hasIcon = Boolean(icon) || (icon === undefined && Boolean(item?.has_icon))
+  const openPage = (nextPage: FormPage) => {
+    const nextPageIndex = pages.findIndex((entry) => entry.id === nextPage)
+    if (nextPageIndex < 0) return
+    const pageNumber = nextPageIndex + 1
+    setError('')
+    if (!item && pageNumber > 1) {
+      if (!name.trim()) return setError('Enter a name for the subagent.')
+      if (!description.trim()) return setError('Enter a description for the subagent.')
+      if (!modelId) return setError('Choose a model for the subagent.')
+    }
+    setPage(nextPage)
+    setFurthestPage((current) => Math.max(current, pageNumber))
+  }
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setError('')
+    if (!item && page !== 'security') {
+      const nextPage = pages[currentPageIndex + 1]?.id
+      if (nextPage) openPage(nextPage)
+      return
+    }
     try {
       if (!name.trim()) throw new Error('Enter a name for the subagent.')
       if (!description.trim()) throw new Error('Enter a description for the subagent.')
       if (!modelId) throw new Error('Choose a model for the subagent.')
-      const confirmedTools = [...confirmedSelection].filter((tool) => enabledNames.includes(tool))
-      const dedupedTools = [...dedupedSelection].filter((tool) => enabledNames.includes(tool))
+      const confirmedTools = selectedCatalogIsComplete
+        ? [...confirmedSelection].filter((tool) => enabledNames.includes(tool))
+        : savedRulesForSelectedSources(confirmedSelection)
+      const dedupedTools = selectedCatalogIsComplete
+        ? [...dedupedSelection].filter((tool) => enabledNames.includes(tool))
+        : savedRulesForSelectedSources(dedupedSelection)
       if (sources.length && mode === 'selected' && !confirmedTools.length) {
         setPage('security')
         throw new Error(
@@ -129,27 +233,17 @@ export function AgentForm({
     }
   }
 
-  const pages: Array<{ id: FormPage; label: string }> = [
-    { id: 'configuration', label: 'Configuration' },
-    { id: 'skills', label: 'Skills' },
-    { id: 'tools', label: 'Tools' },
-    { id: 'security', label: 'Security' },
-  ]
-  const currentPageIndex = pages.findIndex((entry) => entry.id === page)
-  const hasIcon = Boolean(icon) || (icon === undefined && Boolean(item?.has_icon))
-  const openPage = (nextPage: FormPage, pageNumber: number) => {
-    setError('')
-    if (!item && pageNumber > 1) {
-      if (!name.trim()) return setError('Enter a name for the subagent.')
-      if (!description.trim()) return setError('Enter a description for the subagent.')
-      if (!modelId) return setError('Choose a model for the subagent.')
-    }
-    setPage(nextPage)
-    setFurthestPage((current) => Math.max(current, pageNumber))
-  }
+  useEffect(() => {
+    formRef.current?.closest('.modal__body')?.scrollTo({ top: 0 })
+  }, [page])
 
   return (
-    <form id={formId} className="subagent-edit-form" onSubmit={submit}>
+    <form
+      ref={formRef}
+      id={formId}
+      className={`subagent-edit-form ${item ? 'subagent-edit-form--editing' : 'subagent-edit-form--creating'} ${page === 'skills' || page === 'tools' ? 'subagent-edit-form--list-page' : ''}`}
+      onSubmit={submit}
+    >
       {item ? (
         <SectionTabs
           className="subagent-form-tabs"
@@ -171,10 +265,7 @@ export function AgentForm({
             },
             { id: 'security', label: 'Security', icon: <ShieldCheck size={14} /> },
           ]}
-          onChange={(value) => {
-            const index = pages.findIndex((entry) => entry.id === value)
-            openPage(value as FormPage, index + 1)
-          }}
+          onChange={(value) => openPage(value as FormPage)}
         />
       ) : (
         <nav className="subagent-wizard__steps" aria-label="Creation progress">
@@ -186,7 +277,7 @@ export function AgentForm({
                 type="button"
                 key={entry.id}
                 aria-current={page === entry.id ? 'step' : undefined}
-                onClick={() => openPage(entry.id, pageNumber)}
+                onClick={() => openPage(entry.id)}
               >
                 <span className="subagent-wizard__step-marker">
                   {furthestPage > pageNumber ? <Check size={13} /> : pageNumber}
@@ -199,15 +290,28 @@ export function AgentForm({
       )}
 
       {page === 'configuration' && (
-        <div className="form-grid subagent-wizard__page">
+        <div className="form-grid subagent-wizard__page subagent-wizard__page--configuration">
           {!models.length && <div className="guidance">Create a model first.</div>}
           {!servers.length && (
             <div className="guidance">
               No MCP servers are connected. You can still create a prompt-only subagent.
             </div>
           )}
-          <Field full label="Name" hint="Use a unique name for this specific role.">
+          <Field label="Name" hint="Use a unique name for this specific role.">
             <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
+          </Field>
+          <Field label="Model" hint="Choose the saved model this subagent will use.">
+            <select
+              value={modelId || ''}
+              onChange={(event) => setModelId(Number(event.target.value))}
+            >
+              <option value="">Choose a model…</option>
+              {models.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name} — {model.provider}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field full label="Icon" hint="Square PNG, JPEG, WebP, or GIF smaller than 512 KB.">
             <div className="subagent-wizard__icon-field">
@@ -258,25 +362,12 @@ export function AgentForm({
               rows={5}
             />
           </Field>
-          <Field label="Model">
-            <select
-              value={modelId || ''}
-              onChange={(event) => setModelId(Number(event.target.value))}
-            >
-              <option value="">Choose a model…</option>
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name} — {model.provider}
-                </option>
-              ))}
-            </select>
-          </Field>
         </div>
       )}
 
       {page === 'tools' && (
-        <div className="subagent-wizard__page">
-          <p className="subagent-wizard__section-description">
+        <div className="subagent-wizard__page subagent-wizard__page--tools">
+          <p className={`${item ? '' : 'guidance '}subagent-wizard__section-description`}>
             Choose tools from available MCP servers to connect them to your subagent.
           </p>
           <MultiServerToolPicker
@@ -289,8 +380,8 @@ export function AgentForm({
       )}
 
       {page === 'skills' && (
-        <div className="subagent-wizard__page">
-          <p className="subagent-wizard__section-description">
+        <div className="subagent-wizard__page subagent-wizard__page--skills">
+          <p className={`${item ? '' : 'guidance '}subagent-wizard__section-description`}>
             Select the installed skills this subagent can discover and activate.
           </p>
           <SkillPicker
@@ -370,24 +461,29 @@ export function AgentForm({
           {currentPageIndex > 0 && (
             <Button
               type="button"
-              icon={<ChevronLeft size={13} />}
+              className="compact-form-back-button"
+              icon={<ChevronLeft size={15} />}
+              aria-label={`Back to ${pages[currentPageIndex - 1].label.toLowerCase()}`}
+              title="Back"
               disabled={busy}
-              onClick={() => openPage(pages[currentPageIndex - 1].id, currentPageIndex)}
-            >
-              Previous
-            </Button>
+              onClick={() => openPage(pages[currentPageIndex - 1].id)}
+            />
           )}
           {currentPageIndex < pages.length - 1 ? (
             <Button
+              key="next-page"
               type="button"
               variant="primary"
               disabled={busy}
-              onClick={() => openPage(pages[currentPageIndex + 1].id, currentPageIndex + 2)}
+              onClick={(event) => {
+                event.preventDefault()
+                openPage(pages[currentPageIndex + 1].id)
+              }}
             >
-              Next <ChevronRight size={13} />
+              Next
             </Button>
           ) : (
-            <Button type="submit" variant="primary" icon={<Plus size={14} />} busy={busy}>
+            <Button key="create-subagent" type="submit" variant="primary" busy={busy}>
               Create subagent
             </Button>
           )}

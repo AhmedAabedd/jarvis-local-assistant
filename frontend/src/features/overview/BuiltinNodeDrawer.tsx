@@ -67,7 +67,7 @@ export function BuiltinNodeDrawer({
 
         <div className="node-detail-model">
           <Cpu size={12} />
-          <small>{agent.key === 'media' ? 'Analysis model' : 'Model'}</small>
+          <small>Model</small>
           <strong title={agent.model || ''}>{agent.model || 'Installation fallback'}</strong>
         </div>
 

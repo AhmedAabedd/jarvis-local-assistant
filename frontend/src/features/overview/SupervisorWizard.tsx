@@ -63,35 +63,31 @@ export function SupervisorWizard({
   const dirty =
     modelId !== Number(supervisor?.model_id || 0) ||
     JSON.stringify(selectedSkillIds) !== JSON.stringify(savedSkillIds)
-  const discardChanges = () => {
-    onModelChange(Number(supervisor?.model_id || 0))
-    setSelectedSkills(new Set(savedSkillIds))
-  }
 
   return (
     <Modal
       open={open}
       wide
-      className="modal--supervisor-wizard"
+      integrated
+      className="modal--compact-write-form modal--subagent-write-form modal--supervisor-wizard"
       title={supervisor?.name || 'Mounir'}
       description={
         supervisor?.description ||
         'Understands your request, uses local computer tools, and coordinates the right specialist for focused work.'
       }
       onClose={onClose}
-      footer={
-        <>
-          {dirty && <Button onClick={discardChanges}>Discard</Button>}
-          <Button
-            variant="primary"
-            icon={<Save size={14} />}
-            busy={busy}
-            disabled={!modelId || !dirty}
-            onClick={() => onSave(selectedSkillIds)}
-          >
-            Save changes
-          </Button>
-        </>
+      headingActions={
+        <Button
+          type="button"
+          className="modal-heading-save-button"
+          variant="primary"
+          icon={<Save size={15} />}
+          busy={busy}
+          disabled={!modelId || !dirty}
+          aria-label="Save Mounir changes"
+          title="Save changes"
+          onClick={() => onSave(selectedSkillIds)}
+        />
       }
     >
       <div className="supervisor-wizard">

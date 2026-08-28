@@ -1,7 +1,7 @@
-"""Contract and managed MCP defaults for Mounir's local knowledge service.
+"""Contract and runtime defaults for Mounir's local knowledge service.
 
-GBrain-specific behavior stays isolated here. User-created MCP servers remain
-fully dynamic and are never interpreted as Knowledge backends.
+GBrain-specific behavior stays isolated under Knowledge. User-created MCP
+servers remain fully dynamic and are never interpreted as system services.
 """
 
 from __future__ import annotations
@@ -14,11 +14,10 @@ from . import config
 PROTOCOL_NAME = "GBrain local MCP"
 PROTOCOL_VERSION = 1
 
-BUILTIN_SETUP_TYPE = "builtin_gbrain"
+# Used only to recognize and remove rows created by the former managed-MCP
+# representation during database upgrades.
+LEGACY_MCP_SETUP_TYPE = "builtin_gbrain"
 BUILTIN_SERVER_NAME = "GBrain"
-BUILTIN_SERVER_DESCRIPTION = (
-    "Built-in local knowledge service used exclusively by the Knowledge subagent."
-)
 BUILTIN_SERVER_COMMAND = "gbrain serve"
 BUILTIN_SETUP_COMMAND = "python -m mounir.setup_gbrain"
 

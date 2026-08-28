@@ -16,6 +16,11 @@ const ResourcesPage = lazy(() =>
     default: module.ResourcesPage,
   })),
 )
+const McpServersPage = lazy(() =>
+  import('../features/resources/McpServersPage').then((module) => ({
+    default: module.McpServersPage,
+  })),
+)
 const WorkflowsPage = lazy(() =>
   import('../features/workflows/WorkflowsPage').then((module) => ({
     default: module.WorkflowsPage,
@@ -49,10 +54,10 @@ export function App() {
         <Route path="/" element={<ChatPage />} />
         <Route path="/admin" element={<StudioLayout />}>
           <Route index element={<OverviewPage />} />
-          <Route path="models" element={<ResourcesPage kind="models" />} />
-          <Route path="servers" element={<ResourcesPage kind="servers" />} />
+          <Route path="models" element={<ResourcesPage key="models" kind="models" />} />
+          <Route path="servers" element={<McpServersPage />} />
           <Route path="skills" element={<SkillsPage />} />
-          <Route path="agents" element={<ResourcesPage kind="agents" />} />
+          <Route path="agents" element={<ResourcesPage key="agents" kind="agents" />} />
           <Route path="workflows" element={<WorkflowsPage />} />
           <Route path="voice" element={<VoicePage />} />
           <Route path="telegram" element={<TelegramPage />} />

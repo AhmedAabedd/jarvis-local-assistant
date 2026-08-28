@@ -5,6 +5,8 @@ import type {
   HeartbeatSettings,
   HeartbeatTask,
   McpServer,
+  McpRegistryPage,
+  McpRegistryServer,
   ModelRecord,
   EmbeddingModelRecord,
   Notification,
@@ -24,6 +26,7 @@ import type {
   TelegramSettings,
   TtsVoiceCatalog,
   VoiceSettings,
+  VoiceModelRecord,
   WhatsAppSettings,
   Workflow,
   WorkflowNodePlacement,
@@ -80,6 +83,10 @@ export const api = {
     list: () => request<BuiltinAgent[]>('/api/builtin-agents'),
     update: (key: string, body: object) =>
       request<BuiltinAgent>(`/api/builtin-agents/${key}`, json('PUT', body)),
+    setupKnowledge: () =>
+      request<BuiltinAgent>('/api/builtin-agents/knowledge/service/setup', json('POST')),
+    testKnowledge: () =>
+      request<BuiltinAgent>('/api/builtin-agents/knowledge/service/test', json('POST')),
   },
   models: {
     list: () => request<ModelRecord[]>('/api/models'),
@@ -87,6 +94,10 @@ export const api = {
     update: (id: number, body: object) =>
       request<ModelRecord>(`/api/models/${id}`, json('PUT', body)),
     remove: (id: number) => request(`/api/models/${id}`, json('DELETE')),
+  },
+  modelCatalog: {
+    list: () =>
+      request<Array<ModelRecord | EmbeddingModelRecord | VoiceModelRecord>>('/api/model-catalog'),
   },
   embeddingModels: {
     list: () => request<EmbeddingModelRecord[]>('/api/embedding-models'),
@@ -99,6 +110,13 @@ export const api = {
       request<EmbeddingModelRecord>(`/api/embedding-models/${id}/test`, json('POST')),
     discover: (body: object) =>
       request<{ models: string[] }>('/api/embedding-models/discover', json('POST', body)),
+  },
+  voiceModels: {
+    list: () => request<VoiceModelRecord[]>('/api/voice-models'),
+    create: (body: object) => request<VoiceModelRecord>('/api/voice-models', json('POST', body)),
+    update: (id: number, body: object) =>
+      request<VoiceModelRecord>(`/api/voice-models/${id}`, json('PUT', body)),
+    remove: (id: number) => request(`/api/voice-models/${id}`, json('DELETE')),
   },
   servers: {
     list: () => request<McpServer[]>('/api/mcp-servers'),
@@ -121,6 +139,20 @@ export const api = {
         method: 'POST',
         body,
       })
+    },
+  },
+  mcpRegistry: {
+    providers: () =>
+      request<Array<{ id: string; name: string; url: string }>>('/api/mcp-registry/providers'),
+    browse: (query = '', cursor = '') => {
+      const params = new URLSearchParams()
+      if (query) params.set('query', query)
+      if (cursor) params.set('cursor', cursor)
+      return request<McpRegistryPage>(`/api/mcp-registry?${params}`)
+    },
+    details: (reference: string, version = 'latest') => {
+      const params = new URLSearchParams({ reference, version })
+      return request<McpRegistryServer>(`/api/mcp-registry/details?${params}`)
     },
   },
   skills: {

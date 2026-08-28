@@ -1,4 +1,4 @@
-"""Knowledge specialist backed by Mounir's managed local GBrain service.
+"""Knowledge specialist backed by its local GBrain service.
 
 The shipped declarations identify the small native tool surface Mounir uses.
 Runtime argument schemas always come from the installed GBrain version.
@@ -48,7 +48,7 @@ when complete or exact information is required.
 
 SYSTEM_PROMPT = """\
 You are the Knowledge specialist. You are the only specialist responsible for
-the assistant's durable memory, which is stored by the managed local GBrain MCP
+the assistant's durable memory, which is stored by Knowledge's local GBrain MCP
 service.
 
 WORKING RULES
@@ -406,7 +406,7 @@ async def _run_async(
 
 
 def run(task: str, allowed_tools: list[str] | None = None) -> str:
-    """Run a delegated knowledge task against the managed local GBrain service."""
+    """Run a delegated knowledge task against Knowledge's local GBrain service."""
     from .. import db
 
     spec = db.get_builtin_agent_server_spec("knowledge")
