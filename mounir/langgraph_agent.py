@@ -29,6 +29,7 @@ from . import (
     agent_skills,
     builtin_agents,
     config as cfg,
+    context_history,
     db,
     graph_runtime,
     llm,
@@ -57,6 +58,11 @@ _DELEGATES = {
     "delegate_to_media": "media",
     "delegate_to_knowledge": "knowledge",
     "delegate_to_system": "system",
+    "delegate_to_facebook": "facebook",
+    "delegate_to_messenger": "messenger",
+    "delegate_to_instagram": "instagram",
+    "delegate_to_threads": "threads",
+    "delegate_to_whatsapp": "whatsapp",
 }
 
 
@@ -252,35 +258,44 @@ def _specialist_result(
     )
 
 
-def _media(state: TurnState) -> Command:
+def _media(
+    state: TurnState,
+    history: context_history.ContextHistory | None = None,
+) -> Command:
     enabled = db.is_builtin_agent_enabled("media")
     return _specialist_result(
         state,
         "delegate_to_media",
         "media",
-        run_media,
+        lambda task: run_media(task, context_history_store=history),
         None if enabled else "Files and Media is inactive and cannot be used.",
     )
 
 
-def _knowledge(state: TurnState) -> Command:
+def _knowledge(
+    state: TurnState,
+    history: context_history.ContextHistory | None = None,
+) -> Command:
     enabled = db.is_builtin_agent_enabled("knowledge")
     return _specialist_result(
         state,
         "delegate_to_knowledge",
         "knowledge",
-        run_knowledge,
+        lambda task: run_knowledge(task, context_history_store=history),
         None if enabled else "The Knowledge agent is inactive and cannot be used.",
     )
 
 
-def _system(state: TurnState) -> Command:
+def _system(
+    state: TurnState,
+    history: context_history.ContextHistory | None = None,
+) -> Command:
     enabled = db.is_builtin_agent_enabled("system")
     return _specialist_result(
         state,
         "delegate_to_system",
         "system",
-        run_system,
+        lambda task: run_system(task, context_history_store=history),
         None if enabled else "The System agent is inactive and cannot be used.",
     )
 
@@ -289,6 +304,7 @@ def _make_mcp_node(
     spec: dict,
     all_specs: list[dict],
     protected_attempts: set[str],
+    history: context_history.ContextHistory | None,
 ):
     tool_name = mcp_agents.delegate_tool_name(spec["name"])
 
@@ -308,6 +324,7 @@ def _make_mcp_node(
                 spec,
                 protected_attempts,
                 all_specs=all_specs,
+                context_history_store=history,
             ),
             unavailable,
         )
@@ -318,6 +335,7 @@ def _make_mcp_node(
 def _make_workflow_node(
     placement: dict,
     protected_attempts: set[str],
+    history: context_history.ContextHistory | None,
 ):
     tool_name = workflow_runtime.delegate_tool_name(placement)
 
@@ -330,13 +348,17 @@ def _make_workflow_node(
                 int(placement["child_workflow_id"]),
                 task,
                 protected_attempts,
+                context_history_store=history,
             ),
         )
 
     return node
 
 
-def _make_heartbeat_builtin_node(spec: dict):
+def _make_heartbeat_builtin_node(
+    spec: dict,
+    history: context_history.ContextHistory | None,
+):
     key = spec["builtin_key"]
     tool_name = f"delegate_to_{key}"
     task_prompt = str(spec.get("task_prompt") or "").strip()
@@ -350,7 +372,25 @@ def _make_heartbeat_builtin_node(spec: dict):
                 key,
                 "\n\n".join(part for part in (task, task_prompt) if part),
                 spec["allowed_tools"],
+                context_history_store=history,
             ),
+        )
+
+    return node
+
+
+def _make_direct_builtin_node(key: str):
+    tool_name = f"delegate_to_{key}"
+    definition = builtin_agents.definition(key) or {"name": key.title()}
+
+    def node(state: TurnState) -> Command:
+        enabled = db.is_builtin_agent_enabled(key)
+        return _specialist_result(
+            state,
+            tool_name,
+            definition["name"],
+            lambda task: builtin_agents.run_direct(key, task),
+            None if enabled else f"The {definition['name']} agent is inactive and cannot be used.",
         )
 
     return node
@@ -363,6 +403,7 @@ def _compile_graph(
     *,
     loaded_dynamic: list[dict] | None = None,
     skill_tool: BaseTool | None = None,
+    context_history_store: context_history.ContextHistory | None = None,
 ):
     scoped = scoped_targets is not None
     dynamic = (
@@ -469,30 +510,31 @@ def _compile_graph(
     )
     graph.add_node("declined", _declined)
     graph.add_node("force_final", lambda state: _force_final(state, model))
-    for key, normal_node in {
-        "media": _media,
-        "knowledge": _knowledge,
-        "system": _system,
-    }.items():
-        if key not in enabled_builtins:
-            continue
+    normal_nodes = {
+        "media": lambda state: _media(state, context_history_store),
+        "knowledge": lambda state: _knowledge(state, context_history_store),
+        "system": lambda state: _system(state, context_history_store),
+    }
+    for key in enabled_builtins:
         graph.add_node(
             key,
-            _make_heartbeat_builtin_node(scoped_builtins[key])
+            _make_heartbeat_builtin_node(scoped_builtins[key], context_history_store)
             if scoped
-            else normal_node,
+            else normal_nodes.get(key, _make_direct_builtin_node(key)),
         )
 
     protected_attempts: set[str] = set()
     for spec in root_specs:
         graph.add_node(
             mcp_agents.node_name(spec["name"]),
-            _make_mcp_node(spec, dynamic, protected_attempts),
+            _make_mcp_node(spec, dynamic, protected_attempts, context_history_store),
         )
     for placement in workflow_placements:
         graph.add_node(
             workflow_runtime.node_name(placement),
-            _make_workflow_node(placement, protected_attempts),
+            _make_workflow_node(
+                placement, protected_attempts, context_history_store
+            ),
         )
 
     graph.add_edge(START, "supervisor")
@@ -525,6 +567,7 @@ class Agent:
         use_tools: bool = True,
         scoped_targets: list[dict] | None = None,
         automatic_knowledge: bool | None = None,
+        subagent_history: context_history.ContextHistory | None = None,
     ) -> None:
         db.init()
         if conversation is None:
@@ -536,6 +579,7 @@ class Agent:
         self.model = model
         self.use_tools = use_tools
         self.scoped_targets = scoped_targets
+        self.subagent_history = subagent_history or context_history.ContextHistory()
         self.automatic_knowledge = (
             self._profile_managed_prompt
             if automatic_knowledge is None
@@ -630,6 +674,7 @@ class Agent:
             self.scoped_targets,
             loaded_dynamic=dynamic_specs,
             skill_tool=skill_tool,
+            context_history_store=self.subagent_history,
         )
         result_state: TurnState | None = None
         streamed: list[str] = []
@@ -659,6 +704,11 @@ class Agent:
             reply = "".join(streamed).strip()
             if reply:
                 self.conversation.add_assistant(reply)
+
+    def reset(self) -> None:
+        """Clear the supervisor and specialist conversations together."""
+        self.conversation.reset()
+        self.subagent_history.reset()
 
 
 def build_graph():

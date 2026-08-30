@@ -25,8 +25,10 @@ import base64
 import io
 import json
 import os
+import secrets
 import shlex
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -43,7 +45,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -56,10 +58,12 @@ from mounir import (
     embedding_models,
     gbrain_runtime,
     llm,
+    meta_social,
     mcp_registry,
     mcp_oauth,
     skill_store,
     trace,
+    whatsapp_business,
 )
 from mounir import mcp_agents
 from mounir import stt, tts, audio as audio_mod, tools
@@ -978,6 +982,363 @@ async def receive_whatsapp_webhook(
     if payload.get("object") != "whatsapp_business_account":
         return Response(content="Unsupported webhook object", status_code=400)
     background_tasks.add_task(whatsapp_service.handle_webhook, payload)
+    return Response(content="EVENT_RECEIVED", media_type="text/plain")
+
+
+# -----------------------------------------------------------------------------
+# Official Meta social app connections
+# -----------------------------------------------------------------------------
+
+
+def _meta_capabilities(platform: str, values) -> list[str]:
+    definition = meta_social.platform_definition(platform)
+    allowed = {
+        item["id"] for item in definition["capabilities"]
+        if item.get("available", True)
+    }
+    requested = list(dict.fromkeys(str(item).strip() for item in (values or []) if str(item).strip()))
+    unknown = [item for item in requested if item not in allowed]
+    if unknown:
+        raise ValueError(f"Unsupported {definition['label']} capability: {unknown[0]}")
+    return requested
+
+
+def _safe_meta_error(exc: Exception, connection: dict | None = None) -> str:
+    message = str(exc) or exc.__class__.__name__
+    for secret_value in (
+        str((connection or {}).get("app_secret") or ""),
+        str((connection or {}).get("access_token") or ""),
+    ):
+        if secret_value:
+            message = message.replace(secret_value, "[hidden credential]")
+    return message[:600]
+
+
+@app.get("/api/meta/platforms")
+async def get_meta_platforms():
+    return meta_social.platform_definitions()
+
+
+@app.get("/api/meta/connections")
+async def get_meta_connections(platform: str = ""):
+    try:
+        return db.list_meta_connections(platform or None)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/meta/connections")
+async def create_meta_connection(req: dict):
+    allowed = {
+        "platform", "name", "auth_strategy", "app_id", "app_secret",
+        "api_version", "redirect_uri", "requested_capabilities", "enabled",
+    }
+    fields = {key: value for key, value in req.items() if key in allowed}
+    try:
+        fields["requested_capabilities"] = _meta_capabilities(
+            fields.get("platform", ""), fields.get("requested_capabilities")
+        )
+        return db.create_meta_connection(**fields)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/meta/connections/{connection_id}")
+async def update_meta_connection(connection_id: int, req: dict):
+    current = db.get_meta_connection(connection_id)
+    if current is None:
+        return JSONResponse({"error": "Meta connection not found"}, status_code=404)
+    allowed = {
+        "name", "auth_strategy", "enabled", "app_id", "app_secret",
+        "api_version", "redirect_uri", "requested_capabilities",
+    }
+    fields = {key: value for key, value in req.items() if key in allowed}
+    try:
+        if "requested_capabilities" in fields:
+            fields["requested_capabilities"] = _meta_capabilities(
+                current["platform"], fields["requested_capabilities"]
+            )
+        return db.update_meta_connection(connection_id, **fields)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.delete("/api/meta/connections/{connection_id}")
+async def delete_meta_connection(connection_id: int):
+    if not db.delete_meta_connection(connection_id):
+        return JSONResponse({"error": "Meta connection not found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/api/meta/connections/{connection_id}/oauth/start")
+async def start_meta_oauth(connection_id: int, request: Request):
+    connection = db.get_meta_connection_runtime(connection_id)
+    if connection is None:
+        return JSONResponse({"error": "Meta connection not found"}, status_code=404)
+    if not connection["enabled"]:
+        return JSONResponse({"error": "Enable this connection before signing in."}, status_code=400)
+    if not connection["credentials_configured"]:
+        return JSONResponse({"error": "Add the Meta app ID and app secret first."}, status_code=400)
+    redirect_uri = connection.get("redirect_uri") or str(
+        request.url_for("meta_oauth_callback", connection_id=connection_id)
+    )
+    if not redirect_uri.startswith(("http://", "https://")):
+        return JSONResponse({"error": "OAuth redirect URI must use http:// or https://."}, status_code=400)
+    if connection["platform"] == "threads" and not redirect_uri.startswith("https://"):
+        return JSONResponse(
+            {"error": "Threads OAuth requires a registered HTTPS callback URL."},
+            status_code=400,
+        )
+    state = secrets.token_urlsafe(32)
+    try:
+        db.begin_meta_oauth(connection_id, state, redirect_uri, time.time() + 600)
+        return {
+            "authorization_url": meta_social.authorization_url(connection, redirect_uri, state),
+            "redirect_uri": redirect_uri,
+            "expires_in": 600,
+        }
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/api/meta/connections/{connection_id}/oauth/callback")
+async def meta_oauth_callback(
+    connection_id: int,
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+    error_description: str = "",
+):
+    connection = db.get_meta_connection_runtime(connection_id)
+    platform = str((connection or {}).get("platform") or "facebook")
+    target = f"/admin/meta/{platform}"
+    redirect_uri = db.consume_meta_oauth_state(connection_id, state, time.time())
+    if connection is None or redirect_uri is None:
+        if connection is not None:
+            db.update_meta_connection_status(
+                connection_id, "error", error="OAuth state expired or did not match."
+            )
+        return RedirectResponse(f"{target}?oauth=error&reason=state", status_code=303)
+    if error or not code:
+        message = error_description or error or "Meta sign-in was cancelled."
+        db.update_meta_connection_status(connection_id, "error", error=message)
+        return RedirectResponse(f"{target}?oauth=error&reason=cancelled", status_code=303)
+    try:
+        def connect_and_discover() -> list[dict]:
+            token = meta_social.exchange_code(connection, code, redirect_uri)
+            db.save_meta_oauth_result(connection_id, **token)
+            refreshed = db.get_meta_connection_runtime(connection_id) or connection
+            return meta_social.discover_accounts(refreshed)
+
+        accounts = await asyncio.to_thread(connect_and_discover)
+        db.replace_meta_accounts(connection_id, accounts)
+        db.update_meta_connection_status(connection_id, "connected", tested=True)
+        return RedirectResponse(f"{target}?oauth=connected", status_code=303)
+    except Exception as exc:
+        message = _safe_meta_error(exc, connection)
+        db.update_meta_connection_status(connection_id, "error", error=message, tested=True)
+        return RedirectResponse(f"{target}?oauth=error&reason=exchange", status_code=303)
+
+
+@app.post("/api/meta/connections/{connection_id}/test")
+async def test_meta_connection(connection_id: int):
+    connection = db.get_meta_connection_runtime(connection_id)
+    if connection is None:
+        return JSONResponse({"error": "Meta connection not found"}, status_code=404)
+    if not connection.get("access_token"):
+        return JSONResponse({"error": "Connect the Meta account with OAuth first."}, status_code=400)
+    try:
+        accounts = await asyncio.to_thread(meta_social.discover_accounts, connection)
+        db.replace_meta_accounts(connection_id, accounts)
+        db.update_meta_connection_status(connection_id, "connected", tested=True)
+        return db.get_meta_connection(connection_id)
+    except Exception as exc:
+        message = _safe_meta_error(exc, connection)
+        db.update_meta_connection_status(connection_id, "error", error=message, tested=True)
+        return JSONResponse({"error": message}, status_code=400)
+
+
+@app.patch("/api/meta/accounts/{account_id}")
+async def update_meta_account(account_id: int, req: dict):
+    try:
+        account = db.update_meta_account(account_id, enabled=req.get("enabled"))
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if account is None:
+        return JSONResponse({"error": "Meta account not found"}, status_code=404)
+    return account
+
+
+# WhatsApp Business agent connections are separate from the private channel.
+
+
+def _meta_whatsapp_public_state(connection: dict) -> dict:
+    item = dict(connection)
+    item["webhook_path"] = f"/api/meta/whatsapp/connections/{item['id']}/webhook"
+    return item
+
+
+def _safe_whatsapp_business_error(exc: Exception, connection: dict | None = None) -> str:
+    message = str(exc) or exc.__class__.__name__
+    for secret_value in (
+        str((connection or {}).get("app_secret") or ""),
+        str((connection or {}).get("access_token") or ""),
+    ):
+        if secret_value:
+            message = message.replace(secret_value, "[hidden credential]")
+    return message[:600]
+
+
+@app.get("/api/meta/whatsapp/connections")
+async def get_meta_whatsapp_connections():
+    return [
+        _meta_whatsapp_public_state(item)
+        for item in db.list_meta_whatsapp_connections()
+    ]
+
+
+@app.get("/api/meta/whatsapp/definition")
+async def get_meta_whatsapp_definition():
+    return whatsapp_business.platform_definition()
+
+
+@app.post("/api/meta/whatsapp/connections")
+async def create_meta_whatsapp_connection(req: dict):
+    allowed = {
+        "name", "enabled", "app_id", "access_token", "phone_number_id",
+        "business_account_id", "app_secret", "api_version", "requested_capabilities",
+    }
+    try:
+        fields = {key: value for key, value in req.items() if key in allowed}
+        fields["requested_capabilities"] = whatsapp_business.validate_capabilities(
+            fields.get("requested_capabilities")
+        )
+        item = db.create_meta_whatsapp_connection(
+            **fields
+        )
+        return _meta_whatsapp_public_state(item)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/meta/whatsapp/connections/{connection_id}")
+async def update_meta_whatsapp_business_connection(connection_id: int, req: dict):
+    allowed = {
+        "name", "enabled", "app_id", "access_token", "phone_number_id",
+        "business_account_id", "app_secret", "api_version",
+        "requested_capabilities", "regenerate_verify_token",
+    }
+    fields = {key: value for key, value in req.items() if key in allowed}
+    for secret_field in ("access_token", "app_secret"):
+        if secret_field in fields and not str(fields[secret_field] or "").strip():
+            fields.pop(secret_field)
+    try:
+        if "requested_capabilities" in fields:
+            fields["requested_capabilities"] = whatsapp_business.validate_capabilities(
+                fields["requested_capabilities"]
+            )
+        item = db.update_meta_whatsapp_connection(connection_id, **fields)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if item is None:
+        return JSONResponse({"error": "WhatsApp Business connection not found"}, status_code=404)
+    return _meta_whatsapp_public_state(item)
+
+
+@app.delete("/api/meta/whatsapp/connections/{connection_id}")
+async def delete_meta_whatsapp_business_connection(connection_id: int):
+    if not db.delete_meta_whatsapp_connection(connection_id):
+        return JSONResponse({"error": "WhatsApp Business connection not found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/api/meta/whatsapp/connections/{connection_id}/test")
+async def test_meta_whatsapp_business_connection(connection_id: int):
+    connection = db.get_meta_whatsapp_connection_runtime(connection_id)
+    if connection is None:
+        return JSONResponse({"error": "WhatsApp Business connection not found"}, status_code=404)
+    try:
+        identity = await asyncio.to_thread(whatsapp_business.test_connection, connection_id)
+        item = db.update_meta_whatsapp_connection_status(
+            connection_id,
+            "connected" if connection["webhook_verified"] else "configured",
+            tested=True,
+            display_phone_number=identity.get("display_phone_number", ""),
+            verified_name=identity.get("verified_name", ""),
+            granted_permissions=identity.get("granted_permissions", []),
+        )
+        return _meta_whatsapp_public_state(item or {})
+    except Exception as exc:
+        message = _safe_whatsapp_business_error(exc, connection)
+        db.update_meta_whatsapp_connection_status(
+            connection_id, "error", error=message, tested=True
+        )
+        return JSONResponse({"error": message}, status_code=400)
+
+
+@app.get("/api/meta/whatsapp/connections/{connection_id}/conversations")
+async def get_meta_whatsapp_business_conversations(connection_id: int):
+    if db.get_meta_whatsapp_connection(connection_id) is None:
+        return JSONResponse({"error": "WhatsApp Business connection not found"}, status_code=404)
+    return db.list_meta_whatsapp_conversations(connection_id)
+
+
+@app.get("/api/meta/whatsapp/connections/{connection_id}/messages")
+async def get_meta_whatsapp_business_messages(
+    connection_id: int, contact_phone: str = "", limit: int = 50
+):
+    if db.get_meta_whatsapp_connection(connection_id) is None:
+        return JSONResponse({"error": "WhatsApp Business connection not found"}, status_code=404)
+    return db.list_meta_whatsapp_messages(
+        connection_id, contact_phone=contact_phone, limit=limit
+    )
+
+
+@app.get("/api/meta/whatsapp/connections/{connection_id}/webhook")
+async def verify_meta_whatsapp_business_webhook(connection_id: int, request: Request):
+    connection = db.get_meta_whatsapp_connection_runtime(connection_id)
+    if connection is None:
+        return Response(content="Connection not found", status_code=404)
+    query = request.query_params
+    challenge = whatsapp_business.verify_webhook(
+        connection,
+        query.get("hub.mode", ""),
+        query.get("hub.verify_token", ""),
+        query.get("hub.challenge", ""),
+    )
+    if challenge is None:
+        return Response(content="Webhook verification failed", status_code=403)
+    db.update_meta_whatsapp_connection_status(
+        connection_id,
+        "connected" if connection["enabled"] else "disabled",
+        webhook_verified=True,
+    )
+    return Response(content=challenge, media_type="text/plain")
+
+
+@app.post("/api/meta/whatsapp/connections/{connection_id}/webhook")
+async def receive_meta_whatsapp_business_webhook(
+    connection_id: int, request: Request, background_tasks: BackgroundTasks
+):
+    connection = db.get_meta_whatsapp_connection_runtime(connection_id)
+    if connection is None:
+        return Response(content="Connection not found", status_code=404)
+    body = await request.body()
+    signature = request.headers.get("x-hub-signature-256", "")
+    if not whatsapp_business.verify_signature(connection, body, signature):
+        return Response(content="Invalid webhook signature", status_code=403)
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return Response(content="Invalid webhook payload", status_code=400)
+    if payload.get("object") != "whatsapp_business_account":
+        return Response(content="Unsupported webhook object", status_code=400)
+    if not connection["enabled"]:
+        return Response(content="EVENT_RECEIVED", media_type="text/plain")
+    background_tasks.add_task(
+        whatsapp_business.handle_webhook, connection_id, payload
+    )
     return Response(content="EVENT_RECEIVED", media_type="text/plain")
 
 

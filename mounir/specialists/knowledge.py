@@ -19,6 +19,7 @@ from .. import (
     action_decline,
     agent_skills,
     config,
+    context_history,
     gbrain_runtime,
     graph_runtime,
     knowledge_protocol,
@@ -272,6 +273,7 @@ async def _run_async(
     runtime: dict,
     allowed_tools: list[str] | None,
     confirmation_tools: set[str] | None = None,
+    prior_history: list[dict] | None = None,
 ) -> str:
     executed: list[dict] = []
     protected_attempts: set[str] = set()
@@ -379,6 +381,7 @@ async def _run_async(
             ]
             if skill_prompt:
                 messages.append({"role": "system", "content": skill_prompt})
+            messages.extend(prior_history or [])
             messages.append({"role": "user", "content": task})
             report = await graph_runtime.arun_tool_agent(
                 messages,
@@ -405,13 +408,24 @@ async def _run_async(
         return f"Knowledge agent could not connect to its service: {_exc_detail(exc)}"
 
 
-def run(task: str, allowed_tools: list[str] | None = None) -> str:
+def run(
+    task: str,
+    allowed_tools: list[str] | None = None,
+    *,
+    context_history_store: context_history.ContextHistory | None = None,
+) -> str:
     """Run a delegated knowledge task against Knowledge's local GBrain service."""
     from .. import db
 
+    def finish(report: str) -> str:
+        context_history.remember(
+            context_history_store, task, report, builtin_key="knowledge"
+        )
+        return report
+
     spec = db.get_builtin_agent_server_spec("knowledge")
     if spec is None:
-        return (
+        return finish(
             "Knowledge's built-in GBrain service is unavailable. Open GBrain in "
             "MCP Servers to inspect its setup status."
         )
@@ -433,6 +447,9 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
                     runtime,
                     allowed_tools,
                     confirmation_tools,
+                    context_history.messages(
+                        context_history_store, builtin_key="knowledge"
+                    ),
                 ),
                 timeout=KNOWLEDGE_AGENT_TIMEOUT_SECONDS,
             )
@@ -444,6 +461,6 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
 
     try:
         with _GBRAIN_RUNTIME_LOCK:
-            return asyncio.run(bounded_run())
+            return finish(asyncio.run(bounded_run()))
     except RuntimeError as exc:
-        return f"Knowledge agent could not start: {exc}"
+        return finish(f"Knowledge agent could not start: {exc}")

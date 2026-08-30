@@ -15,6 +15,10 @@ Core tables include:
 - ``heartbeat_*`` heartbeat permissions, schedule, state, and bounded run log
 - ``telegram_settings`` private Telegram bot configuration and pairing state
 - ``whatsapp_settings`` private WhatsApp Cloud API configuration and pairing state
+- ``meta_connections`` official Facebook, Messenger, Instagram, and Threads apps
+- ``meta_accounts`` Pages and professional accounts discovered through Meta APIs
+- ``meta_whatsapp_connections`` WhatsApp Business connections used by the agent
+- ``meta_whatsapp_messages`` persisted WhatsApp Business inbox messages
 
 On first run, if ``~/.mounir/mcp_agents.json`` exists it is migrated into the
 DB; after that the JSON file is ignored.
@@ -213,7 +217,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS models (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
             model_type TEXT NOT NULL DEFAULT 'text'
                 CHECK (model_type IN ('text', 'embedding', 'speech', 'transcription')),
             location TEXT NOT NULL DEFAULT 'cloud'
@@ -649,6 +653,107 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             heartbeat_template_language TEXT NOT NULL DEFAULT 'en_US',
             updated_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS meta_connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL
+                CHECK (platform IN ('facebook', 'messenger', 'instagram', 'threads')),
+            name TEXT NOT NULL,
+            auth_strategy TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+            app_id TEXT NOT NULL DEFAULT '',
+            app_secret TEXT NOT NULL DEFAULT '',
+            api_version TEXT NOT NULL,
+            redirect_uri TEXT NOT NULL DEFAULT '',
+            requested_capabilities TEXT NOT NULL DEFAULT '[]',
+            access_token TEXT NOT NULL DEFAULT '',
+            token_type TEXT NOT NULL DEFAULT '',
+            token_expires_at TEXT,
+            connection_status TEXT NOT NULL DEFAULT 'incomplete'
+                CHECK (connection_status IN ('disabled', 'incomplete', 'authorizing', 'connected', 'error')),
+            last_error TEXT NOT NULL DEFAULT '',
+            last_tested_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (platform, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS meta_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            connection_id INTEGER NOT NULL
+                REFERENCES meta_connections(id) ON DELETE CASCADE,
+            external_id TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            username TEXT NOT NULL DEFAULT '',
+            account_type TEXT NOT NULL DEFAULT '',
+            access_token TEXT NOT NULL DEFAULT '',
+            tasks TEXT NOT NULL DEFAULT '[]',
+            capabilities TEXT NOT NULL DEFAULT '[]',
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (connection_id, external_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_meta_accounts_connection
+            ON meta_accounts(connection_id);
+
+        CREATE TABLE IF NOT EXISTS meta_oauth_states (
+            connection_id INTEGER PRIMARY KEY
+                REFERENCES meta_connections(id) ON DELETE CASCADE,
+            state_hash TEXT NOT NULL,
+            redirect_uri TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS meta_whatsapp_connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+            app_id TEXT NOT NULL DEFAULT '',
+            access_token TEXT NOT NULL DEFAULT '',
+            phone_number_id TEXT NOT NULL DEFAULT '',
+            business_account_id TEXT NOT NULL DEFAULT '',
+            app_secret TEXT NOT NULL DEFAULT '',
+            verify_token TEXT NOT NULL DEFAULT '',
+            api_version TEXT NOT NULL DEFAULT 'v26.0',
+            display_phone_number TEXT NOT NULL DEFAULT '',
+            verified_name TEXT NOT NULL DEFAULT '',
+            requested_capabilities TEXT NOT NULL DEFAULT '["conversations", "send_messages", "send_attachments"]',
+            granted_permissions TEXT NOT NULL DEFAULT '[]',
+            permissions_checked_at TEXT,
+            connection_status TEXT NOT NULL DEFAULT 'incomplete'
+                CHECK (connection_status IN ('disabled', 'incomplete', 'configured', 'connected', 'error')),
+            last_error TEXT NOT NULL DEFAULT '',
+            last_tested_at TEXT,
+            webhook_verified_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS meta_whatsapp_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            connection_id INTEGER NOT NULL
+                REFERENCES meta_whatsapp_connections(id) ON DELETE CASCADE,
+            message_id TEXT NOT NULL,
+            contact_phone TEXT NOT NULL,
+            contact_name TEXT NOT NULL DEFAULT '',
+            direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+            message_type TEXT NOT NULL DEFAULT 'text',
+            body TEXT NOT NULL DEFAULT '',
+            media_id TEXT NOT NULL DEFAULT '',
+            mime_type TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            reply_to_message_id TEXT NOT NULL DEFAULT '',
+            occurred_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (connection_id, message_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_meta_whatsapp_messages_contact
+            ON meta_whatsapp_messages(connection_id, contact_phone, occurred_at DESC);
         """
     )
     conn.execute(
@@ -723,14 +828,40 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executemany(
         """
         INSERT OR IGNORE INTO builtin_agent_settings
-            (agent_key, model, updated_at)
-        VALUES (?, ?, ?)
+            (agent_key, model, confirm_tools, updated_at)
+        VALUES (?, ?, ?, ?)
         """,
         [
-            (item["key"], item["default_model"], _now())
+            (
+                item["key"],
+                item["default_model"],
+                json.dumps(builtin_agents.default_confirmation_tools(item["key"])),
+                _now(),
+            )
             for item in builtin_agents.definitions()
         ],
     )
+    whatsapp_split_key = "whatsapp_business_agent_split_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?", (whatsapp_split_key,)
+    ).fetchone() is None:
+        row = conn.execute(
+            "SELECT confirm_tools FROM builtin_agent_settings WHERE agent_key = 'whatsapp'"
+        ).fetchone()
+        try:
+            confirmation_tools = set(json.loads((row or ["[]"])[0] or "[]"))
+        except (TypeError, ValueError):
+            confirmation_tools = set()
+        confirmation_tools.discard("reply_to_paired_user")
+        confirmation_tools.update({"send_message", "reply_to_message", "send_attachment"})
+        conn.execute(
+            "UPDATE builtin_agent_settings SET confirm_tools = ?, updated_at = ? WHERE agent_key = 'whatsapp'",
+            (json.dumps(sorted(confirmation_tools)), _now()),
+        )
+        conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+            (whatsapp_split_key, _now()),
+        )
     telegram_token = cfg.TELEGRAM_BOT_TOKEN.strip()
     telegram_chat = cfg.TELEGRAM_CHAT_ID.strip()
     telegram_enabled = bool(cfg.TELEGRAM_ENABLED and telegram_token)
@@ -847,6 +978,15 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         },
         "telegram_settings": {
             "reply_mode": "TEXT NOT NULL DEFAULT 'text' CHECK (reply_mode IN ('text', 'voice'))",
+        },
+        "meta_whatsapp_connections": {
+            "app_id": "TEXT NOT NULL DEFAULT ''",
+            "requested_capabilities": (
+                "TEXT NOT NULL DEFAULT "
+                "'[\"conversations\", \"send_messages\", \"send_attachments\"]'"
+            ),
+            "granted_permissions": "TEXT NOT NULL DEFAULT '[]'",
+            "permissions_checked_at": "TEXT",
         },
     }
     added_columns: set[tuple[str, str]] = set()
@@ -1148,6 +1288,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         "UPDATE models SET updated_at = COALESCE(updated_at, created_at, ?)",
         (_now(),),
     )
+    _allow_duplicate_model_names(conn)
     # Groq uses the same audio-transcriptions contract as the generic transport.
     # Preserve old installations while removing the provider-specific runtime.
     conn.execute(
@@ -1440,6 +1581,14 @@ def _provider_url(value) -> str:
     return url
 
 
+def _provider_key_preview(value) -> str:
+    secret = str(value or "")
+    if not secret:
+        return ""
+    visible = secret[:4] if len(secret) > 4 else secret[:1]
+    return f"{visible}....."
+
+
 def _provider_with_conn(
     conn: sqlite3.Connection,
     provider_id: int,
@@ -1470,6 +1619,7 @@ def _provider_with_conn(
     ):
         item = dict(entry)
         item["configured"] = bool(item["value"])
+        item["preview"] = _provider_key_preview(item["value"])
         if not include_secrets:
             item["value"] = ""
         result["api_keys"].append(item)
@@ -2409,6 +2559,95 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     ).fetchone() is not None
 
 
+def _allow_duplicate_model_names(conn: sqlite3.Connection) -> None:
+    """Remove the legacy global model-name constraint without changing model IDs."""
+    has_unique_name = False
+    for index in conn.execute("PRAGMA index_list(models)"):
+        if not int(index["unique"]):
+            continue
+        columns = [
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM pragma_index_info(?)", (index["name"],)
+            )
+        ]
+        if columns == ["name"]:
+            has_unique_name = True
+            break
+    if not has_unique_name:
+        return
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for trigger in (
+            "text_model_details_type_guard",
+            "embedding_model_details_type_guard",
+            "speech_model_details_type_guard",
+            "transcription_model_details_type_guard",
+            "models_type_immutable",
+        ):
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        conn.execute("DROP TABLE IF EXISTS models_nonunique_upgrade")
+        conn.execute(
+            """
+            CREATE TABLE models_nonunique_upgrade (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                model_type TEXT NOT NULL DEFAULT 'text'
+                    CHECK (model_type IN ('text', 'embedding', 'speech', 'transcription')),
+                location TEXT NOT NULL DEFAULT 'cloud'
+                    CHECK (location IN ('cloud', 'local')),
+                model TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT '',
+                base_url TEXT NOT NULL DEFAULT '',
+                api_key TEXT NOT NULL DEFAULT '',
+                provider_id INTEGER REFERENCES providers(id) ON DELETE RESTRICT,
+                provider_base_url_id INTEGER REFERENCES provider_base_urls(id) ON DELETE RESTRICT,
+                provider_api_key_id INTEGER REFERENCES provider_api_keys(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO models_nonunique_upgrade (
+                id, name, model_type, location, model, provider, base_url, api_key,
+                provider_id, provider_base_url_id, provider_api_key_id,
+                created_at, updated_at
+            )
+            SELECT id, name, model_type, location, model, provider, base_url, api_key,
+                   provider_id, provider_base_url_id, provider_api_key_id,
+                   created_at, updated_at
+            FROM models
+            """
+        )
+        conn.execute("DROP TABLE models")
+        conn.execute("ALTER TABLE models_nonunique_upgrade RENAME TO models")
+        violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise sqlite3.IntegrityError(
+                f"Foreign key check failed after model-name migration: {tuple(violation)}"
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_models_provider_base_url "
+        "ON models(provider_base_url_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_models_provider_api_key "
+        "ON models(provider_api_key_id)"
+    )
+
+
 def _infer_model_location(provider: str, base_url: str) -> str:
     provider_name = str(provider or "").lower()
     address = str(base_url or "").lower()
@@ -2457,7 +2696,7 @@ def _insert_migrated_model(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            _unique_model_name(conn, row.get("name") or type_label, type_label),
+            _required(row.get("name") or type_label, "name"),
             model_type,
             row.get("location") or _infer_model_location(
                 provider or row.get("provider") or "", row.get("base_url") or ""
@@ -3711,8 +3950,904 @@ def mark_whatsapp_inbound(phone: str, name: str = "") -> dict:
 
 
 # -----------------------------------------------------------------------------
+# Meta social app connections
+# -----------------------------------------------------------------------------
+
+META_PLATFORMS = {"facebook", "messenger", "instagram", "threads"}
+META_AUTH_STRATEGIES = {
+    "facebook": {"facebook_login"},
+    "messenger": {"facebook_login"},
+    "instagram": {"instagram_login", "facebook_login"},
+    "threads": {"threads_oauth"},
+}
+META_CONNECTION_STATUSES = {
+    "disabled", "incomplete", "authorizing", "connected", "error"
+}
+
+
+def _meta_json_list(value) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]") if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        parsed = []
+    return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+def _meta_json_object(value) -> dict:
+    try:
+        parsed = json.loads(value or "{}") if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        parsed = {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _meta_account_public(row: sqlite3.Row | dict) -> dict:
+    item = dict(row)
+    item["enabled"] = bool(item.get("enabled"))
+    item["tasks"] = _meta_json_list(item.get("tasks"))
+    item["capabilities"] = _meta_json_list(item.get("capabilities"))
+    item["metadata"] = _meta_json_object(item.get("metadata"))
+    item["token_configured"] = bool(item.pop("access_token", ""))
+    return item
+
+
+def _meta_connection_public(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row | dict,
+    *,
+    include_secrets: bool = False,
+) -> dict:
+    item = dict(row)
+    item["enabled"] = bool(item.get("enabled"))
+    item["requested_capabilities"] = _meta_json_list(
+        item.get("requested_capabilities")
+    )
+    item["app_secret_configured"] = bool(item.get("app_secret"))
+    item["token_configured"] = bool(item.get("access_token"))
+    item["credentials_configured"] = bool(
+        item.get("app_id") and item.get("app_secret")
+    )
+    accounts = conn.execute(
+        "SELECT * FROM meta_accounts WHERE connection_id = ? ORDER BY name, id",
+        (item["id"],),
+    ).fetchall()
+    item["accounts"] = [_meta_account_public(account) for account in accounts]
+    if not include_secrets:
+        item.pop("app_secret", None)
+        item.pop("access_token", None)
+    return item
+
+
+def list_meta_connections(
+    platform: str | None = None, *, include_secrets: bool = False
+) -> list[dict]:
+    normalized = str(platform or "").strip().lower()
+    if normalized and normalized not in META_PLATFORMS:
+        raise ValueError("Meta platform is not supported")
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM meta_connections "
+            + ("WHERE platform = ? " if normalized else "")
+            + "ORDER BY platform, name, id",
+            (normalized,) if normalized else (),
+        ).fetchall()
+        return [
+            _meta_connection_public(conn, row, include_secrets=include_secrets)
+            for row in rows
+        ]
+
+
+def get_meta_connection(
+    connection_id: int, *, include_secrets: bool = False
+) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM meta_connections WHERE id = ?", (int(connection_id),)
+        ).fetchone()
+        return (
+            _meta_connection_public(conn, row, include_secrets=include_secrets)
+            if row is not None else None
+        )
+
+
+def _validate_meta_connection_values(
+    platform: str, auth_strategy: str, api_version: str
+) -> tuple[str, str, str]:
+    platform = str(platform or "").strip().lower()
+    auth_strategy = str(auth_strategy or "").strip().lower()
+    api_version = str(api_version or "").strip()
+    if platform not in META_PLATFORMS:
+        raise ValueError("Meta platform is not supported")
+    if auth_strategy not in META_AUTH_STRATEGIES[platform]:
+        raise ValueError(f"{auth_strategy or 'This sign-in method'} is not supported for {platform}")
+    if not re.fullmatch(r"v\d{1,3}\.\d{1,2}", api_version):
+        raise ValueError("API version must look like v26.0")
+    return platform, auth_strategy, api_version
+
+
+def create_meta_connection(
+    *,
+    platform: str,
+    name: str,
+    auth_strategy: str,
+    app_id: str,
+    app_secret: str,
+    api_version: str,
+    redirect_uri: str = "",
+    requested_capabilities=None,
+    enabled: bool = True,
+) -> dict:
+    platform, auth_strategy, api_version = _validate_meta_connection_values(
+        platform, auth_strategy, api_version
+    )
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be true or false")
+    name = _required(name, "connection name")[:120]
+    app_id = _required(app_id, "Meta app ID")[:200]
+    app_secret = _required(app_secret, "Meta app secret")[:1024]
+    redirect_uri = str(redirect_uri or "").strip()[:1000]
+    capabilities = _json_string_list(
+        requested_capabilities or [], "requested capabilities"
+    )
+    now = _now()
+    try:
+        with _connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO meta_connections (
+                    platform, name, auth_strategy, enabled, app_id, app_secret,
+                    api_version, redirect_uri, requested_capabilities,
+                    connection_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    platform, name, auth_strategy, int(enabled), app_id, app_secret,
+                    api_version, redirect_uri, capabilities,
+                    "incomplete" if enabled else "disabled", now, now,
+                ),
+            )
+            connection_id = int(cursor.lastrowid)
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise _friendly_integrity_error(exc) from exc
+    return get_meta_connection(connection_id) or {}
+
+
+def update_meta_connection(connection_id: int, **changes) -> dict | None:
+    current = get_meta_connection(connection_id, include_secrets=True)
+    if current is None:
+        return None
+    allowed = {
+        "name", "auth_strategy", "enabled", "app_id", "app_secret",
+        "api_version", "redirect_uri", "requested_capabilities",
+    }
+    unknown = set(changes) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported Meta connection fields: {', '.join(sorted(unknown))}")
+    platform, auth_strategy, api_version = _validate_meta_connection_values(
+        current["platform"],
+        changes.get("auth_strategy", current["auth_strategy"]),
+        changes.get("api_version", current["api_version"]),
+    )
+    fields: dict[str, object] = {}
+    if "name" in changes:
+        fields["name"] = _required(changes["name"], "connection name")[:120]
+    if "auth_strategy" in changes:
+        fields["auth_strategy"] = auth_strategy
+    if "api_version" in changes:
+        fields["api_version"] = api_version
+    if "enabled" in changes:
+        if not isinstance(changes["enabled"], bool):
+            raise ValueError("enabled must be true or false")
+        fields["enabled"] = int(changes["enabled"])
+        if not changes["enabled"]:
+            fields["connection_status"] = "disabled"
+        elif current["connection_status"] == "disabled":
+            fields["connection_status"] = (
+                "connected" if current["token_configured"] else "incomplete"
+            )
+    for key, label, limit in (
+        ("app_id", "Meta app ID", 200),
+        ("app_secret", "Meta app secret", 1024),
+    ):
+        if key in changes and changes[key] is not None:
+            fields[key] = _required(changes[key], label)[:limit]
+    if "redirect_uri" in changes:
+        fields["redirect_uri"] = str(changes["redirect_uri"] or "").strip()[:1000]
+    if "requested_capabilities" in changes:
+        fields["requested_capabilities"] = _json_string_list(
+            changes["requested_capabilities"], "requested capabilities"
+        )
+    if not fields:
+        return get_meta_connection(connection_id)
+    fields["updated_at"] = _now()
+    try:
+        with _connect() as conn:
+            sets = ", ".join(f"{key} = ?" for key in fields)
+            conn.execute(
+                f"UPDATE meta_connections SET {sets} WHERE id = ?",
+                (*fields.values(), int(connection_id)),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise _friendly_integrity_error(exc) from exc
+    return get_meta_connection(connection_id)
+
+
+def delete_meta_connection(connection_id: int) -> bool:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM meta_connections WHERE id = ?", (int(connection_id),)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def begin_meta_oauth(
+    connection_id: int, state: str, redirect_uri: str, expires_at: float
+) -> None:
+    digest = hashlib.sha256(_required(state, "OAuth state").encode()).hexdigest()
+    with _connect() as conn:
+        if conn.execute(
+            "SELECT 1 FROM meta_connections WHERE id = ?", (int(connection_id),)
+        ).fetchone() is None:
+            raise ValueError("Meta connection does not exist")
+        conn.execute(
+            """
+            INSERT INTO meta_oauth_states
+                (connection_id, state_hash, redirect_uri, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(connection_id) DO UPDATE SET
+                state_hash = excluded.state_hash,
+                redirect_uri = excluded.redirect_uri,
+                expires_at = excluded.expires_at,
+                created_at = excluded.created_at
+            """,
+            (int(connection_id), digest, redirect_uri, float(expires_at), _now()),
+        )
+        conn.execute(
+            """UPDATE meta_connections
+               SET connection_status = 'authorizing', last_error = '', updated_at = ?
+               WHERE id = ?""",
+            (_now(), int(connection_id)),
+        )
+        conn.commit()
+
+
+def consume_meta_oauth_state(
+    connection_id: int, state: str, now_timestamp: float
+) -> str | None:
+    digest = hashlib.sha256(str(state or "").encode()).hexdigest()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM meta_oauth_states WHERE connection_id = ?",
+            (int(connection_id),),
+        ).fetchone()
+        expired = row is not None and float(row["expires_at"]) < float(now_timestamp)
+        matches = row is not None and secrets.compare_digest(row["state_hash"], digest)
+        if expired or matches:
+            conn.execute(
+                "DELETE FROM meta_oauth_states WHERE connection_id = ?",
+                (int(connection_id),),
+            )
+        conn.commit()
+    if row is None or expired:
+        return None
+    if not matches:
+        return None
+    return str(row["redirect_uri"])
+
+
+def save_meta_oauth_result(
+    connection_id: int,
+    *,
+    access_token: str,
+    token_type: str = "bearer",
+    expires_at: str | None = None,
+) -> dict:
+    token = _required(access_token, "Meta access token")
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE meta_connections
+            SET access_token = ?, token_type = ?, token_expires_at = ?,
+                connection_status = 'connected', last_error = '', updated_at = ?
+            WHERE id = ?
+            """,
+            (token, str(token_type or "bearer")[:40], expires_at, _now(), int(connection_id)),
+        )
+        conn.commit()
+    return get_meta_connection(connection_id) or {}
+
+
+def update_meta_connection_status(
+    connection_id: int, status: str, *, error: str = "", tested: bool = False
+) -> dict | None:
+    status = str(status or "").strip().lower()
+    if status not in META_CONNECTION_STATUSES:
+        raise ValueError("Meta connection status is not supported")
+    fields: dict[str, object] = {
+        "connection_status": status,
+        "last_error": str(error or "")[:1000],
+        "updated_at": _now(),
+    }
+    if tested:
+        fields["last_tested_at"] = _now()
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE meta_connections SET {sets} WHERE id = ?",
+            (*fields.values(), int(connection_id)),
+        )
+        conn.commit()
+    return get_meta_connection(connection_id)
+
+
+def replace_meta_accounts(connection_id: int, accounts: list[dict]) -> list[dict]:
+    now = _now()
+    with _connect() as conn:
+        existing = {
+            str(row["external_id"]): bool(row["enabled"])
+            for row in conn.execute(
+                "SELECT external_id, enabled FROM meta_accounts WHERE connection_id = ?",
+                (int(connection_id),),
+            )
+        }
+        conn.execute(
+            "DELETE FROM meta_accounts WHERE connection_id = ?", (int(connection_id),)
+        )
+        for account in accounts:
+            external_id = _required(account.get("external_id"), "Meta account ID")[:200]
+            metadata = account.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            conn.execute(
+                """
+                INSERT INTO meta_accounts (
+                    connection_id, external_id, name, username, account_type,
+                    access_token, tasks, capabilities, enabled, metadata,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(connection_id), external_id,
+                    " ".join(str(account.get("name") or "").split())[:200],
+                    str(account.get("username") or "").strip()[:200],
+                    str(account.get("account_type") or "").strip()[:100],
+                    str(account.get("access_token") or "")[:8192],
+                    _json_string_list(account.get("tasks") or [], "account tasks"),
+                    _json_string_list(
+                        account.get("capabilities") or [], "account capabilities"
+                    ),
+                    int(existing.get(external_id, True)),
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    now, now,
+                ),
+            )
+        conn.commit()
+        rows = conn.execute(
+            "SELECT * FROM meta_accounts WHERE connection_id = ? ORDER BY name, id",
+            (int(connection_id),),
+        ).fetchall()
+        return [_meta_account_public(row) for row in rows]
+
+
+def update_meta_account(account_id: int, *, enabled: bool) -> dict | None:
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be true or false")
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE meta_accounts SET enabled = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), _now(), int(account_id)),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM meta_accounts WHERE id = ?", (int(account_id),)
+        ).fetchone()
+        return _meta_account_public(row) if row is not None else None
+
+
+def get_meta_connection_runtime(connection_id: int) -> dict | None:
+    item = get_meta_connection(connection_id, include_secrets=True)
+    if item is None:
+        return None
+    item["app_secret"] = _resolve_key(item.get("app_secret") or "")
+    item["access_token"] = _resolve_key(item.get("access_token") or "")
+    item["credentials_configured"] = bool(item.get("app_id") and item["app_secret"])
+    item["token_configured"] = bool(item["access_token"])
+    for account in item.get("accounts") or []:
+        # Public account projections intentionally omit their Page token. Fetch
+        # those only in the provider adapter that needs to execute a call.
+        account.pop("token_configured", None)
+    return item
+
+
+def get_meta_account_runtime(account_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM meta_accounts WHERE id = ?", (int(account_id),)
+        ).fetchone()
+    if row is None:
+        return None
+    item = dict(row)
+    item["enabled"] = bool(item["enabled"])
+    item["tasks"] = _meta_json_list(item.get("tasks"))
+    item["capabilities"] = _meta_json_list(item.get("capabilities"))
+    item["metadata"] = _meta_json_object(item.get("metadata"))
+    item["access_token"] = _resolve_key(item.get("access_token") or "")
+    return item
+
+
+def get_meta_account_context(account_id: int) -> dict | None:
+    account = get_meta_account_runtime(account_id)
+    if account is None:
+        return None
+    connection = get_meta_connection_runtime(int(account["connection_id"]))
+    if connection is None:
+        return None
+    return {"account": account, "connection": connection}
+
+
+def list_enabled_meta_accounts(platform: str) -> list[dict]:
+    normalized = str(platform or "").strip().lower()
+    if normalized not in META_PLATFORMS:
+        raise ValueError("Meta platform is not supported")
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT a.id, a.connection_id, a.external_id, a.name, a.username,
+                   a.account_type, a.tasks, a.capabilities, a.metadata,
+                   c.name AS connection_name
+            FROM meta_accounts a
+            JOIN meta_connections c ON c.id = a.connection_id
+            WHERE c.platform = ? AND c.enabled = 1
+              AND c.connection_status = 'connected' AND a.enabled = 1
+            ORDER BY a.name, a.id
+            """,
+            (normalized,),
+        ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["tasks"] = _meta_json_list(item.get("tasks"))
+        item["capabilities"] = _meta_json_list(item.get("capabilities"))
+        item["metadata"] = _meta_json_object(item.get("metadata"))
+        result.append(item)
+    return result
+
+
+# -----------------------------------------------------------------------------
+# WhatsApp Business agent connections and inbox
+# -----------------------------------------------------------------------------
+
+META_WHATSAPP_STATUSES = {"disabled", "incomplete", "configured", "connected", "error"}
+
+
+def _meta_whatsapp_connection_public(
+    row: sqlite3.Row | dict, *, include_secrets: bool = False
+) -> dict:
+    item = dict(row)
+    item["enabled"] = bool(item.get("enabled"))
+    item["requested_capabilities"] = _meta_json_list(
+        item.get("requested_capabilities")
+    )
+    item["granted_permissions"] = _meta_json_list(item.get("granted_permissions"))
+    item["token_configured"] = bool(item.get("access_token"))
+    item["app_secret_configured"] = bool(item.get("app_secret"))
+    item["credentials_configured"] = bool(
+        item.get("app_id")
+        and item.get("access_token")
+        and item.get("phone_number_id")
+        and item.get("business_account_id")
+        and item.get("app_secret")
+    )
+    item["webhook_verified"] = bool(item.get("webhook_verified_at"))
+    if not include_secrets:
+        item.pop("access_token", None)
+        item.pop("app_secret", None)
+    return item
+
+
+def list_meta_whatsapp_connections(*, include_secrets: bool = False) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM meta_whatsapp_connections ORDER BY name, id"
+        ).fetchall()
+    return [
+        _meta_whatsapp_connection_public(row, include_secrets=include_secrets)
+        for row in rows
+    ]
+
+
+def get_meta_whatsapp_connection(
+    connection_id: int, *, include_secrets: bool = False
+) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM meta_whatsapp_connections WHERE id = ?",
+            (int(connection_id),),
+        ).fetchone()
+    return (
+        _meta_whatsapp_connection_public(row, include_secrets=include_secrets)
+        if row is not None
+        else None
+    )
+
+
+def get_meta_whatsapp_connection_runtime(connection_id: int) -> dict | None:
+    item = get_meta_whatsapp_connection(connection_id, include_secrets=True)
+    if item is None:
+        return None
+    item["access_token"] = _resolve_key(item.get("access_token") or "")
+    item["app_secret"] = _resolve_key(item.get("app_secret") or "")
+    item["token_configured"] = bool(item["access_token"])
+    item["app_secret_configured"] = bool(item["app_secret"])
+    item["credentials_configured"] = bool(
+        item.get("app_id")
+        and item["access_token"]
+        and item.get("phone_number_id")
+        and item.get("business_account_id")
+        and item["app_secret"]
+    )
+    return item
+
+
+def _meta_whatsapp_version(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized.startswith("v"):
+        normalized = normalized[1:]
+    parts = normalized.split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise ValueError("Graph API version must look like v26.0")
+    return f"v{int(parts[0])}.{int(parts[1])}"
+
+
+def create_meta_whatsapp_connection(
+    *,
+    name: str,
+    app_id: str,
+    access_token: str,
+    phone_number_id: str,
+    business_account_id: str,
+    app_secret: str,
+    api_version: str = "v26.0",
+    enabled: bool = True,
+    requested_capabilities=None,
+) -> dict:
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be true or false")
+    values = {
+        "name": _required(name, "connection name")[:120],
+        "app_id": _required(app_id, "Meta app ID")[:200],
+        "access_token": _required(access_token, "access token")[:4096],
+        "phone_number_id": _required(phone_number_id, "phone number ID")[:80],
+        "business_account_id": _required(
+            business_account_id, "business account ID"
+        )[:80],
+        "app_secret": _required(app_secret, "Meta app secret")[:512],
+        "api_version": _meta_whatsapp_version(api_version),
+        "requested_capabilities": _json_string_list(
+            requested_capabilities
+            if requested_capabilities is not None
+            else ["conversations", "send_messages", "send_attachments"],
+            "requested capabilities",
+        ),
+    }
+    now = _now()
+    try:
+        with _connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO meta_whatsapp_connections (
+                    name, enabled, app_id, access_token, phone_number_id,
+                    business_account_id, app_secret, verify_token, api_version,
+                    requested_capabilities, connection_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    values["name"], int(enabled), values["app_id"], values["access_token"],
+                    values["phone_number_id"], values["business_account_id"],
+                    values["app_secret"], secrets.token_urlsafe(24),
+                    values["api_version"], values["requested_capabilities"],
+                    "configured" if enabled else "disabled",
+                    now, now,
+                ),
+            )
+            connection_id = int(cursor.lastrowid)
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise _friendly_integrity_error(exc) from exc
+    return get_meta_whatsapp_connection(connection_id) or {}
+
+
+def update_meta_whatsapp_connection(connection_id: int, **changes) -> dict | None:
+    current = get_meta_whatsapp_connection(connection_id, include_secrets=True)
+    if current is None:
+        return None
+    allowed = {
+        "name", "enabled", "app_id", "access_token", "phone_number_id",
+        "business_account_id", "app_secret", "api_version",
+        "requested_capabilities", "regenerate_verify_token",
+    }
+    unknown = set(changes) - allowed
+    if unknown:
+        raise ValueError(
+            f"Unsupported WhatsApp Business fields: {', '.join(sorted(unknown))}"
+        )
+    fields: dict[str, object] = {}
+    if "name" in changes:
+        fields["name"] = _required(changes["name"], "connection name")[:120]
+    if "enabled" in changes:
+        if not isinstance(changes["enabled"], bool):
+            raise ValueError("enabled must be true or false")
+        fields["enabled"] = int(changes["enabled"])
+    limits = {
+        "app_id": ("Meta app ID", 200),
+        "access_token": ("access token", 4096),
+        "phone_number_id": ("phone number ID", 80),
+        "business_account_id": ("business account ID", 80),
+        "app_secret": ("Meta app secret", 512),
+    }
+    for key, (label, limit) in limits.items():
+        if key in changes and changes[key] is not None:
+            fields[key] = _required(changes[key], label)[:limit]
+    if "api_version" in changes:
+        fields["api_version"] = _meta_whatsapp_version(changes["api_version"])
+    if "requested_capabilities" in changes:
+        fields["requested_capabilities"] = _json_string_list(
+            changes["requested_capabilities"], "requested capabilities"
+        )
+    if changes.get("regenerate_verify_token"):
+        fields["verify_token"] = secrets.token_urlsafe(24)
+        fields["webhook_verified_at"] = None
+
+    identity_changed = any(
+        key in fields and fields[key] != current.get(key)
+        for key in ("phone_number_id", "business_account_id", "app_secret")
+    )
+    credentials_changed = identity_changed or any(
+        key in fields and fields[key] != current.get(key)
+        for key in ("app_id", "access_token", "api_version")
+    )
+    if identity_changed:
+        fields.update(
+            display_phone_number="",
+            verified_name="",
+            webhook_verified_at=None,
+        )
+    if credentials_changed:
+        fields.update(
+            last_error="",
+            last_tested_at=None,
+            granted_permissions="[]",
+            permissions_checked_at=None,
+        )
+
+    enabled = bool(fields.get("enabled", current["enabled"]))
+    resulting = {
+        key: fields.get(key, current.get(key, ""))
+        for key in ("app_id", "access_token", "phone_number_id", "business_account_id", "app_secret")
+    }
+    if enabled and not all(resulting.values()):
+        raise ValueError(
+            "add the Meta app ID, access token, phone number ID, business account ID, and app secret before enabling this connection"
+        )
+    if fields:
+        fields["connection_status"] = (
+            "disabled" if not enabled
+            else "connected" if current["webhook_verified"] and not identity_changed
+            else "configured"
+        )
+        fields["updated_at"] = _now()
+        try:
+            with _connect() as conn:
+                sets = ", ".join(f"{key} = ?" for key in fields)
+                conn.execute(
+                    f"UPDATE meta_whatsapp_connections SET {sets} WHERE id = ?",
+                    (*fields.values(), int(connection_id)),
+                )
+                conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise _friendly_integrity_error(exc) from exc
+    return get_meta_whatsapp_connection(connection_id)
+
+
+def update_meta_whatsapp_connection_status(
+    connection_id: int,
+    status: str,
+    *,
+    error: str = "",
+    tested: bool = False,
+    webhook_verified: bool = False,
+    display_phone_number: str = "",
+    verified_name: str = "",
+    granted_permissions: list[str] | None = None,
+) -> dict | None:
+    if status not in META_WHATSAPP_STATUSES:
+        raise ValueError("WhatsApp Business connection status is not supported")
+    fields: dict[str, object] = {
+        "connection_status": status,
+        "last_error": str(error or "")[:600],
+        "updated_at": _now(),
+    }
+    if tested:
+        fields["last_tested_at"] = _now()
+    if webhook_verified:
+        fields["webhook_verified_at"] = _now()
+    if display_phone_number:
+        fields["display_phone_number"] = str(display_phone_number)[:80]
+    if verified_name:
+        fields["verified_name"] = str(verified_name)[:200]
+    if granted_permissions is not None:
+        fields["granted_permissions"] = _json_string_list(
+            granted_permissions, "granted permissions"
+        )
+        fields["permissions_checked_at"] = _now()
+    with _connect() as conn:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE meta_whatsapp_connections SET {sets} WHERE id = ?",
+            (*fields.values(), int(connection_id)),
+        )
+        conn.commit()
+    return get_meta_whatsapp_connection(connection_id)
+
+
+def delete_meta_whatsapp_connection(connection_id: int) -> bool:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM meta_whatsapp_connections WHERE id = ?",
+            (int(connection_id),),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def record_meta_whatsapp_message(
+    *,
+    connection_id: int,
+    message_id: str,
+    contact_phone: str,
+    direction: str,
+    occurred_at: str,
+    contact_name: str = "",
+    message_type: str = "text",
+    body: str = "",
+    media_id: str = "",
+    mime_type: str = "",
+    status: str = "",
+    reply_to_message_id: str = "",
+) -> dict:
+    if direction not in {"inbound", "outbound"}:
+        raise ValueError("WhatsApp message direction is not supported")
+    message_id = _required(message_id, "message ID")[:300]
+    contact_phone = "".join(character for character in str(contact_phone) if character.isdigit())
+    if not contact_phone:
+        raise ValueError("WhatsApp contact phone is required")
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO meta_whatsapp_messages (
+                connection_id, message_id, contact_phone, contact_name,
+                direction, message_type, body, media_id, mime_type, status,
+                reply_to_message_id, occurred_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(connection_id, message_id) DO UPDATE SET
+                contact_name = CASE WHEN excluded.contact_name != ''
+                    THEN excluded.contact_name ELSE meta_whatsapp_messages.contact_name END,
+                status = CASE WHEN excluded.status != ''
+                    THEN excluded.status ELSE meta_whatsapp_messages.status END
+            """,
+            (
+                int(connection_id), message_id, contact_phone,
+                " ".join(str(contact_name or "").split())[:200], direction,
+                str(message_type or "text")[:40], str(body or "")[:20000],
+                str(media_id or "")[:300], str(mime_type or "")[:160],
+                str(status or "")[:80], str(reply_to_message_id or "")[:300],
+                str(occurred_at), _now(),
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM meta_whatsapp_messages WHERE connection_id = ? AND message_id = ?",
+            (int(connection_id), message_id),
+        ).fetchone()
+    return dict(row)
+
+
+def list_meta_whatsapp_messages(
+    connection_id: int, *, contact_phone: str = "", limit: int = 50
+) -> list[dict]:
+    normalized = "".join(character for character in str(contact_phone) if character.isdigit())
+    bounded = max(1, min(int(limit), 200))
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM meta_whatsapp_messages WHERE connection_id = ? "
+            + ("AND contact_phone = ? " if normalized else "")
+            + "ORDER BY occurred_at DESC, id DESC LIMIT ?",
+            (int(connection_id), normalized, bounded)
+            if normalized
+            else (int(connection_id), bounded),
+        ).fetchall()
+    return [dict(row) for row in reversed(rows)]
+
+
+def get_meta_whatsapp_message(connection_id: int, message_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM meta_whatsapp_messages WHERE connection_id = ? AND message_id = ?",
+            (int(connection_id), str(message_id or "")),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def update_meta_whatsapp_message_status(
+    connection_id: int, message_id: str, status: str
+) -> bool:
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE meta_whatsapp_messages SET status = ?
+            WHERE connection_id = ? AND message_id = ?
+            """,
+            (str(status or "")[:80], int(connection_id), str(message_id or "")),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def list_meta_whatsapp_conversations(connection_id: int) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT contact_phone,
+                   MAX(CASE WHEN contact_name != '' THEN contact_name ELSE '' END) AS contact_name,
+                   MAX(CASE WHEN direction = 'inbound' THEN occurred_at END) AS last_inbound_at,
+                   MAX(occurred_at) AS last_message_at,
+                   COUNT(*) AS message_count
+            FROM meta_whatsapp_messages
+            WHERE connection_id = ?
+            GROUP BY contact_phone
+            ORDER BY last_message_at DESC
+            """,
+            (int(connection_id),),
+        ).fetchall()
+    now = datetime.now(timezone.utc)
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            inbound = datetime.fromisoformat(item["last_inbound_at"] or "")
+            if inbound.tzinfo is None:
+                inbound = inbound.replace(tzinfo=timezone.utc)
+            item["service_window_open"] = now - inbound < timedelta(hours=24)
+        except (TypeError, ValueError):
+            item["service_window_open"] = False
+        result.append(item)
+    return result
+
+
+def get_meta_whatsapp_conversation(connection_id: int, contact_phone: str) -> dict | None:
+    normalized = "".join(character for character in str(contact_phone) if character.isdigit())
+    return next(
+        (
+            item for item in list_meta_whatsapp_conversations(connection_id)
+            if item["contact_phone"] == normalized
+        ),
+        None,
+    )
+
+
+# -----------------------------------------------------------------------------
 # Supervisor and built-in specialist configuration
 # -----------------------------------------------------------------------------
+
+
+def _model_choice_label(model: dict) -> str:
+    provider = model.get("provider_name") or model.get("provider") or "No provider"
+    return f"{model['name']} — {provider} — {model['model']}"
+
 
 def get_supervisor_runtime(fallback_model: str = "") -> dict:
     """Return the database-managed runtime used by Mounir's supervisor."""
@@ -3754,7 +4889,7 @@ def get_supervisor_config() -> dict:
         {
             "id": model["id"],
             "model": model["model"],
-            "label": f"{model['name']} — {model['model']}",
+            "label": _model_choice_label(model),
         }
         for model in list_models()
     ]
@@ -4051,7 +5186,7 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
             {
                 "id": model["id"],
                 "model": model["model"],
-                "label": f"{model['name']} — {model['model']}",
+                "label": _model_choice_label(model),
             }
             for model in models
         ]
@@ -4147,7 +5282,7 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                     [
                         {
                             "id": embedding["id"],
-                            "label": f"{embedding['name']} — {embedding['model']}",
+                            "label": _model_choice_label(embedding),
                             "status": embedding["connection_status"],
                             "dimensions": embedding["dimensions"],
                         }
@@ -4451,6 +5586,10 @@ def enabled_builtin_agent_keys() -> set[str]:
 # -----------------------------------------------------------------------------
 # Heartbeat configuration
 # -----------------------------------------------------------------------------
+
+MIN_HEARTBEAT_INTERVAL_MINUTES = 5
+MAX_HEARTBEAT_INTERVAL_MINUTES = 365 * 24 * 60
+
 
 def _heartbeat_mcp_tools(conn: sqlite3.Connection) -> dict[int, list[dict]]:
     """Return definition-granted cached tools with stable cross-server keys."""
@@ -4794,8 +5933,12 @@ def _save_heartbeat_task(task_id: int | None, **changes) -> dict | None:
             raise ValueError("enabled must be true or false")
         if isinstance(interval, bool) or not isinstance(interval, int):
             raise ValueError("interval must be a whole number of minutes")
-        if not 5 <= interval <= 1440:
-            raise ValueError("interval must be between 5 and 1440 minutes")
+        if not (
+            MIN_HEARTBEAT_INTERVAL_MINUTES
+            <= interval
+            <= MAX_HEARTBEAT_INTERVAL_MINUTES
+        ):
+            raise ValueError("interval must be between 5 minutes and 1 year")
         if isinstance(execution_limit, bool) or not isinstance(execution_limit, int):
             raise ValueError("execution count must be a whole number")
         if execution_limit != -1 and not 1 <= execution_limit <= 10000:
@@ -5367,7 +6510,7 @@ def _add_model(
 
 
 def _get_model_by_name(conn: sqlite3.Connection, name: str) -> dict | None:
-    cur = conn.execute(
+    rows = conn.execute(
         """
         SELECT m.*, p.name AS provider_name,
                u.name AS provider_base_url_name, k.name AS provider_api_key_name
@@ -5376,11 +6519,11 @@ def _get_model_by_name(conn: sqlite3.Connection, name: str) -> dict | None:
         LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
         LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
         WHERE m.name = ? AND m.model_type = 'text'
+        ORDER BY m.id LIMIT 2
         """,
         (name.strip(),),
-    )
-    row = cur.fetchone()
-    return dict(row) if row else None
+    ).fetchall()
+    return dict(rows[0]) if len(rows) == 1 else None
 
 
 def add_model(
@@ -5457,7 +6600,9 @@ def list_models() -> list[dict]:
             LEFT JOIN providers p ON p.id = m.provider_id
             LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
             LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
-            WHERE m.model_type = 'text' ORDER BY m.name
+            WHERE m.model_type = 'text'
+            ORDER BY m.name COLLATE NOCASE,
+                     COALESCE(p.name, m.provider) COLLATE NOCASE, m.id
             """
         )
         return [dict(r) for r in cur.fetchall()]
@@ -5483,7 +6628,8 @@ def list_model_catalog() -> list[dict]:
             LEFT JOIN providers p ON p.id = m.provider_id
             LEFT JOIN provider_base_urls u ON u.id = m.provider_base_url_id
             LEFT JOIN provider_api_keys k ON k.id = m.provider_api_key_id
-            ORDER BY m.name
+            ORDER BY m.name COLLATE NOCASE,
+                     COALESCE(p.name, m.provider) COLLATE NOCASE, m.id
             """
         ).fetchall()
     result = []

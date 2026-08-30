@@ -158,7 +158,7 @@ function WorkflowForm({
               <option value="">Choose a model…</option>
               {models.map((model) => (
                 <option value={model.id} key={model.id}>
-                  {model.name} — {model.model}
+                  {model.name} — {model.provider_name || model.provider} — {model.model}
                 </option>
               ))}
             </select>
@@ -347,7 +347,7 @@ function OrchestratorWizard({
             <option value="">Choose a model…</option>
             {models.map((model) => (
               <option value={model.id} key={model.id}>
-                {model.name} — {model.model}
+                {model.name} — {model.provider_name || model.provider} — {model.model}
               </option>
             ))}
           </select>

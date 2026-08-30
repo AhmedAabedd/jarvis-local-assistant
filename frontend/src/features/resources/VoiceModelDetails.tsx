@@ -13,7 +13,7 @@ function Detail({ label, value, full = false }: { label: string; value?: string;
 export function VoiceModelDetails({ item }: { item: VoiceModelRecord }) {
   return (
     <section className="card resource-workspace">
-      <div className="card__body detail-grid resource-detail-body">
+      <div className="card__body detail-grid">
         <Detail label="Name" value={item.name} />
         <Detail label="Location" value={readable(item.location)} />
         <Detail label="Engine" value={readable(item.provider)} />

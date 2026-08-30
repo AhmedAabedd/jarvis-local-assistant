@@ -122,7 +122,7 @@ export function VoicePage() {
                   </option>
                   {transcriptionModels.map((model) => (
                     <option key={model.id} value={model.id}>
-                      {model.name} — {model.model}
+                      {model.name} — {model.provider_name || model.provider} — {model.model}
                     </option>
                   ))}
                 </select>
@@ -147,7 +147,7 @@ export function VoicePage() {
                   </option>
                   {speechModels.map((model) => (
                     <option key={model.id} value={model.id}>
-                      {model.name} — {model.model}
+                      {model.name} — {model.provider_name || model.provider} — {model.model}
                     </option>
                   ))}
                 </select>

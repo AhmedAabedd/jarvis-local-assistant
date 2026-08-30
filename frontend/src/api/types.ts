@@ -35,6 +35,7 @@ export interface ProviderApiKey {
   name: string
   value: string
   configured?: boolean
+  preview?: string
 }
 
 export interface ProviderRecord {
@@ -502,6 +503,126 @@ export interface WhatsAppSettings {
   display_phone_number?: string
   verified_name?: string
   last_error?: string
+}
+
+export type MetaPlatformId = 'facebook' | 'messenger' | 'instagram' | 'threads'
+
+export interface MetaAuthStrategy {
+  id: string
+  label: string
+}
+
+export interface MetaCapability {
+  id: string
+  label: string
+  description: string
+  required?: boolean
+  available?: boolean
+  scopes?: string[]
+  scopes_by_auth?: Record<string, string[]>
+}
+
+export interface MetaPlatformDefinition {
+  id: MetaPlatformId
+  label: string
+  description: string
+  account_kind: string
+  default_api_version: string
+  auth_strategies: MetaAuthStrategy[]
+  excluded: string[]
+  capabilities: MetaCapability[]
+}
+
+export interface MetaAccount {
+  id: Id
+  connection_id: Id
+  external_id: string
+  name: string
+  username: string
+  account_type: string
+  enabled: boolean
+  tasks: string[]
+  capabilities: string[]
+  metadata: Record<string, unknown>
+  token_configured: boolean
+}
+
+export interface MetaConnection {
+  id: Id
+  platform: MetaPlatformId
+  name: string
+  auth_strategy: string
+  enabled: boolean
+  app_id: string
+  api_version: string
+  redirect_uri: string
+  requested_capabilities: string[]
+  token_type: string
+  token_expires_at?: string | null
+  connection_status: string
+  last_error: string
+  last_tested_at?: string | null
+  app_secret_configured: boolean
+  token_configured: boolean
+  credentials_configured: boolean
+  accounts: MetaAccount[]
+}
+
+export interface MetaOAuthStart {
+  authorization_url: string
+  redirect_uri: string
+  expires_in: number
+}
+
+export interface MetaWhatsAppConnection {
+  id: Id
+  name: string
+  enabled: boolean
+  app_id: string
+  phone_number_id: string
+  business_account_id: string
+  api_version: string
+  display_phone_number: string
+  verified_name: string
+  connection_status: string
+  last_error: string
+  last_tested_at?: string | null
+  token_configured: boolean
+  app_secret_configured: boolean
+  credentials_configured: boolean
+  webhook_verified: boolean
+  verify_token: string
+  webhook_path: string
+  requested_capabilities: string[]
+  granted_permissions: string[]
+  permissions_checked_at?: string | null
+}
+
+export interface MetaWhatsAppPermission {
+  id: string
+  label: string
+  description: string
+  required: boolean
+}
+
+export interface MetaWhatsAppCapability {
+  id: string
+  label: string
+  description: string
+  required?: boolean
+  available?: boolean
+  permissions: string[]
+}
+
+export interface MetaWhatsAppDefinition {
+  id: 'whatsapp'
+  label: string
+  description: string
+  account_kind: string
+  default_api_version: string
+  permissions: MetaWhatsAppPermission[]
+  capabilities: MetaWhatsAppCapability[]
+  excluded: string[]
 }
 
 export interface HeartbeatCapability {

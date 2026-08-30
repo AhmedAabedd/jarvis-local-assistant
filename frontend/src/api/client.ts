@@ -7,6 +7,12 @@ import type {
   McpServer,
   McpRegistryPage,
   McpRegistryServer,
+  MetaAccount,
+  MetaConnection,
+  MetaOAuthStart,
+  MetaPlatformDefinition,
+  MetaWhatsAppConnection,
+  MetaWhatsAppDefinition,
   ModelRecord,
   EmbeddingModelRecord,
   Notification,
@@ -273,6 +279,42 @@ export const api = {
       ),
     disconnect: () => request<WhatsAppSettings>('/api/whatsapp/pairing', json('DELETE')),
     removeCredentials: () => request<WhatsAppSettings>('/api/whatsapp/credentials', json('DELETE')),
+  },
+  meta: {
+    platforms: () => request<MetaPlatformDefinition[]>('/api/meta/platforms'),
+    connections: (platform?: string) => {
+      const query = platform ? `?${new URLSearchParams({ platform })}` : ''
+      return request<MetaConnection[]>(`/api/meta/connections${query}`)
+    },
+    create: (body: object) => request<MetaConnection>('/api/meta/connections', json('POST', body)),
+    update: (id: number, body: object) =>
+      request<MetaConnection>(`/api/meta/connections/${id}`, json('PUT', body)),
+    remove: (id: number) => request(`/api/meta/connections/${id}`, json('DELETE')),
+    startOauth: (id: number) =>
+      request<MetaOAuthStart>(`/api/meta/connections/${id}/oauth/start`, json('POST')),
+    test: (id: number) => request<MetaConnection>(`/api/meta/connections/${id}/test`, json('POST')),
+    updateAccount: (id: number, enabled: boolean) =>
+      request<MetaAccount>(`/api/meta/accounts/${id}`, json('PATCH', { enabled })),
+    whatsapp: {
+      definition: () =>
+        request<MetaWhatsAppDefinition>('/api/meta/whatsapp/definition'),
+      connections: () =>
+        request<MetaWhatsAppConnection[]>('/api/meta/whatsapp/connections'),
+      create: (body: object) =>
+        request<MetaWhatsAppConnection>('/api/meta/whatsapp/connections', json('POST', body)),
+      update: (id: number, body: object) =>
+        request<MetaWhatsAppConnection>(
+          `/api/meta/whatsapp/connections/${id}`,
+          json('PUT', body),
+        ),
+      remove: (id: number) =>
+        request(`/api/meta/whatsapp/connections/${id}`, json('DELETE')),
+      test: (id: number) =>
+        request<MetaWhatsAppConnection>(
+          `/api/meta/whatsapp/connections/${id}/test`,
+          json('POST'),
+        ),
+    },
   },
   heartbeat: {
     get: () => request<HeartbeatSettings>('/api/heartbeat'),

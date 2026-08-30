@@ -178,6 +178,64 @@ class UnifiedModelMigrationTests(unittest.TestCase):
         db.LEGACY_REGISTRY = self.old_legacy_path
         self.temp_dir.cleanup()
 
+    def test_model_name_constraint_upgrade_handles_existing_triggers(self):
+        with db._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    model_type TEXT NOT NULL DEFAULT 'text',
+                    location TEXT NOT NULL DEFAULT 'cloud',
+                    model TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT '',
+                    base_url TEXT NOT NULL DEFAULT '',
+                    api_key TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE text_model_details (
+                    model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
+                    provider_options TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TRIGGER text_model_details_type_guard
+                BEFORE INSERT ON text_model_details
+                WHEN COALESCE((SELECT model_type FROM models WHERE id = NEW.model_id), '') != 'text'
+                BEGIN SELECT RAISE(ABORT, 'text model details require a text model'); END;
+                INSERT INTO models
+                    (id, name, model, provider, base_url, created_at, updated_at)
+                VALUES
+                    (1, 'Shared model', 'vendor/model', 'First service',
+                     'https://first.example/v1', 'now', 'now');
+                INSERT INTO text_model_details (model_id) VALUES (1);
+                """
+            )
+
+        db.init()
+
+        duplicate = db.add_model(
+            "Shared model",
+            "vendor/model",
+            "Second service",
+            "https://second.example/v1",
+            "",
+        )
+        self.assertNotEqual(duplicate["id"], 1)
+        with db._connect() as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM models WHERE name = 'Shared model'"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'trigger' AND name = 'text_model_details_type_guard'"
+                ).fetchone()
+            )
+            self.assertIsNone(conn.execute("PRAGMA foreign_key_check").fetchone())
+
     def test_current_separate_tables_migrate_to_one_registry(self):
         with db._connect() as conn:
             conn.executescript(
@@ -283,7 +341,7 @@ class UnifiedModelMigrationTests(unittest.TestCase):
         embedding = db.list_embedding_models()[0]
         self.assertEqual(embedding["dimensions"], 768)
         self.assertEqual(embedding["api_key"], "embed-key")
-        self.assertNotEqual(embedding["name"], "Shared name")
+        self.assertEqual(embedding["name"], "Shared name")
         knowledge = next(
             item for item in db.list_builtin_agents() if item["key"] == "knowledge"
         )
@@ -320,6 +378,15 @@ class UnifiedModelMigrationTests(unittest.TestCase):
                 },
             )
             self.assertIsNone(conn.execute("PRAGMA foreign_key_check").fetchone())
+            unique_model_name_indexes = [
+                row["name"]
+                for index in conn.execute("PRAGMA index_list(models)")
+                if index["unique"]
+                for row in conn.execute(
+                    "SELECT name FROM pragma_index_info(?)", (index["name"],)
+                )
+            ]
+            self.assertNotIn("name", unique_model_name_indexes)
 
 
 class EmbeddingAdapterTests(unittest.TestCase):

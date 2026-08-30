@@ -42,6 +42,15 @@ def delegate_to_system(task: str) -> str:
     return run(task)
 
 
+def _delegate_builtin(key: str, task: str) -> str:
+    from . import builtin_agents
+
+    try:
+        return builtin_agents.run_direct(key, task)
+    except ValueError as exc:
+        return str(exc)
+
+
 # bash: default timeout (s) to kill a hung command, a hard ceiling the model
 # can't exceed, and an output cap so a chatty command can't flood the context.
 BASH_DEFAULT_TIMEOUT = 30
@@ -338,6 +347,51 @@ def delegate_to_media_tool(
     return delegate_to_media(task)
 
 
+@tool("delegate_to_facebook")
+def delegate_to_facebook_tool(
+    task: Annotated[str, "Facebook Page or Meta Ads request, including known account names or IDs."],
+) -> str:
+    """Use the official Facebook Pages and Meta Ads specialist."""
+
+    return _delegate_builtin("facebook", task)
+
+
+@tool("delegate_to_messenger")
+def delegate_to_messenger_tool(
+    task: Annotated[str, "Facebook Page Messenger connection or policy request."],
+) -> str:
+    """Use the official Messenger Platform specialist; personal accounts and cold DMs are excluded."""
+
+    return _delegate_builtin("messenger", task)
+
+
+@tool("delegate_to_instagram")
+def delegate_to_instagram_tool(
+    task: Annotated[str, "Instagram professional-account request, including known account names or IDs."],
+) -> str:
+    """Use the official Instagram professional-account specialist."""
+
+    return _delegate_builtin("instagram", task)
+
+
+@tool("delegate_to_threads")
+def delegate_to_threads_tool(
+    task: Annotated[str, "Threads profile request, including known account names or IDs."],
+) -> str:
+    """Use the official Threads API specialist."""
+
+    return _delegate_builtin("threads", task)
+
+
+@tool("delegate_to_whatsapp")
+def delegate_to_whatsapp_tool(
+    task: Annotated[str, "WhatsApp Business inbox request, including known connection, contact, or message IDs."],
+) -> str:
+    """Use the official WhatsApp Business inbox specialist; this is separate from the private channel."""
+
+    return _delegate_builtin("whatsapp", task)
+
+
 GENERAL_TOOLS = [
     open_browser_tool,
     close_browser_tool,
@@ -350,6 +404,11 @@ DELEGATE_TOOLS = [
     delegate_to_knowledge_tool,
     delegate_to_system_tool,
     delegate_to_media_tool,
+    delegate_to_facebook_tool,
+    delegate_to_messenger_tool,
+    delegate_to_instagram_tool,
+    delegate_to_threads_tool,
+    delegate_to_whatsapp_tool,
 ]
 
 TOOLS = [*GENERAL_TOOLS, *DELEGATE_TOOLS]

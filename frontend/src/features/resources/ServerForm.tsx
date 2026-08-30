@@ -9,9 +9,13 @@ import { entriesObject, KeyValueEditor, type Entry } from './KeyValueEditor'
 import { objectValue, remoteAuth } from './helpers'
 
 interface CredentialFileEntry extends McpCredentialFile {
+  rowKey: string
   saved: boolean
   file?: File
 }
+
+let credentialFileRowSequence = 0
+const nextCredentialFileRowKey = () => `credential-file-${credentialFileRowSequence++}`
 
 const fileContent = (file: File) =>
   new Promise<string>((resolve, reject) => {
@@ -45,8 +49,12 @@ export function ServerForm({
   const [headers, setHeaders] = useState<Entry[]>(
     Object.entries(editableInitialHeaders).map(([key, value]) => ({ key, value })),
   )
-  const [credentialFiles, setCredentialFiles] = useState<CredentialFileEntry[]>(
-    (item?.credential_files || []).map((entry) => ({ ...entry, saved: true })),
+  const [credentialFiles, setCredentialFiles] = useState<CredentialFileEntry[]>(() =>
+    (item?.credential_files || []).map((entry) => ({
+      ...entry,
+      rowKey: nextCredentialFileRowKey(),
+      saved: true,
+    })),
   )
   const [removedFiles, setRemovedFiles] = useState<string[]>([])
   const [error, setError] = useState('')
@@ -255,7 +263,12 @@ export function ServerForm({
                     onClick={() =>
                       setCredentialFiles((values) => [
                         ...values,
-                        { env_var: '', filename: '', saved: false },
+                        {
+                          env_var: '',
+                          filename: '',
+                          rowKey: nextCredentialFileRowKey(),
+                          saved: false,
+                        },
                       ])
                     }
                   >
@@ -269,7 +282,7 @@ export function ServerForm({
                   </div>
                 )}
                 {credentialFiles.map((entry, index) => (
-                  <div className="credential-file-row" key={`${entry.env_var}-${index}`}>
+                  <div className="credential-file-row" key={entry.rowKey}>
                     <input
                       aria-label="Credential environment variable"
                       placeholder="Environment variable"

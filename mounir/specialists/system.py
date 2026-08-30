@@ -21,7 +21,7 @@ from typing import Annotated, Literal
 
 from langchain_core.tools import tool
 
-from .. import agent_skills, config, graph_runtime, llm
+from .. import agent_skills, config, context_history, graph_runtime, llm
 
 MAX_TOOL_ROUNDS = 6
 
@@ -417,7 +417,12 @@ def _context() -> str:
     return f"DEVICE: {_device_info()}\n{state}."
 
 
-def run(task: str, allowed_tools: list[str] | None = None) -> str:
+def run(
+    task: str,
+    allowed_tools: list[str] | None = None,
+    *,
+    context_history_store: context_history.ContextHistory | None = None,
+) -> str:
     """Run the system agent on a task. Returns a short plain-text report."""
     from .. import db
     runtime = db.get_builtin_agent_runtime(
@@ -439,6 +444,9 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     ]
     if skill_prompt:
         messages.append({"role": "system", "content": skill_prompt})
+    messages.extend(
+        context_history.messages(context_history_store, builtin_key="system")
+    )
     messages.append(
         {"role": "user", "content": f"{_context()}\n\nTASK FROM SUPERVISOR:\n{task}"}
     )
@@ -451,7 +459,7 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
             )
         return f"System agent failed: {error}"
 
-    return graph_runtime.run_tool_agent(
+    report = graph_runtime.run_tool_agent(
         messages,
         selected_tools,
         lambda history, schemas: llm.openai_chat(
@@ -476,3 +484,7 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
         ),
         confirmation_tools=confirmation_tools,
     )
+    context_history.remember(
+        context_history_store, task, report, builtin_key="system"
+    )
+    return report

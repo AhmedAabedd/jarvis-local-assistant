@@ -272,7 +272,10 @@ class WorkflowDatabaseTests(unittest.TestCase):
 
         self.assertEqual(reply, "Workflow result received.")
         execute.assert_called_once_with(
-            workflow["id"], "prepare the result", ANY
+            workflow["id"],
+            "prepare the result",
+            ANY,
+            context_history_store=ANY,
         )
         self.assertEqual(len(model_calls), 2)
 

@@ -7,8 +7,12 @@ specialist and applies an explicit read-only allowlist at runtime.
 from __future__ import annotations
 
 from importlib import import_module
+from typing import TYPE_CHECKING
 
 from . import config
+
+if TYPE_CHECKING:
+    from .context_history import ContextHistory
 
 
 _BUILTINS = {
@@ -41,6 +45,46 @@ _BUILTINS = {
         "default_model": config.SYSTEM_MODEL,
         "description": "Observes and controls computer hardware, connectivity, media, and power.",
         "safe_tools": {"system_status"},
+    },
+    "facebook": {
+        "name": "Facebook",
+        "module": "mounir.specialists.facebook",
+        "provider": "NVIDIA",
+        "default_model": config.SYSTEM_MODEL,
+        "description": "Manages connected Facebook Pages and Meta ad accounts through the official Graph API.",
+        "safe_tools": {"list_connected_accounts", "list_page_posts", "list_ad_campaigns"},
+    },
+    "messenger": {
+        "name": "Messenger",
+        "module": "mounir.specialists.messenger",
+        "provider": "NVIDIA",
+        "default_model": config.SYSTEM_MODEL,
+        "description": "Reports connected Facebook Page messaging readiness without personal accounts or cold DMs.",
+        "safe_tools": {"list_connected_accounts", "messaging_policy"},
+    },
+    "instagram": {
+        "name": "Instagram",
+        "module": "mounir.specialists.instagram",
+        "provider": "NVIDIA",
+        "default_model": config.SYSTEM_MODEL,
+        "description": "Reads and publishes for connected Instagram professional accounts through official APIs.",
+        "safe_tools": {"list_connected_accounts", "list_media"},
+    },
+    "threads": {
+        "name": "Threads",
+        "module": "mounir.specialists.threads",
+        "provider": "NVIDIA",
+        "default_model": config.SYSTEM_MODEL,
+        "description": "Reads and publishes for connected Threads profiles through the official Threads API.",
+        "safe_tools": {"list_connected_accounts", "list_posts"},
+    },
+    "whatsapp": {
+        "name": "WhatsApp",
+        "module": "mounir.specialists.whatsapp",
+        "provider": "NVIDIA",
+        "default_model": config.SYSTEM_MODEL,
+        "description": "Reads and serves WhatsApp Business inbox conversations through the official Cloud API.",
+        "safe_tools": {"list_business_connections", "list_conversations", "read_messages"},
     },
 }
 
@@ -135,7 +179,13 @@ def default_confirmation_tools(key: str) -> list[str]:
     ]
 
 
-def run(key: str, task: str, allowed_tools: list[str]) -> str:
+def run(
+    key: str,
+    task: str,
+    allowed_tools: list[str],
+    *,
+    context_history_store: ContextHistory | None = None,
+) -> str:
     """Run one built-in specialist with an approval-free tool allowlist."""
     normalized = str(key or "").removeprefix("builtin:").strip()
     definition = _BUILTINS.get(normalized)
@@ -158,4 +208,24 @@ def run(key: str, task: str, allowed_tools: list[str]) -> str:
     if not selected:
         raise ValueError(f"no safe tools selected for {definition['name']}")
     module = import_module(definition["module"])
+    if normalized in {"media", "knowledge", "system"}:
+        return module.run(
+            task,
+            allowed_tools=selected,
+            context_history_store=context_history_store,
+        )
     return module.run(task, allowed_tools=selected)
+
+
+def run_direct(key: str, task: str) -> str:
+    """Run one enabled built-in with its normal confirmation policy."""
+    normalized = str(key or "").removeprefix("builtin:").strip()
+    definition = _BUILTINS.get(normalized)
+    if definition is None:
+        raise ValueError(f"unknown built-in specialist: {key}")
+    from . import db
+
+    if not db.is_builtin_agent_enabled(normalized):
+        raise ValueError(f"{definition['name']} agent is inactive")
+    module = import_module(definition["module"])
+    return module.run(task)

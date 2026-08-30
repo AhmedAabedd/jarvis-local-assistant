@@ -40,6 +40,7 @@ class ProviderConfigurationTests(unittest.TestCase):
             [{"name": "Primary", "value": "$EXAMPLE_PROVIDER_KEY"}],
         )
         self.assertEqual(provider["api_keys"][0]["value"], "")
+        self.assertEqual(provider["api_keys"][0]["preview"], "$EXA.....")
         self.assertTrue(provider["api_keys"][0]["configured"])
 
         model = db.add_model(
@@ -95,6 +96,47 @@ class ProviderConfigurationTests(unittest.TestCase):
                 api_keys=updated["api_keys"],
             )
         self.assertEqual(db.delete_provider_result(provider["id"]).status, "in_use")
+
+    def test_same_model_name_can_be_used_by_different_providers(self):
+        first_provider = db.add_provider(
+            "First service",
+            base_urls=[{"name": "LLM", "value": "https://first.example/v1"}],
+        )
+        second_provider = db.add_provider(
+            "Second service",
+            base_urls=[{"name": "LLM", "value": "https://second.example/v1"}],
+        )
+
+        first = db.add_model(
+            "Shared model",
+            "vendor/model",
+            "",
+            "",
+            "",
+            "cloud",
+            first_provider["id"],
+            first_provider["base_urls"][0]["id"],
+        )
+        second = db.add_model(
+            "Shared model",
+            "vendor/model",
+            "",
+            "",
+            "",
+            "cloud",
+            second_provider["id"],
+            second_provider["base_urls"][0]["id"],
+        )
+
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(
+            [model["name"] for model in db.list_models()],
+            ["Shared model", "Shared model"],
+        )
+        self.assertIsNone(db.get_model_by_name("Shared model"))
+        labels = [option["label"] for option in db.get_supervisor_config()["model_options"]]
+        self.assertTrue(any("First service" in label for label in labels))
+        self.assertTrue(any("Second service" in label for label in labels))
 
     def test_embedding_and_voice_models_keep_adapters_separate_from_provider(self):
         provider = db.add_provider(
@@ -152,6 +194,7 @@ class ProviderConfigurationTests(unittest.TestCase):
                 )
                 self.assertEqual(created.status_code, 200)
                 self.assertEqual(created.json()["api_keys"][0]["value"], "")
+                self.assertEqual(created.json()["api_keys"][0]["preview"], "priv.....")
                 listed = await client.get("/api/providers")
                 saved = next(
                     provider
@@ -159,6 +202,7 @@ class ProviderConfigurationTests(unittest.TestCase):
                     if provider["name"] == "API provider"
                 )
                 self.assertEqual(saved["api_keys"][0]["value"], "")
+                self.assertEqual(saved["api_keys"][0]["preview"], "priv.....")
                 self.assertTrue(saved["api_keys"][0]["configured"])
 
         asyncio.run(exercise_api())

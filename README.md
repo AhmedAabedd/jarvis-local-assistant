@@ -388,14 +388,30 @@ originating channel.
 `python telegram_cli.py` remains available when Telegram needs to run without the
 web server. Do not run both long-poll consumers for the same bot at once.
 
+### Meta social apps
+
+Facebook, Messenger, Instagram, Threads, and WhatsApp are grouped under
+**Agent Studio → Meta**, with a separate, consistent tab for each app. Facebook,
+Messenger, Instagram, and Threads use a shared multi-account OAuth foundation but
+remain separate connections and built-in agents. OAuth connects accounts; the
+first-party LangGraph tools call the official APIs; MCP is optional.
+
+The Meta WhatsApp tab is the business-inbox agent integration. It is independent
+from the paired WhatsApp chat channel under Connections.
+
+The implementation deliberately excludes Facebook Groups, personal Facebook and
+Instagram accounts, scraping, browser/password automation, and cold automated DMs.
+See the [Meta integration report](docs/meta-social-integration.md) for the exact
+supported operations, security boundaries, setup, and primary Meta sources.
+
 ### WhatsApp
 
 WhatsApp is a first-class server-managed channel built on Meta's official WhatsApp
-Business Cloud API. It has no separate entry point and no unofficial browser
+Business Cloud API. It has its own **Connections → WhatsApp** entry and no unofficial browser
 automation. Incoming messages reach FastAPI through a signed webhook, and replies
 are sent through the Graph API.
 
-Configure it from **Agent Studio → WhatsApp** using the values from the Meta App
+Configure it from **Agent Studio → Connections → WhatsApp** using the values from the Meta App
 Dashboard:
 
 1. Add the phone number ID, WhatsApp Business Account ID, permanent access token,
@@ -484,7 +500,8 @@ channels, visually distinct from supervisor-to-specialist delegation.
 | Supervisor | Model selection, identity, and direct non-delegation tools |
 | Voice | STT and TTS providers, models, voices, endpoints, languages, and keys |
 | Telegram | Token lifecycle, connection testing, pairing, activation, and status |
-| WhatsApp | Cloud API credentials, signed webhook, connection testing, pairing, templates, and status |
+| WhatsApp | Private channel credentials, webhook, phone pairing, activation, and status |
+| Meta | Separate Facebook, Messenger, Instagram, Threads, and WhatsApp Business agent connections, official OAuth/API capabilities, accounts, and status |
 | Heartbeat | Multiple scheduled tasks, prompts, scoped agents/tools, per-task runs, and notifications |
 | Profile | User name, assistant name, location, and preferred response language |
 
@@ -578,7 +595,7 @@ python server.py
 ```
 
 Open `http://127.0.0.1:8000` for the assistant and use **Agent Studio** to manage
-models, MCP servers, specialists, voice, Telegram, WhatsApp, Heartbeat, and profile
+models, MCP servers, specialists, voice, Telegram, Meta, Heartbeat, and profile
 settings.
 
 For frontend development, run `npm run dev` from `frontend/` in a second terminal
@@ -690,6 +707,8 @@ mounir/
   heartbeat.py            Safe scheduler and change-notification pipeline
   telegram_bridge.py      Pairing and lifecycle-managed Telegram transport
   whatsapp_bridge.py      Signed webhook and official WhatsApp Cloud API transport
+  meta_social.py          Official Meta OAuth, account discovery, and Graph API operations
+  whatsapp_business.py    Separate WhatsApp Business inbox and agent operations
   llm.py                  Supervisor/provider adapters
   stt.py / tts.py         Speech provider adapters
   voice.py / wakeword.py  Voice session and wake-word behavior

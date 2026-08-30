@@ -53,10 +53,7 @@ export function WhatsAppPage() {
   if (query.isLoading || !state)
     return (
       <>
-        <PageHeader
-          title="WhatsApp"
-          description="Connect through the official WhatsApp Business Platform"
-        />
+        <PageHeader title="WhatsApp channel" description="Chat privately with your assistant from a paired phone" />
         <Loading />
       </>
     )
@@ -80,13 +77,13 @@ export function WhatsAppPage() {
   return (
     <>
       <PageHeader
-        title="WhatsApp"
-        description="Connect through the official WhatsApp Business Platform"
+        title="WhatsApp channel"
+        description="Chat privately with your assistant from a paired phone"
       />
       <div className="page-content stack">
         <ConnectionHero
           image="/images/whatsapp.svg"
-          title={state.verified_name || state.display_phone_number || 'WhatsApp Business'}
+          title={state.verified_name || state.display_phone_number || 'WhatsApp channel'}
           detail={
             state.last_error ||
             (state.paired
@@ -96,7 +93,7 @@ export function WhatsAppPage() {
           status={state.connection_status}
         />
         <EnableCard
-          name="WhatsApp"
+          name="WhatsApp channel"
           assistant={assistant}
           checked={state.enabled}
           busy={update.isPending}

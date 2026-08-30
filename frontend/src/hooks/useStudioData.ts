@@ -20,6 +20,10 @@ export const keys = {
   voice: ['voice'] as const,
   telegram: ['telegram'] as const,
   whatsapp: ['whatsapp'] as const,
+  metaPlatforms: ['meta-platforms'] as const,
+  metaConnections: ['meta-connections'] as const,
+  metaWhatsAppConnections: ['meta-whatsapp-connections'] as const,
+  metaWhatsAppDefinition: ['meta-whatsapp-definition'] as const,
   heartbeat: ['heartbeat'] as const,
 }
 

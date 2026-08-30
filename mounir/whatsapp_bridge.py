@@ -409,7 +409,7 @@ class WhatsAppBridge:
             return
         if text == "/reset":
             with self.turn_lock:
-                self.agent.conversation.reset()
+                self.agent.reset()
             self.send_text(normalized_phone, "Conversation cleared.")
             return
 

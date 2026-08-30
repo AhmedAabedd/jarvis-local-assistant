@@ -53,6 +53,8 @@ function ProviderForm({
         key: entry.name,
         value: '',
         configured: entry.configured,
+        locked: true,
+        preview: entry.preview,
       })) || [],
   )
 
@@ -96,7 +98,7 @@ function ProviderForm({
       />
       <KeyValueEditor
         title="API keys"
-        hint="Values stay private. Environment references such as $PROVIDER_API_KEY are supported."
+        hint="Saved keys are locked. Remove one and add a new key to replace it."
         entries={apiKeys}
         onChange={setApiKeys}
         namePlaceholder="Credential name"

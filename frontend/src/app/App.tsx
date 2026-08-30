@@ -43,6 +43,9 @@ const TelegramPage = lazy(() =>
 const WhatsAppPage = lazy(() =>
   import('../features/settings/WhatsAppPage').then((module) => ({ default: module.WhatsAppPage })),
 )
+const MetaPage = lazy(() =>
+  import('../features/settings/MetaPage').then((module) => ({ default: module.MetaPage })),
+)
 const HeartbeatPage = lazy(() =>
   import('../features/settings/HeartbeatPage').then((module) => ({
     default: module.HeartbeatPage,
@@ -68,6 +71,7 @@ export function App() {
           <Route path="providers" element={<ProvidersPage />} />
           <Route path="telegram" element={<TelegramPage />} />
           <Route path="whatsapp" element={<WhatsAppPage />} />
+          <Route path="meta/:platform?" element={<MetaPage />} />
           <Route path="heartbeat" element={<HeartbeatPage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="*" element={<Navigate to="/admin" replace />} />

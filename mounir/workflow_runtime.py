@@ -10,7 +10,7 @@ from typing import Annotated, Any, TypedDict
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, START, StateGraph
 
-from . import action_decline, db, graph_runtime, llm, mcp_agents
+from . import action_decline, context_history, db, graph_runtime, llm, mcp_agents
 from .specialists.mcp_agent import run as run_mcp_agent
 
 MAX_WORKFLOW_DEPTH = 8
@@ -91,6 +91,7 @@ def async_delegate_tool(
     placement: dict,
     protected_attempts: set[str],
     lineage: tuple[int, ...],
+    context_history_store: context_history.ContextHistory | None = None,
 ) -> StructuredTool:
     """Build an executable workflow tool for a subagent/orchestrator ToolNode."""
 
@@ -103,6 +104,7 @@ def async_delegate_tool(
             task,
             protected_attempts=protected_attempts,
             lineage=lineage,
+            context_history_store=context_history_store,
         )
         if isinstance(report, action_decline.Signal):
             outcome = action_decline.parse(report)
@@ -123,6 +125,7 @@ def _delegate_tool(
     lineage: tuple[int, ...],
     decline_state: dict[str, action_decline.Signal | None],
     execution_lock: threading.Lock,
+    context_history_store: context_history.ContextHistory | None,
 ) -> StructuredTool:
     """Build a synchronous executable workflow tool for an orchestrator."""
 
@@ -137,6 +140,7 @@ def _delegate_tool(
                 task,
                 protected_attempts=protected_attempts,
                 lineage=lineage,
+                context_history_store=context_history_store,
             )
             if isinstance(report, action_decline.Signal):
                 decline_state["signal"] = report
@@ -157,6 +161,7 @@ def _subagent_delegate_tool(
     protected_attempts: set[str],
     decline_state: dict[str, action_decline.Signal | None],
     execution_lock: threading.Lock,
+    context_history_store: context_history.ContextHistory | None,
 ) -> StructuredTool:
     def delegate(
         task: Annotated[str, "Task with every detail the subagent needs."],
@@ -169,6 +174,7 @@ def _subagent_delegate_tool(
                 spec,
                 protected_attempts,
                 all_specs=all_specs,
+                context_history_store=context_history_store,
             )
             if isinstance(report, action_decline.Signal):
                 decline_state["signal"] = report
@@ -204,6 +210,7 @@ def _run_direct(
     task: str,
     protected_attempts: set[str],
     lineage: tuple[int, ...],
+    context_history_store: context_history.ContextHistory | None,
 ) -> str:
     workflow_id = int(workflow["id"])
     specs = db.build_specs(workflow_id)
@@ -253,6 +260,7 @@ def _run_direct(
                         selected_spec,
                         protected_attempts,
                         all_specs=specs,
+                        context_history_store=context_history_store,
                     )
                 return {
                     "output": report,
@@ -276,6 +284,7 @@ def _run_direct(
                     _step_task(state["request"], state.get("completed", [])),
                     protected_attempts=protected_attempts,
                     lineage=lineage,
+                    context_history_store=context_history_store,
                 )
                 return {
                     "output": report,
@@ -315,6 +324,7 @@ def _run_agentic(
     task: str,
     protected_attempts: set[str],
     lineage: tuple[int, ...],
+    context_history_store: context_history.ContextHistory | None,
 ) -> str:
     model_id = workflow.get("model_id")
     if model_id is None:
@@ -335,6 +345,7 @@ def _run_agentic(
             protected_attempts,
             decline_state,
             execution_lock,
+            context_history_store,
         )
         for spec in root_specs
     ]
@@ -345,6 +356,7 @@ def _run_agentic(
             lineage,
             decline_state,
             execution_lock,
+            context_history_store,
         )
         for placement in attached_workflows(workflow_id, None)
     )
@@ -394,6 +406,7 @@ def run(
     protected_attempts: set[str] | None = None,
     *,
     lineage: tuple[int, ...] = (),
+    context_history_store: context_history.ContextHistory | None = None,
 ) -> str:
     """Execute one workflow and return its single report to the caller."""
     workflow = db.get_workflow(int(workflow_id))
@@ -408,9 +421,13 @@ def run(
     attempts = protected_attempts if protected_attempts is not None else set()
     current_lineage = (*lineage, current_id)
     if workflow["execution_mode"] == "direct":
-        return _run_direct(workflow, task, attempts, current_lineage)
+        return _run_direct(
+            workflow, task, attempts, current_lineage, context_history_store
+        )
 
-    report = _run_agentic(workflow, task, attempts, current_lineage)
+    report = _run_agentic(
+        workflow, task, attempts, current_lineage, context_history_store
+    )
     if isinstance(report, action_decline.Signal):
         return action_decline.add_agent_context(
             report, agent=workflow["name"]

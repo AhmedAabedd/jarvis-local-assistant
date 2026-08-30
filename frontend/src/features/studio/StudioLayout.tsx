@@ -6,8 +6,9 @@ import {
   ChevronLeft,
   Database,
   LayoutDashboard,
-  MessageCircle,
   Mic2,
+  MessageCircle,
+  Orbit,
   Radio,
   UserRound,
   Workflow,
@@ -33,6 +34,7 @@ const settings = [
 const connections = [
   { to: '/admin/telegram', label: 'Telegram', icon: Radio },
   { to: '/admin/whatsapp', label: 'WhatsApp', icon: MessageCircle },
+  { to: '/admin/meta/facebook', label: 'Meta', icon: Orbit },
 ]
 
 export function StudioLayout() {

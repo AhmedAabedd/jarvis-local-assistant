@@ -529,7 +529,7 @@ class TelegramBridge:
             return
         if command == "reset":
             with self.turn_lock:
-                self.agent.conversation.reset()
+                self.agent.reset()
             self._send(chat_id, "Conversation cleared.")
             return
         if command == "help":

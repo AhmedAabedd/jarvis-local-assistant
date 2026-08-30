@@ -6,6 +6,8 @@ export interface Entry {
   key: string
   value: string
   configured?: boolean
+  locked?: boolean
+  preview?: string
 }
 export function KeyValueEditor({
   title,
@@ -40,37 +42,42 @@ export function KeyValueEditor({
         </Button>
       </div>
       {!entries.length && <span className="field__hint">No values configured.</span>}
-      {entries.map((entry, index) => (
-        <div className="key-value-row" key={index}>
-          <input
-            aria-label={`${title} name`}
-            placeholder={namePlaceholder}
-            value={entry.key}
-            onChange={(e) =>
-              onChange(entries.map((v, i) => (i === index ? { ...v, key: e.target.value } : v)))
-            }
-          />
-          <input
-            aria-label={`${title} value`}
-            type={secret ? 'password' : 'text'}
-            placeholder={
-              entry.configured && !entry.value ? 'Saved — enter to replace' : valuePlaceholder
-            }
-            value={entry.value}
-            onChange={(e) =>
-              onChange(entries.map((v, i) => (i === index ? { ...v, value: e.target.value } : v)))
-            }
-          />
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => onChange(entries.filter((_, i) => i !== index))}
-            aria-label="Remove"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-      ))}
+      {entries.map((entry, index) => {
+        const locked = Boolean(entry.locked)
+        return (
+          <div className="key-value-row" key={index}>
+            <input
+              aria-label={`${title} name`}
+              placeholder={namePlaceholder}
+              value={entry.key}
+              disabled={locked}
+              onChange={(e) =>
+                onChange(entries.map((v, i) => (i === index ? { ...v, key: e.target.value } : v)))
+              }
+            />
+            <input
+              aria-label={`${title} value`}
+              type={secret && !locked ? 'password' : 'text'}
+              placeholder={
+                entry.configured && !entry.value ? 'Saved — enter to replace' : valuePlaceholder
+              }
+              value={locked ? entry.preview || '.....' : entry.value}
+              disabled={locked}
+              onChange={(e) =>
+                onChange(entries.map((v, i) => (i === index ? { ...v, value: e.target.value } : v)))
+              }
+            />
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => onChange(entries.filter((_, i) => i !== index))}
+              aria-label="Remove"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        )
+      })}
     </div>
   )
 }

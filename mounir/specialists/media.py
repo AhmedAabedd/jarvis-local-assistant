@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 
 from langchain_core.tools import tool
 
-from .. import agent_skills, config, graph_runtime, llm
+from .. import agent_skills, config, context_history, graph_runtime, llm
 from . import artifacts
 
 MAX_TOOL_ROUNDS = 8
@@ -143,7 +143,12 @@ TOOLS = [
 ]
 
 
-def run(task: str, allowed_tools: list[str] | None = None) -> str:
+def run(
+    task: str,
+    allowed_tools: list[str] | None = None,
+    *,
+    context_history_store: context_history.ContextHistory | None = None,
+) -> str:
     """Run the artifact specialist and return its plain-text report."""
     from .. import db
 
@@ -165,8 +170,11 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
     ]
     if skill_prompt:
         messages.append({"role": "system", "content": skill_prompt})
+    messages.extend(
+        context_history.messages(context_history_store, builtin_key="media")
+    )
     messages.append({"role": "user", "content": task})
-    return graph_runtime.run_tool_agent(
+    report = graph_runtime.run_tool_agent(
         messages,
         selected_tools,
         lambda history, schemas: llm.openai_chat(
@@ -183,3 +191,7 @@ def run(task: str, allowed_tools: list[str] | None = None) -> str:
         error_formatter=lambda _executed, error: f"Files and Media failed: {error}",
         confirmation_tools=confirmation_tools,
     )
+    context_history.remember(
+        context_history_store, task, report, builtin_key="media"
+    )
+    return report

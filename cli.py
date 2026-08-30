@@ -370,7 +370,7 @@ def _handle_command(cmd: str, agent: Agent) -> bool:
     if name in ("/exit", "/quit"):
         return True
     if name == "/reset":
-        agent.conversation.reset()
+        agent.reset()
         print("[conversation cleared]\n")
     elif name == "/save":
         path = agent.conversation.save()

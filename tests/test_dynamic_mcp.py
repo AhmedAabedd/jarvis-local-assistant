@@ -990,14 +990,15 @@ class DatabaseTests(TemporaryDatabaseTest):
 
     def test_builtin_agent_connection_is_distinct_from_enabled_state(self):
         db.init()
+        builtin_count = len(builtin_agents.definitions())
         disabled = db.update_builtin_agent("system", enabled=False)
         self.assertFalse(disabled["enabled"])
         self.assertTrue(disabled["connected"])
-        self.assertEqual(len(db.list_builtin_agents(connected_only=True)), 3)
+        self.assertEqual(len(db.list_builtin_agents(connected_only=True)), builtin_count)
         disconnected = db.update_builtin_agent("system", connected=False)
         self.assertFalse(disconnected["connected"])
-        self.assertEqual(len(db.list_builtin_agents()), 3)
-        self.assertEqual(len(db.list_builtin_agents(connected_only=True)), 2)
+        self.assertEqual(len(db.list_builtin_agents()), builtin_count)
+        self.assertEqual(len(db.list_builtin_agents(connected_only=True)), builtin_count - 1)
         db.init()
         saved = next(agent for agent in db.list_builtin_agents() if agent["key"] == "system")
         self.assertFalse(saved["enabled"])
@@ -3892,7 +3893,9 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(overview_response.status_code, 200)
                 overview = overview_response.json()
                 self.assertEqual(overview["supervisor"]["name"], "Mounir")
-                self.assertEqual(len(overview["builtins"]), 3)
+                self.assertEqual(
+                    len(overview["builtins"]), len(builtin_agents.definitions())
+                )
                 self.assertTrue(overview["supervisor"]["model"])
                 self.assertTrue(overview["supervisor"]["provider"])
                 self.assertTrue(overview["supervisor"]["description"])
@@ -4181,7 +4184,9 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(disconnected.status_code, 200)
                 self.assertFalse(disconnected.json()["connected"])
                 builtins = await client.get("/api/builtin-agents")
-                self.assertEqual(len(builtins.json()), 3)
+                self.assertEqual(
+                    len(builtins.json()), len(builtin_agents.definitions())
+                )
                 overview = await client.get("/api/agent-overview")
                 self.assertFalse(
                     any(item["key"] == "media" for item in overview.json()["builtins"])

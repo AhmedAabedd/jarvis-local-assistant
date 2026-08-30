@@ -191,6 +191,23 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
     useImperativeHandle(ref, () => ({ save: requestSave }))
     useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange])
     useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
+    useEffect(() => {
+      if (!readOnly) return
+      const savedConfirm = stringList(
+        item.confirm_tools,
+        item.tools?.filter((tool) => tool.requires_confirmation).map((tool) => tool.name) || [],
+      )
+      setModelId(Number(item.model_id || 0))
+      setGenerationModelId(Number(item.generation_model_id || 0))
+      setAutomaticKnowledgeEnabled(item.automatic_knowledge_enabled !== false)
+      setEmbeddingEnabled(Boolean(item.embedding_enabled))
+      setEmbeddingModelId(Number(item.embedding_model_id || 0))
+      setConfirmationMode(
+        savedConfirm.includes('*') ? 'all' : savedConfirm.length ? 'selected' : 'none',
+      )
+      setConfirmedTools(new Set(savedConfirm.filter((tool) => tool !== '*')))
+      setSelectedSkills(new Set((item.skill_ids || []).map(Number)))
+    }, [item, readOnly])
 
     return (
       <div className={compact ? 'builtin-agent-write-form' : 'stack'}>
@@ -251,7 +268,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                       <option value="">Installation fallback</option>
                       {models.map((model) => (
                         <option key={model.id} value={model.id}>
-                          {model.name} — {model.provider}
+                          {model.name} — {model.provider_name || model.provider} — {model.model}
                         </option>
                       ))}
                     </select>
@@ -269,7 +286,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                         <option value="">Not configured</option>
                         {models.map((model) => (
                           <option key={model.id} value={model.id}>
-                            {model.name} — {model.provider}
+                            {model.name} — {model.provider_name || model.provider} — {model.model}
                           </option>
                         ))}
                       </select>
@@ -400,7 +417,8 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                                   model.id !== embeddingModelId
                                 }
                               >
-                                {model.name} — {model.model}
+                                {model.name} — {model.provider_name || model.adapter} —{' '}
+                                {model.model}
                                 {model.dimensions ? ` · ${model.dimensions}d` : ''}
                                 {model.connection_status !== 'connected'
                                   ? ` · ${model.connection_status}`

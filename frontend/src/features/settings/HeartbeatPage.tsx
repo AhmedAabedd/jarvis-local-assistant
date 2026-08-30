@@ -1,14 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bell, ChevronLeft, Clock, History, Plus, Play, Save, Trash2, Users, X } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Bell, ChevronLeft, Clock, Edit3, History, Play, Plus, Trash2, Users } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
-import type { HeartbeatCapability, HeartbeatSettings, HeartbeatTask } from '../../api/types'
+import type { HeartbeatSettings, HeartbeatTask } from '../../api/types'
 import { Button } from '../../components/ui/Button'
-import { Card } from '../../components/ui/Card'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { Feedback } from '../../components/ui/Feedback'
-import { Field } from '../../components/ui/Field'
 import { Loading } from '../../components/ui/Loading'
 import { SectionTabs } from '../../components/ui/SectionTabs'
 import { Status } from '../../components/ui/Status'
@@ -16,112 +14,34 @@ import { Switch } from '../../components/ui/Switch'
 import { keys } from '../../hooks/useStudioData'
 import { readable } from '../resources/helpers'
 import { PageHeader } from '../studio/PageHeader'
+import { formatHeartbeatInterval, HeartbeatTaskWizard } from './HeartbeatTaskWizard'
 
-interface TaskDraft {
-  id?: number
-  name: string
-  enabled: boolean
-  interval_minutes: number
-  execution_limit: number
-  remaining_runs: number
-  saved_execution_limit: number
-  saved_remaining_runs: number
-  instructions: string
-  notify_telegram: boolean
-  notify_whatsapp: boolean
-  selectedAgents: Set<string>
-  selectedTools: Set<string>
-  recent_runs: HeartbeatTask['recent_runs']
-  last_status: string
-  next_run_at?: string | null
+type DetailTab = 'setup' | 'access' | 'history'
+
+function Detail({
+  label,
+  value,
+  full = false,
+}: {
+  label: string
+  value: string | number
+  full?: boolean
+}) {
+  return (
+    <dl className={`detail ${full ? 'detail--full' : ''}`}>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </dl>
+  )
 }
 
-type EditorTab = 'setup' | 'access' | 'history'
-
-function toolKey(agent: string, tool: string) {
-  return `${agent}::${tool}`
+function dateLabel(value?: string | null) {
+  return value ? new Date(value).toLocaleString() : 'Not scheduled'
 }
 
-function capabilityKey(agent: HeartbeatCapability) {
-  return agent.key || agent.id || ''
-}
-
-function taskDraft(task: HeartbeatTask): TaskDraft {
-  return {
-    id: task.id,
-    name: task.name,
-    enabled: task.enabled,
-    interval_minutes: task.interval_minutes,
-    execution_limit: task.execution_limit,
-    remaining_runs: task.remaining_runs,
-    saved_execution_limit: task.execution_limit,
-    saved_remaining_runs: task.remaining_runs,
-    instructions: task.instructions,
-    notify_telegram: task.notify_telegram,
-    notify_whatsapp: task.notify_whatsapp,
-    selectedAgents: new Set(task.selected_agents),
-    selectedTools: new Set(
-      task.selected_tools.map((item) => toolKey(item.agent_key, item.tool_name)),
-    ),
-    recent_runs: task.recent_runs || [],
-    last_status: task.last_status,
-    next_run_at: task.next_run_at,
-  }
-}
-
-function newTask(): TaskDraft {
-  return {
-    name: '',
-    enabled: false,
-    interval_minutes: 30,
-    execution_limit: -1,
-    remaining_runs: -1,
-    saved_execution_limit: -1,
-    saved_remaining_runs: -1,
-    instructions: '',
-    notify_telegram: true,
-    notify_whatsapp: false,
-    selectedAgents: new Set(),
-    selectedTools: new Set(),
-    recent_runs: [],
-    last_status: 'never',
-  }
-}
-
-function taskPayload(draft: TaskDraft) {
-  return {
-    name: draft.name,
-    enabled: draft.enabled,
-    interval_minutes: draft.interval_minutes,
-    execution_limit: draft.execution_limit,
-    instructions: draft.instructions,
-    notify_telegram: draft.notify_telegram,
-    notify_whatsapp: draft.notify_whatsapp,
-    selected_agents: [...draft.selectedAgents],
-    selected_tools: [...draft.selectedTools].map((value) => {
-      const separator = value.indexOf('::')
-      return {
-        agent_key: value.slice(0, separator),
-        tool_name: value.slice(separator + 2),
-      }
-    }),
-  }
-}
-
-function cloneDraft(draft: TaskDraft): TaskDraft {
-  return {
-    ...draft,
-    selectedAgents: new Set(draft.selectedAgents),
-    selectedTools: new Set(draft.selectedTools),
-    recent_runs: [...draft.recent_runs],
-  }
-}
-
-function intervalLabel(minutes: number) {
-  if (minutes < 60) return `${minutes} min`
-  if (minutes === 60) return 'hour'
-  if (minutes === 1440) return 'day'
-  return `${minutes / 60} hours`
+function runLimitLabel(task: HeartbeatTask) {
+  if (task.execution_limit === -1) return 'Run forever'
+  return `${task.remaining_runs} of ${task.execution_limit} remaining`
 }
 
 export function HeartbeatPage() {
@@ -129,34 +49,16 @@ export function HeartbeatPage() {
   const query = useQuery({ queryKey: keys.heartbeat, queryFn: api.heartbeat.get })
   const state = query.data
   const [searchParams, setSearchParams] = useSearchParams()
-  const selectedTask = searchParams.get('task')
-  const [draft, setDraft] = useState<TaskDraft>()
-  const [savedDraft, setSavedDraft] = useState<TaskDraft>()
-  const [activeTab, setActiveTab] = useState<EditorTab>('setup')
+  const selectedId = Number(searchParams.get('task') || 0)
+  const selected = state?.tasks.find((task) => task.id === selectedId)
+  const [detailTab, setDetailTab] = useState<DetailTab>('setup')
+  const [wizardTask, setWizardTask] = useState<HeartbeatTask | null | undefined>(undefined)
   const [success, setSuccess] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<HeartbeatTask | null>(null)
-  const runLimitInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (!selectedTask) {
-      setDraft(undefined)
-      setSavedDraft(undefined)
-      return
-    }
-    if (selectedTask === 'new') {
-      setDraft((current) => {
-        if (current && !current.id) return current
-        const initial = newTask()
-        setSavedDraft(cloneDraft(initial))
-        return initial
-      })
-      return
-    }
-    const task = state?.tasks.find((item) => String(item.id) === selectedTask)
-    const next = task ? taskDraft(task) : undefined
-    setDraft(next)
-    setSavedDraft(next ? cloneDraft(next) : undefined)
-  }, [selectedTask, state?.tasks])
+    if (selectedId && state && !selected) setSearchParams({})
+  }, [selected, selectedId, setSearchParams, state])
 
   const syncTask = (task: HeartbeatTask) => {
     client.setQueryData<HeartbeatSettings>(keys.heartbeat, (current) => {
@@ -169,53 +71,57 @@ export function HeartbeatPage() {
           : [...current.tasks, task],
       }
     })
-    const next = taskDraft(task)
-    setDraft(next)
-    setSavedDraft(cloneDraft(next))
     setSearchParams({ task: String(task.id) })
   }
 
   const save = useMutation({
-    mutationFn: async (value: TaskDraft) =>
-      value.id
-        ? api.heartbeat.updateTask(value.id, taskPayload(value))
-        : api.heartbeat.createTask(taskPayload(value)),
+    mutationFn: ({ task, payload }: { task?: HeartbeatTask; payload: object }) =>
+      task ? api.heartbeat.updateTask(task.id, payload) : api.heartbeat.createTask(payload),
     onSuccess: (task) => {
       syncTask(task)
-      setSuccess('Heartbeat task saved.')
+      setWizardTask(undefined)
+      setSuccess(task.id === wizardTask?.id ? 'Heartbeat task updated.' : 'Heartbeat task created.')
     },
   })
+
   const run = useMutation({
-    mutationFn: async (value: TaskDraft) => {
-      const saved = value.id
-        ? await api.heartbeat.updateTask(value.id, taskPayload(value))
-        : await api.heartbeat.createTask(taskPayload(value))
-      return api.heartbeat.runTask(saved.id)
-    },
+    mutationFn: (id: number) => api.heartbeat.runTask(id),
     onSuccess: (task) => {
       syncTask(task)
       setSuccess('Heartbeat task completed.')
     },
   })
+
+  const toggleSchedule = useMutation({
+    mutationFn: ({ task, enabled }: { task: HeartbeatTask; enabled: boolean }) =>
+      api.heartbeat.updateTask(task.id, { enabled }),
+    onSuccess: (task) => {
+      syncTask(task)
+      setSuccess(task.enabled ? 'Heartbeat task enabled.' : 'Heartbeat task paused.')
+    },
+  })
+
   const remove = useMutation({
     mutationFn: (id: number) => api.heartbeat.removeTask(id),
     onSuccess: (_result, id) => {
       client.setQueryData<HeartbeatSettings>(keys.heartbeat, (current) =>
         current ? { ...current, tasks: current.tasks.filter((task) => task.id !== id) } : current,
       )
-      setDraft(undefined)
       setSearchParams({})
-      setActiveTab('setup')
       setDeleteTarget(null)
       setSuccess('Heartbeat task deleted.')
     },
   })
 
-  const selectedToolCount = useMemo(() => draft?.selectedTools.size || 0, [draft])
-  const draftDirty = Boolean(
-    draft &&
-    savedDraft &&
-    JSON.stringify(taskPayload(draft)) !== JSON.stringify(taskPayload(savedDraft)),
+  const capabilityMap = useMemo(
+    () =>
+      new Map(
+        (state?.capabilities || []).map((capability) => [
+          capability.key || capability.id || '',
+          capability,
+        ]),
+      ),
+    [state?.capabilities],
   )
 
   if (query.isLoading || !state) {
@@ -227,113 +133,71 @@ export function HeartbeatPage() {
     )
   }
 
-  const capabilities = state.capabilities || []
-  const updateDraft = (changes: Partial<TaskDraft>) =>
-    setDraft((current) => (current ? { ...current, ...changes } : current))
-
-  const selectDraft = (value: TaskDraft) => {
+  const openCreate = () => {
+    save.reset()
     setSuccess('')
-    setDraft(cloneDraft(value))
-    setSavedDraft(cloneDraft(value))
-    setActiveTab('setup')
-    setSearchParams({ task: value.id ? String(value.id) : 'new' })
+    setWizardTask(null)
   }
 
-  const setAgent = (agent: HeartbeatCapability, checked: boolean) => {
-    if (!draft) return
-    const key = capabilityKey(agent)
-    const agents = new Set(draft.selectedAgents)
-    const selectedTools = new Set(draft.selectedTools)
-    if (checked) {
-      agents.add(key)
-      agent.tools
-        .filter((tool) => !tool.requires_confirmation)
-        .forEach((tool) => selectedTools.add(toolKey(key, tool.name)))
-    } else {
-      agents.delete(key)
-      for (const selected of selectedTools) {
-        if (selected.startsWith(`${key}::`)) selectedTools.delete(selected)
-      }
-    }
-    updateDraft({ selectedAgents: agents, selectedTools })
+  const openEdit = () => {
+    if (!selected) return
+    save.reset()
+    setSuccess('')
+    setWizardTask(selected)
   }
 
-  const setTool = (agentKey: string, name: string, checked: boolean) => {
-    if (!draft) return
-    const selectedTools = new Set(draft.selectedTools)
-    checked
-      ? selectedTools.add(toolKey(agentKey, name))
-      : selectedTools.delete(toolKey(agentKey, name))
-    updateDraft({ selectedTools })
+  const openTask = (task: HeartbeatTask) => {
+    setSuccess('')
+    setDetailTab('setup')
+    setSearchParams({ task: String(task.id) })
   }
 
-  const error = save.error || run.error || remove.error
+  const headerActions = selected ? (
+    <div className="resource-header-actions">
+      <Button
+        className="resource-header-action"
+        icon={<Trash2 size={15} />}
+        onClick={() => setDeleteTarget(selected)}
+        aria-label="Delete heartbeat task"
+        title="Delete heartbeat task"
+      />
+      <Button
+        className="resource-header-action"
+        variant="primary"
+        icon={<Edit3 size={15} />}
+        onClick={openEdit}
+        aria-label="Edit heartbeat task"
+        title="Edit heartbeat task"
+      />
+    </div>
+  ) : (
+    <Button variant="primary" icon={<Plus size={15} />} onClick={openCreate}>
+      New task
+    </Button>
+  )
 
   return (
     <>
       <PageHeader
-        title={draft ? (draft.id ? 'Edit heartbeat' : 'Create heartbeat') : 'Heartbeat'}
+        title={selected ? selected.name : 'Heartbeat'}
         description={
-          draft
-            ? 'Configure the task, its agents, and notification delivery'
-            : 'Choose a heartbeat to view or edit it'
+          selected ? 'Saved heartbeat task configuration' : 'Schedule safe background tasks'
         }
         leading={
-          draft ? (
+          selected ? (
             <Button
-              icon={<ChevronLeft size={14} />}
-              onClick={() => {
-                setDraft(undefined)
-                setSuccess('')
-                setSearchParams({})
-              }}
-              aria-label="Back to tasks"
-              title="Back to tasks"
+              icon={<ChevronLeft size={15} />}
+              onClick={() => setSearchParams({})}
+              aria-label="Back to heartbeat tasks"
+              title="Back to heartbeat tasks"
             />
           ) : undefined
         }
-        actions={
-          draft ? (
-            <>
-              {draftDirty && (
-                <Button
-                  className="resource-header-action"
-                  icon={<X size={15} />}
-                  disabled={save.isPending || run.isPending}
-                  onClick={() => {
-                    if (!savedDraft) return
-                    save.reset()
-                    setSuccess('')
-                    setDraft(cloneDraft(savedDraft))
-                  }}
-                  aria-label="Discard changes"
-                  title="Discard changes"
-                />
-              )}
-              {(!draft.id || draftDirty) && (
-                <Button
-                  variant="primary"
-                  icon={<Save size={14} />}
-                  busy={save.isPending}
-                  disabled={run.isPending}
-                  onClick={() => {
-                    setSuccess('')
-                    save.mutate(draft)
-                  }}
-                >
-                  {draft.id ? 'Save' : 'Create'}
-                </Button>
-              )}
-            </>
-          ) : (
-            <Button icon={<Plus size={14} />} onClick={() => selectDraft(newTask())}>
-              New task
-            </Button>
-          )
-        }
+        actions={headerActions}
       />
-      <div className={`page-content heartbeat-workspace ${draft ? 'is-editing' : 'is-listing'}`}>
-        {!draft && (
+
+      <div className={`page-content heartbeat-workspace ${selected ? 'is-editing' : 'is-listing'}`}>
+        {!selected && (
           <div className="heartbeat-task-list">
             <div className="heartbeat-task-list__body">
               {!state.tasks.length && (
@@ -341,7 +205,7 @@ export function HeartbeatPage() {
                   <Bell size={22} />
                   <strong>No heartbeats yet</strong>
                   <small>Create a task for Mounir to run automatically.</small>
-                  <Button icon={<Plus size={14} />} onClick={() => selectDraft(newTask())}>
+                  <Button icon={<Plus size={14} />} onClick={openCreate}>
                     Create heartbeat
                   </Button>
                 </div>
@@ -351,13 +215,13 @@ export function HeartbeatPage() {
                   className="heartbeat-task-item"
                   type="button"
                   key={task.id}
-                  onClick={() => selectDraft(taskDraft(task))}
+                  onClick={() => openTask(task)}
                 >
                   <span>
                     <strong>{task.name}</strong>
                     <small className="heartbeat-task-item__meta">
                       <span>
-                        <Clock size={12} /> Every {intervalLabel(task.interval_minutes)}
+                        <Clock size={12} /> Every {formatHeartbeatInterval(task.interval_minutes)}
                       </span>
                       <span>
                         <History size={12} />{' '}
@@ -393,307 +257,129 @@ export function HeartbeatPage() {
           </div>
         )}
 
-        {draft && (
-          <div className="heartbeat-editor">
-            <Card
-              className="heartbeat-editor-card"
-              title={draft.id ? draft.name || 'Heartbeat task' : 'New task'}
-              description={
-                draft.enabled ? `Runs every ${intervalLabel(draft.interval_minutes)}` : 'Paused'
-              }
-              action={
-                <div className="heartbeat-editor__actions">
-                  {draft.id && (
-                    <Button
-                      variant="ghost"
-                      icon={<Trash2 size={14} />}
-                      aria-label="Delete task"
-                      onClick={() => {
-                        const task = state.tasks.find((item) => item.id === draft.id)
-                        if (task) setDeleteTarget(task)
-                      }}
-                    >
-                      <span className="heartbeat-action-label">Delete</span>
-                    </Button>
-                  )}
-                  <Button
-                    icon={<Play size={14} />}
-                    busy={run.isPending}
-                    disabled={save.isPending || draft.remaining_runs === 0}
-                    onClick={() => {
-                      setSuccess('')
-                      run.mutate(draft)
-                    }}
-                  >
-                    Run now
-                  </Button>
-                </div>
-              }
-            >
-              <div className="heartbeat-status-row">
-                <span>
-                  <strong>Automatic schedule</strong>
-                  <small>
-                    {draft.enabled
-                      ? 'Mounir will run this task automatically.'
-                      : 'You can still run it manually.'}
-                  </small>
-                </span>
+        {selected && (
+          <section className="card resource-workspace resource-workspace--readonly heartbeat-readonly-card">
+            <div className="setting-row readonly-setting-row heartbeat-readonly-summary">
+              <span>
+                <strong>Automatic schedule</strong>
+                <small>
+                  {selected.enabled
+                    ? `Working · runs every ${formatHeartbeatInterval(selected.interval_minutes)}`
+                    : 'Paused · you can still run it manually.'}
+                </small>
+              </span>
+              <div className="heartbeat-readonly-summary__actions">
                 <Switch
-                  checked={draft.enabled}
-                  onChange={(enabled) => updateDraft({ enabled })}
-                  label="Enable heartbeat task"
+                  checked={selected.enabled}
+                  disabled={toggleSchedule.isPending}
+                  onChange={(enabled) => {
+                    setSuccess('')
+                    toggleSchedule.mutate({ task: selected, enabled })
+                  }}
+                  label={selected.enabled ? 'Pause heartbeat task' : 'Enable heartbeat task'}
                 />
+                <Button
+                  icon={<Play size={14} />}
+                  busy={run.isPending}
+                  disabled={selected.remaining_runs === 0}
+                  onClick={() => {
+                    setSuccess('')
+                    run.mutate(selected.id)
+                  }}
+                >
+                  Run now
+                </Button>
               </div>
-
+            </div>
+            <div className="card__body heartbeat-readonly-body">
               <SectionTabs
                 className="heartbeat-tabs"
-                label="Heartbeat task sections"
-                value={activeTab}
+                label="Heartbeat task details"
+                value={detailTab}
                 options={[
                   { id: 'setup', label: 'Setup', icon: <Bell size={14} /> },
                   {
                     id: 'access',
                     label: 'Agents & tools',
                     icon: <Users size={14} />,
-                    count: draft.selectedAgents.size,
+                    count: selected.selected_agents.length,
                   },
                   {
                     id: 'history',
                     label: 'History',
                     icon: <History size={14} />,
-                    count: draft.recent_runs.length || undefined,
+                    count: selected.recent_runs.length || undefined,
                   },
                 ]}
-                onChange={(value) => setActiveTab(value as EditorTab)}
+                onChange={(value) => setDetailTab(value as DetailTab)}
               />
 
-              {activeTab === 'setup' && (
-                <div className="heartbeat-tab-content heartbeat-setup">
-                  <div className="form-grid">
-                    <Field full label="Task name">
-                      <input
-                        maxLength={120}
-                        value={draft.name}
-                        onChange={(event) => updateDraft({ name: event.target.value })}
-                        placeholder="Monitor important email"
-                      />
-                    </Field>
-                    <Field full label="How often?">
-                      <select
-                        value={draft.interval_minutes}
-                        onChange={(event) =>
-                          updateDraft({ interval_minutes: Number(event.target.value) })
-                        }
-                      >
-                        <option value={5}>Every 5 minutes</option>
-                        <option value={15}>Every 15 minutes</option>
-                        <option value={30}>Every 30 minutes</option>
-                        <option value={60}>Every hour</option>
-                        <option value={180}>Every 3 hours</option>
-                        <option value={360}>Every 6 hours</option>
-                        <option value={720}>Every 12 hours</option>
-                        <option value={1440}>Daily</option>
-                      </select>
-                    </Field>
-                    <div className="field field--full">
-                      <span className="field__label">Run limit</span>
-                      <div className="heartbeat-run-limit-controls">
-                        <div className="heartbeat-run-limit">
-                          <input
-                            type="checkbox"
-                            aria-label="Run forever"
-                            checked={draft.execution_limit === -1}
-                            onChange={(event) => {
-                              updateDraft(
-                                event.target.checked
-                                  ? { execution_limit: -1, remaining_runs: -1 }
-                                  : draft.saved_execution_limit === -1
-                                    ? { execution_limit: 1, remaining_runs: 1 }
-                                    : {
-                                        execution_limit: draft.saved_execution_limit,
-                                        remaining_runs: draft.saved_remaining_runs,
-                                      },
-                              )
-                              if (!event.target.checked) {
-                                window.requestAnimationFrame(() =>
-                                  runLimitInputRef.current?.focus(),
-                                )
-                              }
-                            }}
-                          />
-                          <span>Run forever</span>
+              {detailTab === 'setup' && (
+                <div className="heartbeat-tab-content detail-grid heartbeat-readonly-setup">
+                  <Detail label="Status" value={selected.enabled ? 'Working' : 'Paused'} />
+                  <Detail
+                    label="Schedule"
+                    value={`Every ${formatHeartbeatInterval(selected.interval_minutes)}`}
+                  />
+                  <Detail label="Run limit" value={runLimitLabel(selected)} />
+                  <Detail label="Next run" value={dateLabel(selected.next_run_at)} />
+                  <Detail
+                    label="Notifications"
+                    value={[
+                      'In-app',
+                      selected.notify_telegram ? 'Telegram' : '',
+                      selected.notify_whatsapp ? 'WhatsApp' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(', ')}
+                    full
+                  />
+                  <Detail label="Prompt" value={selected.instructions} full />
+                </div>
+              )}
+
+              {detailTab === 'access' && (
+                <div className="heartbeat-tab-content heartbeat-readonly-access">
+                  {!selected.selected_agents.length && (
+                    <div className="empty-state">No agents are assigned to this task.</div>
+                  )}
+                  {selected.selected_agents.map((agentKey) => {
+                    const capability = capabilityMap.get(agentKey)
+                    const tools = selected.selected_tools.filter(
+                      (tool) => tool.agent_key === agentKey,
+                    )
+                    return (
+                      <div className="heartbeat-readonly-agent" key={agentKey}>
+                        <span>
+                          <strong>{capability?.name || agentKey}</strong>
+                          <small>{capability?.description || 'Saved specialist agent'}</small>
+                        </span>
+                        <div className="chips">
+                          {tools.map((tool) => {
+                            const definition = capability?.tools.find(
+                              (item) => item.name === tool.tool_name,
+                            )
+                            return (
+                              <span className="chip" key={`${agentKey}:${tool.tool_name}`}>
+                                {definition?.label || readable(tool.tool_name)}
+                              </span>
+                            )
+                          })}
+                          {!tools.length && <small>No tools selected</small>}
                         </div>
-                        {draft.execution_limit !== -1 && (
-                          <input
-                            type="number"
-                            ref={runLimitInputRef}
-                            min={1}
-                            max={10000}
-                            step={1}
-                            value={draft.execution_limit}
-                            aria-label="Number of executions"
-                            onChange={(event) => {
-                              const execution_limit = Number(event.target.value)
-                              updateDraft({
-                                execution_limit,
-                                remaining_runs:
-                                  execution_limit === draft.saved_execution_limit
-                                    ? draft.saved_remaining_runs
-                                    : execution_limit,
-                              })
-                            }}
-                          />
-                        )}
                       </div>
-                      <span className="field__hint">
-                        {draft.execution_limit === -1
-                          ? 'Runs continuously until paused.'
-                          : `Remaining executions: ${draft.remaining_runs}`}
-                      </span>
-                    </div>
-                    <Field
-                      full
-                      label="What should Mounir do?"
-                      hint="Describe the exact result Mounir should check for or produce, including when it should notify you and what information the alert should contain."
-                    >
-                      <textarea
-                        rows={6}
-                        maxLength={4000}
-                        value={draft.instructions}
-                        onChange={(event) => updateDraft({ instructions: event.target.value })}
-                        placeholder="Check for unread messages from clients and notify me only when a reply needs my attention."
-                      />
-                    </Field>
-                  </div>
-                  <section className="heartbeat-delivery">
-                    <div className="heartbeat-section-heading">
-                      <div>
-                        <strong>Send notifications to</strong>
-                        <small>Alerts always appear in the app.</small>
-                      </div>
-                    </div>
-                    <div className="heartbeat-channel-list">
-                      <div>
-                        <span>
-                          <strong>Telegram</strong>
-                          <small>Paired chat</small>
-                        </span>
-                        <Switch
-                          checked={draft.notify_telegram}
-                          onChange={(notify_telegram) => updateDraft({ notify_telegram })}
-                          label="Telegram notifications"
-                        />
-                      </div>
-                      <div>
-                        <span>
-                          <strong>WhatsApp</strong>
-                          <small>Paired phone</small>
-                        </span>
-                        <Switch
-                          checked={draft.notify_whatsapp}
-                          onChange={(notify_whatsapp) => updateDraft({ notify_whatsapp })}
-                          label="WhatsApp notifications"
-                        />
-                      </div>
-                    </div>
-                  </section>
+                    )
+                  })}
                 </div>
               )}
 
-              {activeTab === 'access' && (
+              {detailTab === 'history' && (
                 <div className="heartbeat-tab-content">
-                  <div className="heartbeat-section-heading">
-                    <div>
-                      <strong>Who can work on this task?</strong>
-                      <small>
-                        Select agents, then keep only the tools they need. Approval-required actions
-                        are excluded.
-                      </small>
-                    </div>
-                    <span className="heartbeat-selection-summary">
-                      {draft.selectedAgents.size} agents · {selectedToolCount} tools
-                    </span>
-                  </div>
-                  <div className="heartbeat-agent-list">
-                    {capabilities.map((agent) => {
-                      const key = capabilityKey(agent)
-                      const selected = draft.selectedAgents.has(key)
-                      const safeTools = agent.tools.filter((tool) => !tool.requires_confirmation)
-                      const protectedCount = agent.tools.length - safeTools.length
-                      return (
-                        <section
-                          className={`heartbeat-agent-row ${selected ? 'is-selected' : ''} ${safeTools.length ? '' : 'is-unavailable'}`}
-                          key={key}
-                        >
-                          <label className="heartbeat-agent-row__header">
-                            <input
-                              type="checkbox"
-                              disabled={!safeTools.length && !selected}
-                              checked={selected}
-                              onChange={(event) => setAgent(agent, event.target.checked)}
-                            />
-                            <span>
-                              <strong>{agent.name}</strong>
-                              <small>{agent.description || 'Specialist agent'}</small>
-                            </span>
-                            <em>
-                              {safeTools.length
-                                ? `${safeTools.length} safe tool${safeTools.length === 1 ? '' : 's'}`
-                                : 'No safe tools'}
-                            </em>
-                          </label>
-                          {selected && (
-                            <div className="heartbeat-safe-tools">
-                              {safeTools.map((tool) => (
-                                <label key={tool.name}>
-                                  <input
-                                    type="checkbox"
-                                    checked={draft.selectedTools.has(toolKey(key, tool.name))}
-                                    onChange={(event) =>
-                                      setTool(key, tool.name, event.target.checked)
-                                    }
-                                  />
-                                  <span>
-                                    <strong>{tool.label || readable(tool.name)}</strong>
-                                    {(tool.server_name || tool.description) && (
-                                      <small>
-                                        {tool.server_name
-                                          ? `${tool.server_name}${tool.description ? ` · ${tool.description}` : ''}`
-                                          : tool.description}
-                                      </small>
-                                    )}
-                                  </span>
-                                </label>
-                              ))}
-                              {protectedCount > 0 && (
-                                <p>
-                                  {protectedCount} approval-required tool
-                                  {protectedCount === 1 ? '' : 's'} excluded.
-                                </p>
-                              )}
-                            </div>
-                          )}
-                        </section>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {activeTab === 'history' && (
-                <div className="heartbeat-tab-content">
-                  <div className="heartbeat-section-heading">
-                    <div>
-                      <strong>Recent activity</strong>
-                      <small>Only runs for this task appear here.</small>
-                    </div>
-                  </div>
                   <div className="run-list heartbeat-run-list">
-                    {!draft.recent_runs.length && (
+                    {!selected.recent_runs.length && (
                       <div className="empty-state">This task has not run yet.</div>
                     )}
-                    {draft.recent_runs.map((item) => (
+                    {selected.recent_runs.map((item) => (
                       <div className="run-row" key={item.id}>
                         <Status value={item.status} />
                         <p>
@@ -702,22 +388,43 @@ export function HeartbeatPage() {
                             item.error ||
                             `${item.trigger || 'Scheduled'} run`}
                         </p>
-                        <time>
-                          {item.started_at ? new Date(item.started_at).toLocaleString() : ''}
-                        </time>
+                        <time>{dateLabel(item.started_at)}</time>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
-            </Card>
-          </div>
+            </div>
+          </section>
         )}
+
         <Feedback
-          message={error instanceof Error ? error.message : success}
+          message={
+            run.error instanceof Error
+              ? run.error.message
+              : toggleSchedule.error instanceof Error
+                ? toggleSchedule.error.message
+                : remove.error instanceof Error
+                  ? remove.error.message
+                  : success
+          }
           kind={success ? 'success' : 'error'}
         />
       </div>
+
+      <HeartbeatTaskWizard
+        key={wizardTask === undefined ? 'closed' : wizardTask?.id || 'new'}
+        open={wizardTask !== undefined}
+        task={wizardTask || undefined}
+        capabilities={state.capabilities || []}
+        busy={save.isPending}
+        requestError={save.error instanceof Error ? save.error.message : ''}
+        onClose={() => setWizardTask(undefined)}
+        onSubmit={async (payload) => {
+          await save.mutateAsync({ task: wizardTask || undefined, payload })
+        }}
+      />
+
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="Delete heartbeat task?"

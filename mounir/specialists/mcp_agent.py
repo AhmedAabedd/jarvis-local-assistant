@@ -23,7 +23,15 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 from langchain_core.tools import StructuredTool
 
-from .. import action_decline, agent_skills, config, graph_runtime, llm, mcp_oauth
+from .. import (
+    action_decline,
+    agent_skills,
+    config,
+    context_history,
+    graph_runtime,
+    llm,
+    mcp_oauth,
+)
 
 MAX_TOOL_ROUNDS = 8
 MCP_TOOL_TIMEOUT_SECONDS = max(
@@ -274,6 +282,7 @@ async def _run_async(
     protected_attempts: set[str] | None = None,
     all_specs: list[dict] | None = None,
     lineage: tuple[int, ...] = (),
+    history: context_history.ContextHistory | None = None,
 ) -> str:
     confirm_tools = set(spec.get("confirm_tools") or [])
     dedupe_tools = set(spec.get("dedupe_tools") or [])
@@ -440,6 +449,7 @@ async def _run_async(
                                 protected_attempts,
                                 all_specs,
                                 (*lineage, child_node_id),
+                                history,
                             ),
                             timeout=MCP_AGENT_TIMEOUT_SECONDS,
                         )
@@ -483,7 +493,7 @@ async def _run_async(
                 )
                 framework_tools.extend(
                     workflow_runtime.async_delegate_tool(
-                        placement, protected_attempts, ()
+                        placement, protected_attempts, (), history
                     )
                     for placement in workflow_children
                 )
@@ -514,6 +524,12 @@ async def _run_async(
                         ),
                     }
                 )
+            messages.extend(
+                context_history.messages(
+                    history,
+                    subagent_node_id=spec.get("node_id"),
+                )
+            )
             messages.append({"role": "user", "content": task})
 
             async def call_model(history: list[dict], schemas: list[dict] | None):
@@ -558,17 +574,30 @@ async def _run_async(
                 ),
             )
             if isinstance(report, action_decline.Signal):
-                return action_decline.add_agent_context(
+                report = action_decline.add_agent_context(
                     report,
                     agent=spec["name"],
                     completed_actions=executed,
                 )
+            context_history.remember(
+                history,
+                task,
+                report,
+                subagent_node_id=spec.get("node_id"),
+            )
             return report
     except Exception as exc:
-        return (
+        report = (
             f"{spec['name']} agent failed while preparing its capabilities: "
             f"{_exc_detail(exc)}"
         )
+        context_history.remember(
+            history,
+            task,
+            report,
+            subagent_node_id=spec.get("node_id"),
+        )
+        return report
 
 
 def run(
@@ -577,6 +606,7 @@ def run(
     protected_attempts: set[str] | None = None,
     *,
     all_specs: list[dict] | None = None,
+    context_history_store: context_history.ContextHistory | None = None,
 ) -> str:
     """Run one dynamic MCP subagent on a task. Returns its plain-text report."""
     name = spec.get("name", "MCP")
@@ -603,15 +633,23 @@ def run(
                         (
                             int(spec.get("node_id") or spec["id"]),
                         ) if spec.get("id") is not None else (),
+                        context_history_store,
                     ),
                     timeout=MCP_AGENT_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
-                return (
+                report = (
                     f"{name} agent timed out after "
                     f"{MCP_AGENT_TIMEOUT_SECONDS:g} seconds. Its final external "
                     "state may be unknown; do not retry the task automatically."
                 )
+                context_history.remember(
+                    context_history_store,
+                    task,
+                    report,
+                    subagent_node_id=spec.get("node_id"),
+                )
+                return report
 
         result = asyncio.run(_bounded_run())
         return result if isinstance(result, action_decline.Signal) else result.strip()
@@ -620,4 +658,11 @@ def run(
         # Log the full traceback so the real cause is inspectable, even if the
         # summary shown to the user is short.
         traceback.print_exc()
-        return f"{name} agent failed: {detail}"
+        report = f"{name} agent failed: {detail}"
+        context_history.remember(
+            context_history_store,
+            task,
+            report,
+            subagent_node_id=spec.get("node_id"),
+        )
+        return report

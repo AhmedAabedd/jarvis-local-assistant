@@ -1102,7 +1102,7 @@ export function ConnectAgentModal({
                     <option value="">Choose a model…</option>
                     {models.map((model) => (
                       <option key={model.id} value={model.id}>
-                        {model.name} — {model.provider}
+                        {model.name} — {model.provider_name || model.provider} — {model.model}
                       </option>
                     ))}
                   </select>

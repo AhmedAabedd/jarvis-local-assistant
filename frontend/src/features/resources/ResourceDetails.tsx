@@ -206,7 +206,11 @@ function ReadonlyAgentDetails({
             <div className="detail detail--full detail-grid">
               <Detail
                 label="Model"
-                value={model ? `${model.name} — ${model.model}` : agent.model_name}
+                value={
+                  model
+                    ? `${model.name} — ${model.provider_name || model.provider} — ${model.model}`
+                    : agent.model_name
+                }
               />
               <Detail
                 label="Capabilities"
