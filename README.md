@@ -281,8 +281,8 @@ jobs.
 | Dynamic MCP specialists | OpenAI-compatible chat-completions endpoints with tool calling |
 | Files/Media and System | Configurable OpenAI-compatible provider/model profiles, initially NVIDIA-oriented |
 | Knowledge | Configurable Gemini/OpenAI-compatible profile |
-| Speech to text | Faster Whisper-compatible local models in CTranslate2 format, or provider-neutral OpenAI-compatible transcription APIs |
-| Text to speech | Local Piper, local MOSS-TTS-Nano ONNX, provider-neutral OpenAI-compatible speech APIs, or Google Cloud TTS |
+| Speech to text | OpenAI-compatible, Deepgram, ElevenLabs, Google, Azure, and AWS cloud adapters; in-process Faster Whisper and Wyoming local services |
+| Text to speech | OpenAI-compatible, Deepgram, ElevenLabs, Google, Azure, and AWS cloud adapters; in-process Piper/MOSS and Wyoming local services |
 
 An OpenAI-compatible endpoint can be local or remote. Ollama-compatible endpoints,
 LocalAI, vLLM, cloud gateways, and vendor endpoints can work for dynamic agents when
@@ -325,14 +325,14 @@ operations and are not treated as uploads.
 The web interface accepts recorded speech and can speak responses. A separate voice
 entry point supports push-to-talk and hands-free wake word operation.
 
-Supported voice backends:
+Supported one-shot voice adapters:
 
-- STT: local **Faster Whisper**, which accepts Whisper models in compatible
-  **CTranslate2 format**, or any hosted/self-hosted service implementing the
-  OpenAI-compatible `POST /audio/transcriptions` contract (including Groq)
-- TTS: local **Piper**, multilingual **MOSS-TTS-Nano ONNX**, any hosted/self-hosted
-  service implementing the OpenAI-compatible `POST /audio/speech` contract, or
-  native **Google Cloud TTS**
+- STT: **OpenAI-compatible**, **Deepgram**, **ElevenLabs**, **Google Cloud Speech**,
+  **Azure Speech**, **Amazon Transcribe**, local **Faster Whisper**, and local
+  **Wyoming** services
+- TTS: **OpenAI-compatible**, **Deepgram**, **ElevenLabs**, **Google Cloud TTS**,
+  **Azure Speech**, **Amazon Polly**, local **Piper**, local **MOSS-TTS-Nano
+  ONNX**, and local **Wyoming** services
 
 Local STT does not load arbitrary speech or audio model families. It supports only
 models that Faster Whisper can load. A recognized model name uses Faster Whisper's
@@ -341,14 +341,24 @@ as a full directory path and must already be converted to the compatible CTransl
 format. Other local STT engines can be connected only when they expose the supported
 OpenAI-compatible transcription API.
 
-Voice configuration—including model, voice, language, endpoint, and credential—is
-managed from **Agent Studio → Voice**. Voice-originated turns also receive an explicit
-instruction to answer naturally for speech, without Markdown-heavy formatting.
-Compatible connections accept either an API root such as `https://provider.example/v1`
-or the complete operation endpoint. Bearer API keys are optional, which allows local
-speech servers with no authentication. The model and voice fields are sent unchanged,
-so the available choices come from the connected service rather than a hard-coded
-provider allowlist.
+Voice configuration—including adapter, deployment location, model, voice, language,
+endpoint, credential, headers, and adapter-specific options—is managed from **Agent
+Studio → Voice**. Model and voice discovery is requested from the configured service
+when its API supports it; otherwise the interface explicitly accepts the provider's
+documented identifier. Each saved connection has a real synthesis or transcription
+test and a persisted health status.
+
+OpenAI-compatible TTS does not force WAV: the provider's default or a selected output
+format is accepted, its content type is preserved, and PCM is wrapped or compressed
+audio is decoded only when a legacy WAV consumer requires it. This includes gateways
+such as OpenRouter whose examples omit `response_format`. Provider records also allow
+optional routing headers such as `HTTP-Referer` and `X-OpenRouter-Title`.
+
+The current conversation pipeline is recorded-turn, one-shot speech. Provider
+realtime WebSocket protocols and asynchronous long-audio transcription are different
+capabilities and are not presented as supported modes. See
+[Speech integration architecture](docs/speech-integrations.md) for the exact adapter
+contracts and limitations.
 
 ### Telegram
 

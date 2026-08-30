@@ -27,6 +27,7 @@ import type {
   StoreSkill,
   SetupDescriptor,
   SetupActionResult,
+  SpeechAdapterSpec,
   Subagent,
   SubagentNode,
   SubagentPlacement,
@@ -131,6 +132,18 @@ export const api = {
     update: (id: number, body: object) =>
       request<VoiceModelRecord>(`/api/voice-models/${id}`, json('PUT', body)),
     remove: (id: number) => request(`/api/voice-models/${id}`, json('DELETE')),
+    adapters: (kind?: 'tts' | 'stt') =>
+      request<SpeechAdapterSpec[]>(`/api/speech-adapters${kind ? `?kind=${kind}` : ''}`),
+    discover: (body: object) =>
+      request<{ target: 'models' | 'voices'; items: Array<{ id: string; label: string }> }>(
+        '/api/voice-models/discover',
+        json('POST', body),
+      ),
+    test: (id: number) =>
+      request<{ ok: boolean; message: string; mime_type?: string; bytes?: number }>(
+        `/api/voice-models/${id}/test`,
+        json('POST'),
+      ),
   },
   servers: {
     list: () => request<McpServer[]>('/api/mcp-servers'),
@@ -296,24 +309,15 @@ export const api = {
     updateAccount: (id: number, enabled: boolean) =>
       request<MetaAccount>(`/api/meta/accounts/${id}`, json('PATCH', { enabled })),
     whatsapp: {
-      definition: () =>
-        request<MetaWhatsAppDefinition>('/api/meta/whatsapp/definition'),
-      connections: () =>
-        request<MetaWhatsAppConnection[]>('/api/meta/whatsapp/connections'),
+      definition: () => request<MetaWhatsAppDefinition>('/api/meta/whatsapp/definition'),
+      connections: () => request<MetaWhatsAppConnection[]>('/api/meta/whatsapp/connections'),
       create: (body: object) =>
         request<MetaWhatsAppConnection>('/api/meta/whatsapp/connections', json('POST', body)),
       update: (id: number, body: object) =>
-        request<MetaWhatsAppConnection>(
-          `/api/meta/whatsapp/connections/${id}`,
-          json('PUT', body),
-        ),
-      remove: (id: number) =>
-        request(`/api/meta/whatsapp/connections/${id}`, json('DELETE')),
+        request<MetaWhatsAppConnection>(`/api/meta/whatsapp/connections/${id}`, json('PUT', body)),
+      remove: (id: number) => request(`/api/meta/whatsapp/connections/${id}`, json('DELETE')),
       test: (id: number) =>
-        request<MetaWhatsAppConnection>(
-          `/api/meta/whatsapp/connections/${id}/test`,
-          json('POST'),
-        ),
+        request<MetaWhatsAppConnection>(`/api/meta/whatsapp/connections/${id}/test`, json('POST')),
     },
   },
   heartbeat: {

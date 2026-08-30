@@ -184,9 +184,14 @@ export function ChatPage() {
           const data = await response.json()
           if (!response.ok) throw new Error(data.error || 'Voice request failed.')
           if (data.text) chat.appendVoiceTurn(data.text, data.reply || '')
+          setAttachmentError(
+            data.voice_error ? `Voice output unavailable: ${data.voice_error}` : '',
+          )
           if (data.audio_b64) {
             setVoiceState('speaking')
-            const audio = new Audio(`data:audio/wav;base64,${data.audio_b64}`)
+            const audio = new Audio(
+              `data:${data.audio_mime || 'audio/wav'};base64,${data.audio_b64}`,
+            )
             audio.onended = () => setVoiceState('ready')
             audio.onerror = () => setVoiceState('ready')
             await audio.play()

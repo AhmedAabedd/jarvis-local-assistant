@@ -62,6 +62,7 @@ from mounir import (
     mcp_registry,
     mcp_oauth,
     skill_store,
+    speech_adapters,
     trace,
     whatsapp_business,
 )
@@ -666,7 +667,7 @@ async def voice_turn(file: UploadFile = File(...)):
     if wav_np.ndim > 1:
         wav_np = wav_np.mean(axis=1)
 
-    text, lang = stt.transcribe(wav_np)
+    text, lang = await asyncio.to_thread(stt.transcribe, wav_np)
     if not text:
         return JSONResponse({"text": "", "reply": "", "audio_b64": ""})
 
@@ -680,16 +681,28 @@ async def voice_turn(file: UploadFile = File(...)):
 
     reply = await loop.run_in_executor(None, respond)
 
-    # Synthesize reply to WAV bytes (in-memory, no playback on server side).
+    # Preserve the provider's real media type for browser playback. The CLI
+    # compatibility path can still normalize any supported format to WAV.
     audio_b64 = ""
+    audio_mime = ""
+    voice_error = ""
+    tts_runtime = None
     try:
-        wav_bytes = tts.synthesize_wav(reply)
-        if wav_bytes:
-            audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
-    except Exception:
-        pass  # UI will just show text if TTS isn't set up
+        tts_runtime = db.get_voice_runtime("tts")
+        audio_result = await asyncio.to_thread(
+            speech_adapters.synthesize, reply, tts_runtime
+        )
+        audio_result = audio_result.for_browser()
+        if audio_result.data:
+            audio_b64 = base64.b64encode(audio_result.data).decode("ascii")
+            audio_mime = audio_result.mime_type or "audio/wav"
+    except Exception as exc:
+        voice_error = speech_adapters.safe_error(exc, tts_runtime)
 
-    return JSONResponse({"text": text, "lang": lang, "reply": reply, "audio_b64": audio_b64})
+    return JSONResponse({
+        "text": text, "lang": lang, "reply": reply, "audio_b64": audio_b64,
+        "audio_mime": audio_mime, "voice_error": voice_error,
+    })
 
 
 # --- Admin: models, MCP servers, subagents, workflows -------------------------
@@ -705,6 +718,90 @@ async def get_tts_voices(provider: str, model: str):
         return tts.discover_voices(provider, model)
     except (OSError, TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/api/speech-adapters")
+async def list_speech_adapters(kind: str | None = None):
+    try:
+        return speech_adapters.adapter_catalog(kind)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+def _candidate_voice_runtime(req: dict) -> dict:
+    if req.get("id") not in (None, ""):
+        saved = db.get_voice_model_runtime(int(req["id"]))
+        if saved is None:
+            raise ValueError("Speech model not found.")
+        return saved
+    runtime = dict(req)
+    runtime["adapter"] = req.get("adapter") or req.get("provider")
+    runtime["headers"] = {}
+    if req.get("provider_id") not in (None, ""):
+        connection = db.resolve_provider_connection(
+            req.get("provider_id"),
+            req.get("provider_base_url_id"),
+            req.get("provider_api_key_id"),
+        )
+        runtime.update(
+            base_url=connection["base_url"], api_key=connection["api_key"],
+            headers=connection.get("headers") or {}, provider_name=connection["provider_name"],
+        )
+    return runtime
+
+
+@app.post("/api/voice-models/discover")
+async def discover_voice_model_options(req: dict):
+    try:
+        runtime = _candidate_voice_runtime(req)
+        kind = str(req.get("kind") or runtime.get("kind") or "").lower()
+        target = str(req.get("target") or "models").lower()
+        items = await asyncio.to_thread(speech_adapters.discover, kind, runtime, target)
+        return {"target": target, "items": items}
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/voice-models/{model_id}/test")
+async def test_voice_model(model_id: int):
+    runtime = db.get_voice_model_runtime(model_id)
+    if runtime is None:
+        return JSONResponse({"error": "Speech model not found."}, status_code=404)
+    try:
+        if runtime["kind"] == "tts":
+            result = await asyncio.to_thread(
+                speech_adapters.synthesize,
+                "Mounir speech connection test.",
+                runtime,
+            )
+            if not result.data:
+                raise speech_adapters.SpeechAdapterError("The provider returned no audio.")
+            mime = str(result.mime_type or "").split(";", 1)[0].lower()
+            if not (mime.startswith("audio/") or mime == "application/octet-stream"):
+                raise speech_adapters.SpeechAdapterError(
+                    f"The provider returned {mime or 'an unknown media type'} instead of audio."
+                )
+            summary = {
+                "ok": True, "kind": "tts", "mime_type": result.mime_type,
+                "bytes": len(result.data), "message": "Speech synthesis succeeded.",
+            }
+        else:
+            silence = io.BytesIO()
+            import wave
+            with wave.open(silence, "wb") as wav:
+                wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+                wav.writeframes(b"\x00\x00" * 8000)
+            result = await asyncio.to_thread(speech_adapters.transcribe, silence.getvalue(), runtime)
+            summary = {
+                "ok": True, "kind": "stt", "language": result.language,
+                "message": "Transcription request succeeded.",
+            }
+        db.save_voice_model_test(model_id)
+        return summary
+    except Exception as exc:
+        error = speech_adapters.safe_error(exc, runtime)
+        db.save_voice_model_test(model_id, error=error)
+        return JSONResponse({"error": error}, status_code=400)
 
 
 @app.put("/api/voice-settings")
@@ -1777,6 +1874,7 @@ async def create_provider(req: dict):
             req.get("description", ""),
             req.get("base_urls", []),
             req.get("api_keys", []),
+            req.get("headers", {}),
         )
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

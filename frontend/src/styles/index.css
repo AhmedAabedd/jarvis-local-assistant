@@ -1723,6 +1723,103 @@ select:disabled {
   font-size: 13px;
   line-height: 1.55;
 }
+.speech-adapter-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 13px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+}
+.speech-adapter-summary strong {
+  font-size: 12px;
+}
+.speech-adapter-summary p {
+  max-width: 650px;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.speech-adapter-summary .chips {
+  justify-content: flex-end;
+  flex: 0 0 auto;
+}
+.speech-adapter-summary .chip {
+  padding: 3px 7px;
+}
+.speech-discovery-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.speech-discovery-field .button {
+  min-width: 92px;
+}
+.speech-option-toggle {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.speech-option-toggle input {
+  width: 15px;
+  min-height: 15px;
+  flex: 0 0 15px;
+}
+.speech-option-toggle span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.speech-option-toggle strong {
+  font-size: 11px;
+}
+.speech-option-toggle small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.speech-advanced {
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+.speech-advanced > button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+.speech-advanced > button span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.speech-advanced > button strong {
+  font-size: 11px;
+}
+.speech-advanced > button small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.speech-advanced__fields {
+  padding: 11px 12px 12px;
+  border-top: 1px solid var(--line-soft);
+}
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

@@ -42,6 +42,7 @@ export interface ProviderRecord {
   id: Id
   name: string
   description: string
+  headers: Record<string, string>
   base_urls: ProviderBaseUrl[]
   api_keys: ProviderApiKey[]
   model_count: number
@@ -76,10 +77,15 @@ export interface VoiceModelRecord {
   kind: 'tts' | 'stt'
   location: 'cloud' | 'local'
   provider: 'piper' | 'moss_onnx' | 'openai_compatible' | 'google' | 'local_whisper' | string
+  adapter: string
   model: string
   voice?: string
   base_url: string
   language: string
+  provider_options: Record<string, string | number | boolean>
+  connection_status: 'untested' | 'connected' | 'stale' | 'failed'
+  last_tested_at?: string | null
+  last_error?: string
   api_key?: string
   api_key_configured?: boolean
   provider_id?: Id | null
@@ -88,6 +94,33 @@ export interface VoiceModelRecord {
   provider_base_url_name?: string
   provider_api_key_id?: Id | null
   provider_api_key_name?: string
+}
+
+export interface SpeechAdapterOption {
+  key: string
+  label: string
+  type: 'text' | 'number' | 'integer' | 'boolean'
+  default: string | number | boolean
+  hint: string
+  choices: Array<{ value: string; label: string }>
+  advanced: boolean
+}
+
+export interface SpeechAdapterSpec {
+  id: string
+  kind: 'tts' | 'stt'
+  label: string
+  description: string
+  locations: Array<'cloud' | 'local'>
+  connection: 'http' | 'tcp' | 'aws' | 'none'
+  transport: string
+  modes: string[]
+  model_label: string
+  model_required: boolean
+  voice: 'required' | 'optional' | 'none'
+  language: 'required' | 'optional' | 'none'
+  discovery: Array<'models' | 'voices'>
+  options: SpeechAdapterOption[]
 }
 
 export interface ToolInfo {

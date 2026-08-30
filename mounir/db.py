@@ -193,6 +193,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             description TEXT NOT NULL DEFAULT '',
+            headers TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -224,6 +225,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 CHECK (location IN ('cloud', 'local')),
             model TEXT NOT NULL,
             provider TEXT NOT NULL DEFAULT '',
+            adapter TEXT NOT NULL DEFAULT '',
             base_url TEXT NOT NULL DEFAULT '',
             api_key TEXT NOT NULL DEFAULT '',
             provider_id INTEGER REFERENCES providers(id) ON DELETE RESTRICT,
@@ -254,13 +256,21 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
             voice TEXT NOT NULL DEFAULT '',
             language TEXT NOT NULL DEFAULT 'auto',
-            provider_options TEXT NOT NULL DEFAULT '{}'
+            provider_options TEXT NOT NULL DEFAULT '{}',
+            connection_status TEXT NOT NULL DEFAULT 'untested'
+                CHECK (connection_status IN ('untested', 'connected', 'stale', 'failed')),
+            last_tested_at TEXT,
+            last_error TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS transcription_model_details (
             model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
             language TEXT NOT NULL DEFAULT 'auto',
-            provider_options TEXT NOT NULL DEFAULT '{}'
+            provider_options TEXT NOT NULL DEFAULT '{}',
+            connection_status TEXT NOT NULL DEFAULT 'untested'
+                CHECK (connection_status IN ('untested', 'connected', 'stale', 'failed')),
+            last_tested_at TEXT,
+            last_error TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -894,10 +904,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # CREATE TABLE does not add columns to an existing SQLite table. Keep the
     # migrations explicit so upgrading an earlier feature-branch DB works.
     migrations = {
+        "providers": {
+            "headers": "TEXT NOT NULL DEFAULT '{}'",
+        },
         "models": {
             "model": "TEXT",
             "model_type": "TEXT NOT NULL DEFAULT 'text' CHECK (model_type IN ('text', 'embedding', 'speech', 'transcription'))",
             "location": "TEXT NOT NULL DEFAULT 'cloud' CHECK (location IN ('cloud', 'local'))",
+            "adapter": "TEXT NOT NULL DEFAULT ''",
             "updated_at": "TEXT",
             "provider_id": "INTEGER REFERENCES providers(id) ON DELETE RESTRICT",
             "provider_base_url_id": "INTEGER REFERENCES provider_base_urls(id) ON DELETE RESTRICT",
@@ -975,6 +989,24 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "tts_voice": "TEXT NOT NULL DEFAULT ''",
             "stt_model_id": "INTEGER REFERENCES transcription_model_details(model_id) ON DELETE RESTRICT",
             "tts_model_id": "INTEGER REFERENCES speech_model_details(model_id) ON DELETE RESTRICT",
+        },
+        "speech_model_details": {
+            "provider_options": "TEXT NOT NULL DEFAULT '{}'",
+            "connection_status": (
+                "TEXT NOT NULL DEFAULT 'untested' "
+                "CHECK (connection_status IN ('untested', 'connected', 'stale', 'failed'))"
+            ),
+            "last_tested_at": "TEXT",
+            "last_error": "TEXT NOT NULL DEFAULT ''",
+        },
+        "transcription_model_details": {
+            "provider_options": "TEXT NOT NULL DEFAULT '{}'",
+            "connection_status": (
+                "TEXT NOT NULL DEFAULT 'untested' "
+                "CHECK (connection_status IN ('untested', 'connected', 'stale', 'failed'))"
+            ),
+            "last_tested_at": "TEXT",
+            "last_error": "TEXT NOT NULL DEFAULT ''",
         },
         "telegram_settings": {
             "reply_mode": "TEXT NOT NULL DEFAULT 'text' CHECK (reply_mode IN ('text', 'voice'))",
@@ -1278,6 +1310,28 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         "UPDATE models SET provider = '' WHERE provider IS NULL"
     )
     conn.execute(
+        """
+        UPDATE models
+        SET adapter = provider
+        WHERE model_type IN ('speech', 'transcription')
+          AND (adapter IS NULL OR trim(adapter) = '')
+        """
+    )
+    conn.execute(
+        """
+        UPDATE models
+        SET location = 'local'
+        WHERE model_type IN ('speech', 'transcription')
+          AND COALESCE(NULLIF(adapter, ''), provider) = 'openai_compatible'
+          AND (
+            lower(base_url) LIKE '%://localhost%'
+            OR lower(base_url) LIKE '%://127.0.0.1%'
+            OR lower(base_url) LIKE '%://0.0.0.0%'
+            OR lower(base_url) LIKE '%://[::1]%'
+          )
+        """
+    )
+    conn.execute(
         "UPDATE models SET api_key = '' WHERE api_key IS NULL"
     )
     conn.execute(
@@ -1574,8 +1628,10 @@ def _provider_entry_name(value, label: str) -> str:
 
 def _provider_url(value) -> str:
     url = _required(value, "base URL value").rstrip("/")
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("Base URL values must start with http:// or https://.")
+    if not url.startswith(("http://", "https://", "ws://", "wss://", "tcp://")):
+        raise ValueError(
+            "Base URL values must start with http://, https://, ws://, wss://, or tcp://."
+        )
     if len(url) > 2000:
         raise ValueError("Base URL value is too long.")
     return url
@@ -1599,6 +1655,7 @@ def _provider_with_conn(
     if row is None:
         return None
     result = dict(row)
+    result["headers"] = _meta_json_object(result.get("headers"))
     result["base_urls"] = [
         dict(entry)
         for entry in conn.execute(
@@ -1816,6 +1873,20 @@ def _propagate_provider_connection(conn: sqlite3.Connection, provider_id: int) -
         """,
         (provider["name"], _now(), provider_id),
     )
+    for table, model_type in (
+        ("speech_model_details", "speech"),
+        ("transcription_model_details", "transcription"),
+    ):
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET connection_status = 'stale', last_tested_at = NULL, last_error = ''
+            WHERE model_id IN (
+                SELECT id FROM models WHERE provider_id = ? AND model_type = ?
+            )
+            """,
+            (provider_id, model_type),
+        )
 
 
 def add_provider(
@@ -1823,6 +1894,7 @@ def add_provider(
     description: str = "",
     base_urls=None,
     api_keys=None,
+    headers=None,
 ) -> dict:
     provider_name = _required(name, "name")
     if len(provider_name) > 160:
@@ -1832,11 +1904,12 @@ def add_provider(
         raise ValueError("Provider description is too long.")
     urls = _normalize_provider_collection(base_urls, "Base URLs")
     keys = _normalize_provider_collection(api_keys, "API keys")
+    normalized_headers = _json_object(headers or {}, "Provider headers")
     with _connect() as conn:
         try:
             cur = conn.execute(
-                "INSERT INTO providers (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (provider_name, provider_description, _now(), _now()),
+                "INSERT INTO providers (name, description, headers, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (provider_name, provider_description, normalized_headers, _now(), _now()),
             )
             provider_id = int(cur.lastrowid)
             _write_provider_entries(
@@ -1868,10 +1941,11 @@ def update_provider(provider_id: int, **kwargs) -> dict | None:
         keys = _normalize_provider_collection(
             kwargs.get("api_keys", current["api_keys"]), "API keys"
         )
+        headers = _json_object(kwargs.get("headers", current.get("headers") or {}), "Provider headers")
         try:
             conn.execute(
-                "UPDATE providers SET name = ?, description = ?, updated_at = ? WHERE id = ?",
-                (name, description, _now(), provider_id),
+                "UPDATE providers SET name = ?, description = ?, headers = ?, updated_at = ? WHERE id = ?",
+                (name, description, headers, _now(), provider_id),
             )
             _write_provider_entries(
                 conn, provider_id, "provider_base_urls", urls, secret=False
@@ -1930,7 +2004,7 @@ def _resolve_provider_connection(
     if selected_provider_id is None:
         raise ValueError("Select a provider.")
     provider = conn.execute(
-        "SELECT id, name FROM providers WHERE id = ?", (selected_provider_id,)
+        "SELECT id, name, headers FROM providers WHERE id = ?", (selected_provider_id,)
     ).fetchone()
     if provider is None:
         raise ValueError("Select an existing provider.")
@@ -1963,6 +2037,7 @@ def _resolve_provider_connection(
         "provider_name": provider["name"],
         "base_url": base_url,
         "api_key": api_key,
+        "headers": _meta_json_object(provider["headers"]),
     }
 
 
@@ -1982,6 +2057,10 @@ def resolve_provider_connection(
             require_url=require_url,
         )
     result["api_key"] = _resolve_key(result["api_key"])
+    result["headers"] = {
+        str(key): os.path.expandvars(str(value))
+        for key, value in (result.get("headers") or {}).items()
+    }
     return result
 
 
@@ -2601,6 +2680,7 @@ def _allow_duplicate_model_names(conn: sqlite3.Connection) -> None:
                     CHECK (location IN ('cloud', 'local')),
                 model TEXT NOT NULL,
                 provider TEXT NOT NULL DEFAULT '',
+                adapter TEXT NOT NULL DEFAULT '',
                 base_url TEXT NOT NULL DEFAULT '',
                 api_key TEXT NOT NULL DEFAULT '',
                 provider_id INTEGER REFERENCES providers(id) ON DELETE RESTRICT,
@@ -2614,11 +2694,11 @@ def _allow_duplicate_model_names(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO models_nonunique_upgrade (
-                id, name, model_type, location, model, provider, base_url, api_key,
+                id, name, model_type, location, model, provider, adapter, base_url, api_key,
                 provider_id, provider_base_url_id, provider_api_key_id,
                 created_at, updated_at
             )
-            SELECT id, name, model_type, location, model, provider, base_url, api_key,
+            SELECT id, name, model_type, location, model, provider, adapter, base_url, api_key,
                    provider_id, provider_base_url_id, provider_api_key_id,
                    created_at, updated_at
             FROM models
@@ -2691,9 +2771,9 @@ def _insert_migrated_model(
     cur = conn.execute(
         """
         INSERT INTO models
-            (name, model_type, location, model, provider, base_url, api_key,
+            (name, model_type, location, model, provider, adapter, base_url, api_key,
              created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             _required(row.get("name") or type_label, "name"),
@@ -2703,6 +2783,8 @@ def _insert_migrated_model(
             ),
             _required(row.get("model"), "model ID"),
             str(provider if provider is not None else row.get("provider") or "").strip(),
+            str(row.get("adapter") or row.get("provider") or provider or "").strip()
+            if model_type in {"speech", "transcription"} else "",
             row.get("base_url") or "",
             row.get("api_key") or "",
             row.get("created_at") or now,
@@ -3003,9 +3085,10 @@ def _ensure_model_detail_triggers(conn: sqlite3.Connection) -> None:
 # Voice configuration
 # -----------------------------------------------------------------------------
 
+from . import speech_adapters as _speech_adapters
+
 VOICE_PROVIDERS = {
-    "stt": {"local_whisper", "openai_compatible"},
-    "tts": {"piper", "moss_onnx", "openai_compatible", "google"},
+    kind: set(adapters) for kind, adapters in _speech_adapters.ADAPTERS.items()
 }
 
 STT_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$", re.IGNORECASE)
@@ -3025,18 +3108,35 @@ VOICE_PROVIDER_ALIASES = {
 
 
 def _voice_location(kind: str, provider: str) -> str:
-    local = provider == "local_whisper" if kind == "stt" else provider in {"piper", "moss_onnx"}
-    return "local" if local else "cloud"
+    locations = _speech_adapters.adapter_spec(kind, provider)["locations"]
+    return "local" if locations == ["local"] else "cloud"
 
 
 def _validate_voice_model(kind: str, supplied: dict, current: dict | None = None) -> dict:
     normalized_kind = str(kind or "").strip().lower()
     if normalized_kind not in VOICE_PROVIDERS:
         raise ValueError("voice type is not supported")
-    provider = str(supplied.get("provider") or (current or {}).get("provider") or "").strip().lower()
-    provider = VOICE_PROVIDER_ALIASES[normalized_kind].get(provider, provider)
-    if provider not in VOICE_PROVIDERS[normalized_kind]:
-        raise ValueError(f"{normalized_kind.upper()} provider is not supported")
+    provider = str(
+        supplied.get("adapter")
+        or supplied.get("provider")
+        or (current or {}).get("adapter")
+        or (current or {}).get("provider")
+        or ""
+    ).strip().lower()
+    provider = _speech_adapters.normalize_adapter(normalized_kind, provider)
+    spec = _speech_adapters.adapter_spec(normalized_kind, provider)
+    current_adapter = str((current or {}).get("adapter") or (current or {}).get("provider") or "")
+    default_location = (
+        (current or {}).get("location")
+        if current_adapter == provider
+        else _voice_location(normalized_kind, provider)
+    )
+    location = str(
+        supplied.get("location", default_location or _voice_location(normalized_kind, provider))
+    ).strip().lower()
+    if location not in spec["locations"]:
+        choices = " or ".join(spec["locations"])
+        raise ValueError(f"{spec['label']} can only run as {choices}")
     model = _required(
         supplied.get("model", (current or {}).get("model")),
         f"{normalized_kind.upper()} model",
@@ -3050,16 +3150,19 @@ def _validate_voice_model(kind: str, supplied: dict, current: dict | None = None
             raise ValueError("STT language is not supported; use auto or a valid language code")
     elif len(language) > 32:
         raise ValueError("TTS language is too long")
+    if spec.get("language") == "required" and language == "auto":
+        raise ValueError(f"{spec['label']} requires an explicit language code")
     base_url = str(
         supplied.get("base_url", (current or {}).get("base_url") or "") or ""
     ).strip()
-    remote = provider in {"openai_compatible", "google"}
-    if remote:
+    connection = spec.get("connection")
+    if connection in {"http", "tcp"}:
         if not base_url:
-            raise ValueError(f"{normalized_kind.upper()} API URL is required for this provider")
-        if not base_url.startswith(("http://", "https://")):
+            raise ValueError(f"{normalized_kind.upper()} connection URL is required for this adapter")
+        allowed_schemes = ("http://", "https://") if connection == "http" else ("tcp://",)
+        if not base_url.startswith(allowed_schemes):
             raise ValueError(
-                f"{normalized_kind.upper()} API URL must start with http:// or https://"
+                f"{normalized_kind.upper()} connection URL must start with {' or '.join(allowed_schemes)}"
             )
         base_url = base_url.rstrip("/")
     else:
@@ -3069,26 +3172,31 @@ def _validate_voice_model(kind: str, supplied: dict, current: dict | None = None
     ).strip()
     if len(voice) > 160:
         raise ValueError("TTS voice is too long")
-    if normalized_kind == "tts" and provider in {"openai_compatible", "moss_onnx"} and not voice:
-        raise ValueError("TTS voice is required for this provider")
-    if normalized_kind != "tts" or provider not in {"openai_compatible", "moss_onnx"}:
+    if normalized_kind == "tts" and spec.get("voice") == "required" and not voice:
+        raise ValueError(f"{spec['label']} requires a voice ID")
+    if normalized_kind != "tts" or spec.get("voice") == "none":
         voice = ""
     api_key = supplied.get("api_key", _UNSET)
     if api_key is _UNSET or (current is not None and not str(api_key or "").strip()):
         api_key = (current or {}).get("api_key") or ""
     else:
         api_key = str(api_key or "").strip()
-    if provider == "google" and not api_key:
-        raise ValueError("TTS API key is required for this provider")
+    options = _speech_adapters.normalize_options(
+        normalized_kind,
+        provider,
+        supplied.get("provider_options", (current or {}).get("provider_options") or {}),
+    )
     return {
         "kind": normalized_kind,
-        "location": _voice_location(normalized_kind, provider),
+        "location": location,
+        "adapter": provider,
         "provider": provider,
         "model": model,
         "voice": voice,
         "base_url": base_url,
         "api_key": api_key,
         "language": language or "auto",
+        "provider_options": options,
     }
 
 
@@ -3118,9 +3226,9 @@ def _bootstrap_voice_models(conn: sqlite3.Connection) -> None:
         cur = conn.execute(
             """
             INSERT INTO models
-                (name, model_type, location, provider, model, base_url, api_key,
+                (name, model_type, location, provider, adapter, model, base_url, api_key,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _unique_model_name(
@@ -3128,6 +3236,7 @@ def _bootstrap_voice_models(conn: sqlite3.Connection) -> None:
                 ),
                 "transcription" if kind == "stt" else "speech",
                 _voice_location(kind, row[f"{kind}_provider"]),
+                row[f"{kind}_provider"],
                 row[f"{kind}_provider"],
                 row[f"{kind}_model"],
                 row[f"{kind}_base_url"] or "",
@@ -3177,15 +3286,15 @@ def add_voice_model(name: str, kind: str, **kwargs) -> dict:
             cur = conn.execute(
                 """
                 INSERT INTO models
-                    (name, model_type, location, provider, model, base_url, api_key,
+                    (name, model_type, location, provider, adapter, model, base_url, api_key,
                      provider_id, provider_base_url_id, provider_api_key_id,
                      created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _required(name, "name"),
                     "speech" if fields["kind"] == "tts" else "transcription",
-                    fields["location"], fields["provider"], fields["model"],
+                    fields["location"], fields["provider"], fields["adapter"], fields["model"],
                     fields["base_url"], fields["api_key"],
                     provider_refs["provider_id"] if provider_refs else None,
                     provider_refs["provider_base_url_id"] if provider_refs else None,
@@ -3196,13 +3305,13 @@ def add_voice_model(name: str, kind: str, **kwargs) -> dict:
             model_id = int(cur.lastrowid)
             if fields["kind"] == "tts":
                 conn.execute(
-                    "INSERT INTO speech_model_details (model_id, voice, language) VALUES (?, ?, ?)",
-                    (model_id, fields["voice"], fields["language"]),
+                    "INSERT INTO speech_model_details (model_id, voice, language, provider_options) VALUES (?, ?, ?, ?)",
+                    (model_id, fields["voice"], fields["language"], json.dumps(fields["provider_options"])),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO transcription_model_details (model_id, language) VALUES (?, ?)",
-                    (model_id, fields["language"]),
+                    "INSERT INTO transcription_model_details (model_id, language, provider_options) VALUES (?, ?, ?)",
+                    (model_id, fields["language"], json.dumps(fields["provider_options"])),
                 )
             conn.commit()
         except sqlite3.IntegrityError as exc:
@@ -3214,13 +3323,21 @@ def _voice_model_query() -> str:
     return """
         SELECT m.id, m.name,
                CASE m.model_type WHEN 'speech' THEN 'tts' ELSE 'stt' END AS kind,
-               m.location, m.provider, m.model,
+               m.location,
+               COALESCE(NULLIF(m.adapter, ''), m.provider) AS adapter,
+               COALESCE(NULLIF(m.adapter, ''), m.provider) AS provider,
+               m.model,
                COALESCE(s.voice, '') AS voice,
                m.base_url, m.api_key,
                m.provider_id, m.provider_base_url_id, m.provider_api_key_id,
                p.name AS provider_name, u.name AS provider_base_url_name,
                k.name AS provider_api_key_name,
                COALESCE(s.language, t.language, 'auto') AS language,
+               COALESCE(s.provider_options, t.provider_options, '{}') AS provider_options,
+               COALESCE(s.connection_status, t.connection_status, 'untested') AS connection_status,
+               COALESCE(s.last_tested_at, t.last_tested_at) AS last_tested_at,
+               COALESCE(s.last_error, t.last_error, '') AS last_error,
+               COALESCE(p.headers, '{}') AS provider_headers,
                m.created_at, m.updated_at
         FROM models m
         LEFT JOIN speech_model_details s ON s.model_id = m.id
@@ -3298,9 +3415,7 @@ def update_voice_model(model_id: int, *, _clear_api_key: bool = False, **kwargs)
                     provider_base_url_id=provider_refs["provider_base_url_id"],
                     provider_api_key_id=provider_refs["provider_api_key_id"],
                 )
-                if fields["provider"] == "google" and not fields["api_key"]:
-                    raise ValueError("TTS API key is required for this provider")
-            elif fields["location"] == "local" and (
+            elif _speech_adapters.adapter_spec(current["kind"], fields["adapter"])["connection"] in {"none", "aws"} and (
                 fields["provider"] != current["provider"]
                 or current["location"] != "local"
             ):
@@ -3316,7 +3431,7 @@ def update_voice_model(model_id: int, *, _clear_api_key: bool = False, **kwargs)
             base_fields = {
                 key: fields[key]
                 for key in (
-                    "name", "location", "provider", "model", "base_url", "api_key",
+                    "name", "location", "provider", "adapter", "model", "base_url", "api_key",
                     "provider_id", "provider_base_url_id", "provider_api_key_id",
                 )
                 if key in fields
@@ -3329,13 +3444,23 @@ def update_voice_model(model_id: int, *, _clear_api_key: bool = False, **kwargs)
             )
             if current["kind"] == "tts":
                 conn.execute(
-                    "UPDATE speech_model_details SET voice = ?, language = ? WHERE model_id = ?",
-                    (fields["voice"], fields["language"], model_id),
+                    """
+                    UPDATE speech_model_details
+                    SET voice = ?, language = ?, provider_options = ?,
+                        connection_status = 'stale', last_tested_at = NULL, last_error = ''
+                    WHERE model_id = ?
+                    """,
+                    (fields["voice"], fields["language"], json.dumps(fields["provider_options"]), model_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE transcription_model_details SET language = ? WHERE model_id = ?",
-                    (fields["language"], model_id),
+                    """
+                    UPDATE transcription_model_details
+                    SET language = ?, provider_options = ?,
+                        connection_status = 'stale', last_tested_at = NULL, last_error = ''
+                    WHERE model_id = ?
+                    """,
+                    (fields["language"], json.dumps(fields["provider_options"]), model_id),
                 )
             refreshed = _get_voice_model_with_conn(conn, model_id)
             if refreshed is not None:
@@ -3381,6 +3506,8 @@ def voice_model_for_api(model: dict | None) -> dict | None:
         return None
     result = dict(model)
     result["api_key_configured"] = bool(result.pop("api_key", ""))
+    result["provider_options"] = _meta_json_object(result.get("provider_options"))
+    result.pop("provider_headers", None)
     return result
 
 
@@ -3403,10 +3530,15 @@ def get_voice_settings(*, include_secrets: bool = False) -> dict:
             "model_id": int(model["id"]) if model else None,
             "name": model["name"] if model else "",
             "provider": (model or {}).get("provider", row[f"{kind}_provider"]),
+            "adapter": (model or {}).get("adapter", (model or {}).get("provider", row[f"{kind}_provider"])),
             "model": (model or {}).get("model", row[f"{kind}_model"]),
             "base_url": (model or {}).get("base_url", row[f"{kind}_base_url"]) or "",
             "language": (model or {}).get("language", row[f"{kind}_language"]) or "auto",
             "api_key_configured": bool(secret),
+            "provider_options": _meta_json_object((model or {}).get("provider_options")),
+            "connection_status": (model or {}).get("connection_status", "untested"),
+            "last_tested_at": (model or {}).get("last_tested_at"),
+            "last_error": (model or {}).get("last_error", ""),
         }
         if kind == "tts":
             item["voice"] = (model or {}).get("voice", row["tts_voice"]) or ""
@@ -3423,7 +3555,47 @@ def get_voice_runtime(kind: str) -> dict:
         raise ValueError("voice type is not supported")
     settings = get_voice_settings(include_secrets=True)[normalized]
     settings["api_key"] = _resolve_key(settings.get("api_key") or "")
+    model_id = settings.get("model_id")
+    model = get_voice_model(int(model_id)) if model_id else None
+    settings["headers"] = {
+        str(key): os.path.expandvars(str(value))
+        for key, value in _meta_json_object((model or {}).get("provider_headers")).items()
+    }
     return settings
+
+
+def get_voice_model_runtime(model_id: int) -> dict | None:
+    """Resolve one saved speech model, including credentials and provider headers."""
+    model = get_voice_model(model_id)
+    if model is None:
+        return None
+    runtime = dict(model)
+    runtime["api_key"] = _resolve_key(runtime.get("api_key") or "")
+    runtime["provider_options"] = _meta_json_object(runtime.get("provider_options"))
+    runtime["headers"] = {
+        str(key): os.path.expandvars(str(value))
+        for key, value in _meta_json_object(runtime.get("provider_headers")).items()
+    }
+    return runtime
+
+
+def save_voice_model_test(model_id: int, *, error: str = "") -> dict | None:
+    """Persist a sanitized connection-test result for a speech model."""
+    model = get_voice_model(model_id)
+    if model is None:
+        return None
+    table = "speech_model_details" if model["kind"] == "tts" else "transcription_model_details"
+    with _connect() as conn:
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET connection_status = ?, last_tested_at = ?, last_error = ?
+            WHERE model_id = ?
+            """,
+            ("failed" if error else "connected", _now(), str(error or "")[:2000], model_id),
+        )
+        conn.commit()
+    return get_voice_model(model_id)
 
 
 def update_voice_settings(*, stt=None, tts=None, stt_model_id=None, tts_model_id=None) -> dict:
@@ -6617,10 +6789,20 @@ def list_model_catalog() -> list[dict]:
                    p.name AS provider_name,
                    u.name AS provider_base_url_name,
                    k.name AS provider_api_key_name,
-                   e.adapter, e.dimensions, e.connection_status,
-                   e.last_tested_at, e.last_error,
+                   e.adapter AS embedding_adapter, e.dimensions,
+                   e.connection_status AS embedding_connection_status,
+                   e.last_tested_at AS embedding_last_tested_at,
+                   e.last_error AS embedding_last_error,
                    s.voice AS speech_voice, s.language AS speech_language,
-                   t.language AS transcription_language
+                   s.provider_options AS speech_provider_options,
+                   s.connection_status AS speech_connection_status,
+                   s.last_tested_at AS speech_last_tested_at,
+                   s.last_error AS speech_last_error,
+                   t.language AS transcription_language,
+                   t.provider_options AS transcription_provider_options,
+                   t.connection_status AS transcription_connection_status,
+                   t.last_tested_at AS transcription_last_tested_at,
+                   t.last_error AS transcription_last_error
             FROM models m
             LEFT JOIN embedding_model_details e ON e.model_id = m.id
             LEFT JOIN speech_model_details s ON s.model_id = m.id
@@ -6647,21 +6829,27 @@ def list_model_catalog() -> list[dict]:
         }
         if model_type == "embedding":
             item.update(
-                adapter=row["adapter"],
+                adapter=row["embedding_adapter"],
                 dimensions=row["dimensions"],
-                connection_status=row["connection_status"],
-                last_tested_at=row["last_tested_at"],
-                last_error=row["last_error"] or "",
+                connection_status=row["embedding_connection_status"],
+                last_tested_at=row["embedding_last_tested_at"],
+                last_error=row["embedding_last_error"] or "",
             )
         elif model_type in {"speech", "transcription"}:
+            prefix = "speech" if model_type == "speech" else "transcription"
             item.update(
                 kind="tts" if model_type == "speech" else "stt",
+                adapter=row["adapter"] or row["provider"],
                 voice=row["speech_voice"] or "" if model_type == "speech" else "",
                 language=(
                     row["speech_language"]
                     if model_type == "speech"
                     else row["transcription_language"]
                 ) or "auto",
+                provider_options=_meta_json_object(row[f"{prefix}_provider_options"]),
+                connection_status=row[f"{prefix}_connection_status"] or "untested",
+                last_tested_at=row[f"{prefix}_last_tested_at"],
+                last_error=row[f"{prefix}_last_error"] or "",
             )
         result.append(item)
     return result

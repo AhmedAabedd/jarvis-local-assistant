@@ -7,6 +7,11 @@ soundfile>=0.12
 numpy>=1.24
 sentencepiece>=0.1.99
 
+# Optional adapter runtimes used only when their adapter is selected.
+boto3>=1.34
+amazon-transcribe>=0.6
+wyoming>=1.6
+
 # Hands-free wake word. Silence detection is energy-based (numpy),
 # so no VAD package is needed.
 # openwakeword is run via ONNX, not tflite. Its tflite-runtime dep has no wheel

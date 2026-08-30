@@ -11,6 +11,24 @@ import { Loading } from '../../components/ui/Loading'
 import { keys } from '../../hooks/useStudioData'
 import { PageHeader } from '../studio/PageHeader'
 
+function modelOptionLabel(model: {
+  name: string
+  adapter?: string
+  provider: string
+  provider_name?: string
+  location: string
+  model: string
+  connection_status?: string
+}) {
+  const adapter = (model.adapter || model.provider).replaceAll('_', ' ')
+  const connection = model.provider_name || (model.location === 'local' ? 'Local' : 'Cloud')
+  const health =
+    model.connection_status && model.connection_status !== 'untested'
+      ? ` · ${model.connection_status}`
+      : ''
+  return `${model.name} — ${connection} · ${adapter} — ${model.model}${health}`
+}
+
 export function VoicePage() {
   const client = useQueryClient()
   const settings = useQuery({ queryKey: keys.voice, queryFn: api.voice.get })
@@ -122,7 +140,7 @@ export function VoicePage() {
                   </option>
                   {transcriptionModels.map((model) => (
                     <option key={model.id} value={model.id}>
-                      {model.name} — {model.provider_name || model.provider} — {model.model}
+                      {modelOptionLabel(model)}
                     </option>
                   ))}
                 </select>
@@ -147,7 +165,7 @@ export function VoicePage() {
                   </option>
                   {speechModels.map((model) => (
                     <option key={model.id} value={model.id}>
-                      {model.name} — {model.provider_name || model.provider} — {model.model}
+                      {modelOptionLabel(model)}
                     </option>
                   ))}
                 </select>

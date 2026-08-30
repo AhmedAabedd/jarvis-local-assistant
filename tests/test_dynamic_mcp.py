@@ -431,6 +431,138 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
         self.assertNotIn("Authorization", request.kwargs["headers"])
 
+    def test_openrouter_tts_can_use_provider_default_pcm_instead_of_forced_wav(self):
+        from mounir import speech_adapters
+
+        response = Mock(
+            content=b"\x00\x00\x01\x00",
+            ok=True,
+            headers={"Content-Type": "audio/pcm", "X-Generation-Id": "gen-1"},
+        )
+        runtime = {
+            "adapter": "openai_compatible",
+            "model": "deepgram/flux-tts:free",
+            "voice": "flux-alexis-en",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "openrouter-key",
+            "headers": {"HTTP-Referer": "https://example.test"},
+            "provider_options": {"output_format": "auto", "sample_rate": 24000},
+        }
+        with patch("requests.post", return_value=response) as post:
+            result = speech_adapters.synthesize("hello", runtime)
+
+        request = post.call_args
+        self.assertEqual(request.args[0], "https://openrouter.ai/api/v1/audio/speech")
+        self.assertNotIn("response_format", request.kwargs["json"])
+        self.assertEqual(request.kwargs["headers"]["HTTP-Referer"], "https://example.test")
+        self.assertEqual(result.mime_type, "audio/pcm")
+        self.assertTrue(result.as_wav().startswith(b"RIFF"))
+        browser_result = result.for_browser()
+        self.assertEqual(browser_result.mime_type, "audio/wav")
+        self.assertTrue(browser_result.data.startswith(b"RIFF"))
+
+    def test_voice_adapter_options_and_explicit_local_service_location_persist(self):
+        db.init()
+        model = db.add_voice_model(
+            "Local speech service",
+            "tts",
+            adapter="openai_compatible",
+            location="local",
+            model="kokoro",
+            voice="af_heart",
+            base_url="http://127.0.0.1:8000/v1",
+            provider_options={"output_format": "mp3", "speed": 1.1},
+        )
+
+        self.assertEqual(model["adapter"], "openai_compatible")
+        self.assertEqual(model["location"], "local")
+        self.assertEqual(json.loads(model["provider_options"])["output_format"], "mp3")
+        public = db.voice_model_for_api(model)
+        self.assertEqual(public["provider_options"]["speed"], 1.1)
+        self.assertEqual(public["connection_status"], "untested")
+
+    def test_speech_provider_headers_resolve_through_saved_connection(self):
+        db.init()
+        provider = db.add_provider(
+            "Speech gateway",
+            base_urls=[{"name": "API", "value": "https://speech.example.test/v1"}],
+            api_keys=[{"name": "Primary", "value": "$SPEECH_TEST_KEY"}],
+            headers={
+                "HTTP-Referer": "$SPEECH_TEST_SITE",
+                "X-OpenRouter-Title": "Mounir",
+            },
+        )
+        model = db.add_voice_model(
+            "Gateway TTS",
+            "tts",
+            adapter="openai_compatible",
+            location="cloud",
+            model="provider/model",
+            voice="provider-voice",
+            provider_id=provider["id"],
+            provider_base_url_id=provider["base_urls"][0]["id"],
+            provider_api_key_id=provider["api_keys"][0]["id"],
+        )
+
+        with patch.dict(
+            os.environ,
+            {"SPEECH_TEST_KEY": "resolved-key", "SPEECH_TEST_SITE": "https://site.test"},
+        ):
+            runtime = db.get_voice_model_runtime(model["id"])
+
+        self.assertEqual(runtime["api_key"], "resolved-key")
+        self.assertEqual(runtime["headers"]["HTTP-Referer"], "https://site.test")
+        self.assertEqual(runtime["headers"]["X-OpenRouter-Title"], "Mounir")
+
+    def test_required_speech_language_is_not_assumed(self):
+        db.init()
+        with self.assertRaisesRegex(ValueError, "requires an explicit language"):
+            db.add_voice_model(
+                "Google TTS",
+                "tts",
+                adapter="google",
+                location="cloud",
+                model="configured-voice",
+                language="auto",
+                base_url="https://texttospeech.googleapis.com/v1",
+            )
+
+    def test_speech_adapter_catalog_exposes_native_and_local_contracts(self):
+        from mounir import speech_adapters
+
+        tts = {item["id"] for item in speech_adapters.adapter_catalog("tts")}
+        stt = {item["id"] for item in speech_adapters.adapter_catalog("stt")}
+        self.assertTrue({"openai_compatible", "google", "azure", "deepgram", "elevenlabs", "aws_polly", "piper", "moss_onnx", "wyoming"} <= tts)
+        self.assertTrue({"openai_compatible", "google_stt", "azure_stt", "deepgram", "elevenlabs", "aws_transcribe", "local_whisper", "wyoming"} <= stt)
+
+    def test_deepgram_flux_uses_v2_endpoint_and_raw_audio_metadata(self):
+        from mounir import speech_adapters
+
+        response = Mock(content=b"\x00\x00", ok=True, headers={"Content-Type": "audio/pcm"})
+        runtime = {
+            "adapter": "deepgram",
+            "model": "flux-alexis-en",
+            "base_url": "https://api.deepgram.com/v1",
+            "api_key": "deepgram-key",
+            "provider_options": {},
+        }
+        with patch("requests.post", return_value=response) as post:
+            result = speech_adapters.synthesize("hello", runtime)
+
+        self.assertTrue(post.call_args.args[0].startswith("https://api.deepgram.com/v2/speak?"))
+        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Token deepgram-key")
+        self.assertEqual(result.mime_type, "audio/pcm")
+        self.assertEqual(result.sample_rate, 24000)
+
+    def test_speech_error_redacts_credentials(self):
+        from mounir import speech_adapters
+
+        runtime = {"api_key": "secret-key", "headers": {"X-Private": "private-value"}}
+        error = speech_adapters.safe_error(
+            RuntimeError("failed secret-key and private-value"), runtime
+        )
+        self.assertEqual(error, "failed [redacted] and [redacted]")
+
     def test_native_google_tts_remains_available(self):
         db.init()
         db.update_voice_settings(
@@ -3279,6 +3411,43 @@ class AdminApiTests(TemporaryDatabaseTest):
                 self.assertEqual(response.json()["voices"][0]["id"], "UserVoice")
 
         asyncio.run(exercise_api())
+
+    def test_speech_adapter_catalog_and_connection_test_api(self):
+        import httpx
+        import server as web_server
+        from mounir import speech_adapters
+
+        db.init()
+        model = db.add_voice_model(
+            "Local compatible TTS",
+            "tts",
+            adapter="openai_compatible",
+            location="local",
+            model="local/model",
+            voice="local-voice",
+            base_url="http://127.0.0.1:8000/v1",
+        )
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
+                catalog = await client.get("/api/speech-adapters", params={"kind": "tts"})
+                self.assertEqual(catalog.status_code, 200)
+                self.assertIn("openai_compatible", {item["id"] for item in catalog.json()})
+
+                with patch.object(
+                    web_server.speech_adapters,
+                    "synthesize",
+                    return_value=speech_adapters.AudioResult(b"RIFFtest", "audio/wav"),
+                ):
+                    tested = await client.post(f"/api/voice-models/{model['id']}/test")
+                self.assertEqual(tested.status_code, 200)
+                self.assertEqual(tested.json()["mime_type"], "audio/wav")
+
+        asyncio.run(exercise_api())
+        self.assertEqual(db.get_voice_model(model["id"])["connection_status"], "connected")
 
     def test_heartbeat_task_crud_api_keeps_tool_confirmation_safety(self):
         import httpx

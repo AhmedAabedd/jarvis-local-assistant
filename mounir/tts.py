@@ -3,11 +3,10 @@
 Synthesizes a chunk of text to audio and plays it. Called once per sentence by
 the voice loop so Mounir starts talking before the full reply is generated.
 
-Supported transports are OpenAI-compatible speech synthesis, Google Cloud TTS,
-local Piper, and the multilingual MOSS-TTS-Nano ONNX runtime. The
-OpenAI-compatible path is provider-neutral and also works with local servers
-that implement the common ``/audio/speech`` contract.
-Heavy deps (piper, requests, numpy, sounddevice) are imported lazily.
+The capability registry in ``speech_adapters`` selects cloud-native,
+OpenAI-compatible, or local runtimes. This module preserves the CLI playback
+and legacy WAV-facing helpers while the web path retains the provider's real
+audio media type. Heavy dependencies are imported lazily.
 """
 
 from __future__ import annotations
@@ -56,18 +55,38 @@ def _play(audio, sample_rate) -> None:
 
 
 def synthesize_wav(text: str) -> bytes:
-    """Synthesize text with the selected database-backed voice configuration."""
+    """Synthesize text and normalize the provider response to PCM16 WAV."""
     text = str(text or "").strip()
     if not text:
         return b""
     runtime = db.get_voice_runtime("tts")
-    if runtime["provider"] == "google":
+    adapter = runtime.get("adapter") or runtime.get("provider")
+    # Preserve the long-standing private seams used by lightweight installs and
+    # tests while the richer web path below retains the provider's real media type.
+    if adapter == "google":
         return _synthesize_google_wav(text, runtime)
-    if runtime["provider"] == "moss_onnx":
+    if adapter == "moss_onnx":
         return _synthesize_moss_wav(text, runtime)
-    if runtime["provider"] == "openai_compatible":
+    if adapter == "piper":
+        return _synthesize_piper_wav(text, runtime)
+    if adapter == "openai_compatible":
         return _synthesize_openai_compatible_wav(text, runtime)
-    return _synthesize_piper_wav(text, runtime)
+    from .speech_adapters import synthesize as run_adapter
+
+    return run_adapter(text, runtime).as_wav()
+
+
+def synthesize(text: str):
+    """Return a normalized AudioResult with the provider's real media type."""
+    text = str(text or "").strip()
+    if not text:
+        from .speech_adapters import AudioResult
+
+        return AudioResult(b"")
+    runtime = db.get_voice_runtime("tts")
+    from .speech_adapters import synthesize as run_adapter
+
+    return run_adapter(text, runtime)
 
 
 def discover_voices(provider: str, model: str) -> dict:
@@ -135,9 +154,16 @@ def _synthesize_piper_wav(text: str, runtime: dict) -> bytes:
 
 def _synthesize_google_wav(text: str, runtime: dict) -> bytes:
     """Synthesize with Google Cloud TTS and return its LINEAR16 WAV."""
-    if not runtime.get("api_key"):
+    if not runtime.get("api_key") and not (runtime.get("headers") or {}).get(
+        "Authorization"
+    ):
         raise RuntimeError(
-            "The selected Google text-to-speech configuration has no API key."
+            "The selected Google text-to-speech configuration has no API key or authorization header."
+        )
+    language = str(runtime.get("language") or "").strip()
+    if not language or language == "auto":
+        raise RuntimeError(
+            "The selected Google text-to-speech configuration needs a language code."
         )
 
     import base64
@@ -148,7 +174,7 @@ def _synthesize_google_wav(text: str, runtime: dict) -> bytes:
     payload = {
         "input": {"text": text},
         "voice": {
-            "languageCode": runtime.get("language") or "en-US",
+            "languageCode": language,
             "name": runtime.get("voice") or runtime["model"],
         },
         # LINEAR16 comes back as a WAV container, so we can read rate + PCM
@@ -157,7 +183,8 @@ def _synthesize_google_wav(text: str, runtime: dict) -> bytes:
     }
     resp = requests.post(
         endpoint_url(runtime.get("base_url", ""), "text:synthesize"),
-        params={"key": runtime["api_key"]},
+        params={"key": runtime["api_key"]} if runtime.get("api_key") else None,
+        headers=runtime.get("headers") or None,
         json=payload,
         timeout=30,
     )
@@ -167,25 +194,18 @@ def _synthesize_google_wav(text: str, runtime: dict) -> bytes:
 
 
 def _synthesize_openai_compatible_wav(text: str, runtime: dict) -> bytes:
-    """Synthesize WAV bytes using the common OpenAI audio-speech contract."""
-    import requests
+    """Compatibility wrapper for callers of the former private helper."""
+    from .speech_adapters import synthesize as run_adapter
 
-    from .audio_api import bearer_headers, endpoint_url
-
-    payload = {
-        "model": runtime["model"],
-        "input": text,
-        "voice": runtime["voice"],
-        "response_format": "wav",
-    }
-    response = requests.post(
-        endpoint_url(runtime.get("base_url", ""), "audio/speech"),
-        headers=bearer_headers(runtime.get("api_key"), accept="audio/wav"),
-        json=payload,
-        timeout=60,
+    if "provider_options" in runtime:
+        return run_adapter(
+            text, {**runtime, "adapter": "openai_compatible"}
+        ).as_wav()
+    result = run_adapter(
+        text,
+        {**runtime, "adapter": "openai_compatible", "provider_options": {"output_format": "wav"}},
     )
-    response.raise_for_status()
-    return response.content
+    return result.data
 
 
 def _play_wav(wav_bytes: bytes) -> None:

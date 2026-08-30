@@ -414,7 +414,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         if (itemModelType === 'tts' || itemModelType === 'stt')
           return {
             title: voiceModel.name,
-            subtitle: '',
+            subtitle: `${voiceModel.location === 'local' ? 'Local' : 'Cloud'} · ${voiceModel.provider_name ? `${voiceModel.provider_name} via ` : ''}${(voiceModel.adapter || voiceModel.provider).replaceAll('_', ' ')}`,
             facts: [
               {
                 value: itemModelType === 'tts' ? 'Speech' : 'Transcription',
@@ -427,7 +427,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                 icon: Cpu,
               },
             ],
-            status: undefined,
+            status: voiceModel.connection_status,
           }
         if (kind === 'models')
           return {

@@ -10,7 +10,7 @@ import { Field } from '../../components/ui/Field'
 import { Loading } from '../../components/ui/Loading'
 import { Modal } from '../../components/ui/Modal'
 import { keys, useProviders } from '../../hooks/useStudioData'
-import { KeyValueEditor, type Entry } from '../resources/KeyValueEditor'
+import { KeyValueEditor, entriesObject, type Entry } from '../resources/KeyValueEditor'
 import { PageHeader } from '../studio/PageHeader'
 
 function normalizeEntries(entries: Entry[], label: string, secret = false) {
@@ -57,6 +57,9 @@ function ProviderForm({
         preview: entry.preview,
       })) || [],
   )
+  const [headers, setHeaders] = useState<Entry[]>(() =>
+    Object.entries(item?.headers || {}).map(([key, value]) => ({ key, value })),
+  )
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -68,6 +71,7 @@ function ProviderForm({
         description: data.get('description'),
         base_urls: normalizeEntries(baseUrls, 'Base URL'),
         api_keys: normalizeEntries(apiKeys, 'API key', true),
+        headers: entriesObject(headers, 'Header'),
       })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not save the provider.')
@@ -95,6 +99,15 @@ function ProviderForm({
         secret={false}
         namePlaceholder="Endpoint name"
         valuePlaceholder="https://provider.example/v1"
+      />
+      <KeyValueEditor
+        title="Default HTTP headers"
+        hint="Optional metadata or routing headers shared by this provider. Environment references such as $SITE_URL are resolved at runtime."
+        entries={headers}
+        onChange={setHeaders}
+        secret={false}
+        namePlaceholder="Header name"
+        valuePlaceholder="Header value"
       />
       <KeyValueEditor
         title="API keys"
@@ -227,6 +240,21 @@ export function ProvidersPage() {
                       <span key={entry.id}>
                         <strong>{entry.name}</strong>
                         <code>{entry.value}</code>
+                      </span>
+                    ))
+                  ) : (
+                    <span>None configured</span>
+                  )}
+                </dd>
+              </div>
+              <div className="detail detail--full">
+                <dt>Default HTTP headers</dt>
+                <dd className="provider-detail-list">
+                  {Object.keys(selected.headers || {}).length ? (
+                    Object.entries(selected.headers).map(([name, value]) => (
+                      <span key={name}>
+                        <strong>{name}</strong>
+                        <code>{value}</code>
                       </span>
                     ))
                   ) : (

@@ -1,10 +1,9 @@
-"""Speech-to-text.
+"""Speech-to-text compatibility entry point.
 
-Two transports are selected through the database-backed voice settings:
-- ``openai_compatible`` uploads audio to an OpenAI-compatible transcription API.
-- ``local_whisper`` runs faster-whisper / CTranslate2 in-process and offline.
-Heavy deps (faster_whisper, requests, numpy) are imported lazily so this module
-is safe to import without them installed.
+The database-backed capability registry selects cloud-native,
+OpenAI-compatible, or local adapters. Audio captured by the existing voice
+loop is normalized to PCM16 WAV before dispatch. Heavy dependencies remain
+lazy so importing this module does not load a speech runtime.
 """
 
 from __future__ import annotations
@@ -43,9 +42,32 @@ def transcribe(audio, language: str | None = None) -> tuple[str, str]:
     if audio is None or len(audio) == 0:
         return "", selected_language or ""
 
-    if runtime["provider"] in {"openai_compatible", "groq"}:
+    adapter = runtime.get("adapter") or runtime.get("provider")
+    if adapter in {"openai_compatible", "groq"}:
         return _transcribe_openai_compatible(audio, selected_language, runtime)
-    return _transcribe_local(audio, selected_language, runtime)
+
+    import io
+    import wave
+
+    import numpy as np
+
+    pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767.0).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(config.SAMPLE_RATE)
+        wf.writeframes(pcm.tobytes())
+    from .speech_adapters import transcribe as run_adapter
+
+    result = run_adapter(
+        buf.getvalue(),
+        {
+            **runtime,
+            "language": selected_language or "auto",
+        },
+    )
+    return result.text, result.language
 
 
 def _transcribe_local(audio, language, runtime) -> tuple[str, str]:
@@ -57,14 +79,11 @@ def _transcribe_local(audio, language, runtime) -> tuple[str, str]:
 
 
 def _transcribe_openai_compatible(audio, language, runtime) -> tuple[str, str]:
-    """Upload a clip using the common OpenAI audio-transcriptions contract."""
+    """Compatibility wrapper for the former OpenAI-only private helper."""
     import io
     import wave
 
     import numpy as np
-    import requests
-
-    from .audio_api import bearer_headers, endpoint_url
 
     # float32 [-1, 1] mono -> 16-bit PCM WAV in memory (what the API expects).
     pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767.0).astype(np.int16)
@@ -74,20 +93,14 @@ def _transcribe_openai_compatible(audio, language, runtime) -> tuple[str, str]:
         wf.setsampwidth(2)
         wf.setframerate(config.SAMPLE_RATE)
         wf.writeframes(pcm.tobytes())
-    buf.seek(0)
+    from .speech_adapters import transcribe as run_adapter
 
-    # Plain JSON is the broadest common response format across compatible
-    # providers. Some additionally return a detected ``language`` field.
-    data = {"model": runtime["model"], "response_format": "json"}
-    if language:
-        data["language"] = language  # otherwise Groq auto-detects
-    resp = requests.post(
-        endpoint_url(runtime.get("base_url", ""), "audio/transcriptions"),
-        headers=bearer_headers(runtime.get("api_key"), accept="application/json"),
-        files={"file": ("audio.wav", buf, "audio/wav")},
-        data=data,
-        timeout=60,
+    result = run_adapter(
+        buf.getvalue(),
+        {
+            **runtime,
+            "adapter": "openai_compatible",
+            "language": language or "auto",
+        },
     )
-    resp.raise_for_status()
-    body = resp.json()
-    return (body.get("text") or "").strip(), body.get("language") or language or ""
+    return result.text, result.language
