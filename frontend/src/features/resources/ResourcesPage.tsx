@@ -691,6 +691,9 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                 skills={(skills.data || []) as SkillRecord[]}
                 skillsLoading={skills.isLoading}
                 skillsError={skills.error instanceof Error ? skills.error.message : ''}
+                connecting={builtinConnect.isPending}
+                error={builtinConnect.error instanceof Error ? builtinConnect.error.message : ''}
+                onConnect={(connected) => builtinConnect.mutate(connected)}
               />
             ) : isEmbeddingMode ? (
               <EmbeddingModelDetails

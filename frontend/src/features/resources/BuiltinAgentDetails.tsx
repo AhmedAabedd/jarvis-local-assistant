@@ -119,6 +119,9 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
     const confirmationDirty =
       JSON.stringify(nextConfirmTools) !== JSON.stringify(originalConfirmTools)
     const nextSkillIds = [...selectedSkills].sort((left, right) => left - right)
+    const visibleSkills = readOnly
+      ? skills.filter((skill) => selectedSkills.has(Number(skill.id)))
+      : skills
     const originalSkillIds = [...(item.skill_ids || [])]
       .map(Number)
       .sort((left, right) => left - right)
@@ -223,7 +226,7 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
               <input
                 type="checkbox"
                 checked={item.connected}
-                disabled={readOnly || connecting}
+                disabled={connecting || !onConnect}
                 onChange={(event) => onConnect?.(event.target.checked)}
               />
               <span className="switch__track">
@@ -446,11 +449,12 @@ export const BuiltinAgentDetails = forwardRef<BuiltinAgentDetailsHandle, Builtin
                   Select the installed skills this built-in subagent can discover and activate.
                 </p>
                 <SkillPicker
-                  skills={skills}
+                  skills={visibleSkills}
                   selected={selectedSkills}
                   loading={skillsLoading}
                   error={skillsError}
                   readOnly={readOnly}
+                  empty="No skills are connected to this built-in subagent."
                   onChange={readOnly ? undefined : setSelectedSkills}
                 />
               </div>
