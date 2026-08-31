@@ -254,7 +254,10 @@ ADAPTERS: dict[str, dict[str, dict[str, Any]]] = {
                     {"value": "v2", "label": "V2 — Flux"},
                 ], advanced=False),
                 _option("output_format", "Output format", default="auto", choices=FORMAT_CHOICES, advanced=False),
-                _option("sample_rate", "Sample rate", "integer", default=24000),
+                _option(
+                    "sample_rate", "Sample rate", "integer", default=24000,
+                    hint="Used only for WAV or raw PCM. Provider-default and compressed audio omit this parameter.",
+                ),
                 _option("speed", "Speaking speed", "number", default=1),
             ],
         },
@@ -734,10 +737,14 @@ def _tts_deepgram(text: str, runtime: dict) -> AudioResult:
     if api_version == "auto":
         api_version = "v2" if str(runtime["model"]).lower().startswith("flux-") else "v1"
     query: dict[str, Any] = {"model": runtime["model"]}
+    linear_output = output_format in {"wav", "pcm"}
     if output_format not in {"auto", "mp3"}:
         query["encoding"] = "linear16" if output_format in {"wav", "pcm"} else output_format
         if output_format == "wav": query["container"] = "wav"
-    if options.get("sample_rate"): query["sample_rate"] = options["sample_rate"]
+    # Deepgram rejects sample_rate for its default MP3 response and other
+    # compressed encodings. It is meaningful only for linear PCM output.
+    if linear_output and options.get("sample_rate"):
+        query["sample_rate"] = options["sample_rate"]
     if options.get("speed") not in (None, 1, 1.0): query["speed"] = options["speed"]
     headers = _headers(runtime, {"Accept": "audio/*"})
     if runtime.get("api_key"): headers.setdefault("Authorization", f"Token {runtime['api_key']}")
@@ -745,7 +752,12 @@ def _tts_deepgram(text: str, runtime: dict) -> AudioResult:
     response = requests.post(_query(url, query), headers=headers, json={"text": text}, timeout=60)
     _raise_response(response, "Deepgram TTS")
     mime = response.headers.get("Content-Type", "audio/mpeg" if output_format in {"auto", "mp3"} and api_version == "v1" else "audio/pcm")
-    return AudioResult(response.content, mime, _encoding_from_mime(mime, output_format), int(options.get("sample_rate") or 24000))
+    return AudioResult(
+        response.content,
+        mime,
+        _encoding_from_mime(mime, output_format),
+        int(options.get("sample_rate") or 24000) if linear_output or mime in {"audio/pcm", "audio/l16"} else None,
+    )
 
 
 def _stt_deepgram(wav_bytes: bytes, runtime: dict) -> TranscriptionResult:

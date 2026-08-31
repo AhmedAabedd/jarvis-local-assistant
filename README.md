@@ -116,8 +116,12 @@ The execution layer uses LangGraph v1 primitives directly:
   paired in canonical LangChain messages.
 - Python tools use `@tool` or `StructuredTool`; JSON schemas are inferred from
   type annotations instead of being maintained by hand.
-- `ToolNode` validates arguments, executes tool batches, converts failures into
-  tool results, and powers both built-in and dynamic MCP specialist loops.
+- Supervisor tool batches run in the model-declared order. Direct tools,
+  specialist delegations, and saved-workflow delegations each receive a paired
+  result; mixing call types never silently drops the remaining calls.
+- `ToolNode` validates arguments and powers both built-in and dynamic MCP
+  specialist loops. Tool execution uses a shared structured outcome containing
+  machine-readable status plus the normal result content returned to the model.
 - Conditional graph edges enforce tool-round limits, declined-action handling,
   and supervisor-to-specialist routing.
 - LangGraph custom streams carry provider tokens directly to every interface;
@@ -125,6 +129,9 @@ The execution layer uses LangGraph v1 primitives directly:
 
 Provider adapters remain isolated in `mounir/llm.py`, so the same graph works
 with Ollama, Mistral, Groq, NVIDIA, Gemini, and OpenAI-compatible endpoints.
+Every completed model response is printed to the server terminal as one
+top-and-bottom-delimited JSON block containing its content and tool calls before
+the graph executes those calls.
 
 ---
 
@@ -325,6 +332,12 @@ operations and are not treated as uploads.
 The web interface accepts recorded speech and can speak responses. A separate voice
 entry point supports push-to-talk and hands-free wake word operation.
 
+The web orb speaks one ordered audio segment per nonempty supervisor model completion,
+using the same model-defined boundaries as Telegram. Text that accompanies tool calls
+can therefore be heard while the tool is running, followed by a separate final audio
+segment after the result. A failed TTS segment remains visible as text and does not
+prevent later completion segments from being synthesized or played.
+
 Supported one-shot voice adapters:
 
 - STT: **OpenAI-compatible**, **Deepgram**, **ElevenLabs**, **Google Cloud Speech**,
@@ -379,7 +392,11 @@ Telegram replies default to text. The saved reply mode can be changed from Agent
 Studio or with `/vocal` and `/text`; it applies independently of whether the request
 was typed or recorded. `/status`, `/reset`, and `/help` are also registered in
 Telegram's command menu. Voice replies use the configured text-to-speech provider
-and fall back to text if speech generation is unavailable.
+and fall back to text if speech generation is unavailable. In voice mode, every
+nonempty supervisor model completion is delivered as its own ordered voice note.
+Text accompanying a tool call can therefore be spoken while the tool runs, followed
+by a separate final voice note after the tool result. Empty tool-call completions do
+not create blank messages, and one failed speech segment does not stop later segments.
 
 Incoming photos and image documents become multimodal conversation attachments, so
 the supervisor can inspect their pixels directly and retain them for follow-up turns.

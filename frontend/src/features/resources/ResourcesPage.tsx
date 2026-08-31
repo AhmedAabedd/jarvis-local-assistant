@@ -701,7 +701,10 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
                 onTested={(saved) => setSelected(saved)}
               />
             ) : isVoiceModelMode ? (
-              <VoiceModelDetails item={selected as VoiceModelRecord} />
+              <VoiceModelDetails
+                item={selected as VoiceModelRecord}
+                onTested={(saved) => setSelected(saved)}
+              />
             ) : (
               <ResourceDetails
                 kind={kind}

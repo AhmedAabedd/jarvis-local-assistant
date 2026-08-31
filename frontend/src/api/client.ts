@@ -44,6 +44,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    public data: Record<string, unknown> = {},
   ) {
     super(message)
   }
@@ -59,7 +60,7 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok)
-    throw new ApiError(data.error || 'The request could not be completed.', response.status)
+    throw new ApiError(data.error || 'The request could not be completed.', response.status, data)
   return data as T
 }
 
@@ -140,10 +141,13 @@ export const api = {
         json('POST', body),
       ),
     test: (id: number) =>
-      request<{ ok: boolean; message: string; mime_type?: string; bytes?: number }>(
-        `/api/voice-models/${id}/test`,
-        json('POST'),
-      ),
+      request<{
+        ok: boolean
+        message: string
+        mime_type?: string
+        bytes?: number
+        model: VoiceModelRecord
+      }>(`/api/voice-models/${id}/test`, json('POST')),
   },
   servers: {
     list: () => request<McpServer[]>('/api/mcp-servers'),

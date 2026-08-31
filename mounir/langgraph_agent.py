@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import operator
 import threading
-from typing import Annotated, Iterator
+from dataclasses import dataclass
+from typing import Annotated, Callable, Iterator
 
 from langchain_core.messages import (
     AIMessage,
@@ -34,6 +35,7 @@ from . import (
     graph_runtime,
     llm,
     mcp_agents,
+    tool_outcome,
     tools,
     trace,
     workflow_runtime,
@@ -53,6 +55,7 @@ VOICE_RESPONSE_INSTRUCTION = (
     "MANDATORY VOICE MODE: Reply as natural spoken language only. "
     "Never use Markdown, bullets, tables, code formatting, emojis, or decorative symbols."
 )
+_ASSISTANT_COMPLETION_EVENT = "mounir.assistant_completion"
 
 _DELEGATES = {
     "delegate_to_media": "media",
@@ -71,6 +74,16 @@ class TurnState(MessagesState):
 
     tool_rounds: Annotated[int, operator.add]
     delegations: Annotated[int, operator.add]
+    pending_tool_calls: list[dict]
+
+
+@dataclass(frozen=True)
+class AssistantCompletion:
+    """One complete user-visible assistant response before the next graph step."""
+
+    text: str
+    has_tool_calls: bool
+    is_final: bool
 
 
 def _tool_calls(message: BaseMessage | dict) -> list[dict]:
@@ -99,6 +112,35 @@ def _extract_delegate(
 def _stream_text(content: str) -> None:
     if content:
         get_stream_writer()(content)
+
+
+def _stream_completion(message: AIMessage) -> None:
+    """Publish a boundary event without adding it to the visible token stream."""
+    text = str(message.content or "").strip()
+    if not text:
+        return
+    has_tool_calls = bool(message.tool_calls)
+    get_stream_writer()(
+        {
+            "type": _ASSISTANT_COMPLETION_EVENT,
+            "text": text,
+            "has_tool_calls": has_tool_calls,
+            "is_final": not has_tool_calls,
+        }
+    )
+
+
+def _report_completion(
+    handler: Callable[[AssistantCompletion], None] | None,
+    completion: AssistantCompletion,
+) -> None:
+    """Keep an optional output consumer from changing graph execution."""
+    if handler is None:
+        return
+    try:
+        handler(completion)
+    except Exception as exc:
+        trace.kv("assistant completion", f"consumer failed: {exc}")
 
 
 def _supervisor(
@@ -133,28 +175,49 @@ def _supervisor(
         {"content": "".join(chunks), "tool_calls": raw_calls},
         call_prefix=f"call_{state.get('tool_rounds', 0)}",
     )
+    _stream_completion(response)
     if not response.tool_calls:
-        return Command(goto=END, update={"messages": [response]})
-
-    delegate = next(
-        (call for call in response.tool_calls if call.get("name") in delegates),
-        None,
-    )
-    if delegate is not None:
-        target = delegates[str(delegate["name"])]
-        # A provider may mix delegation and ordinary calls in one response.
-        # Handoffs are exclusive so the history contains one valid call/result pair.
-        handoff = AIMessage(content=response.content, tool_calls=[delegate])
-        trace.gap()
-        trace.event(f"→ delegating to {target}")
         return Command(
-            goto=target,
-            update={"messages": [handoff], "delegations": 1},
+            goto=END,
+            update={"messages": [response], "pending_tool_calls": []},
         )
 
+    first, *pending = response.tool_calls
+    target = delegates.get(str(first.get("name") or ""), "tools")
+    first_message = AIMessage(content=response.content, tool_calls=[first])
+    if target != "tools":
+        trace.gap()
+        trace.event(f"→ delegating to {target}")
+
     return Command(
-        goto="tools",
-        update={"messages": [response], "tool_rounds": 1},
+        goto=target,
+        update={
+            "messages": [first_message],
+            "pending_tool_calls": pending,
+            "tool_rounds": 1,
+            "delegations": 1 if target != "tools" else 0,
+        },
+    )
+
+
+def _advance_tool_batch(state: TurnState, delegates: dict[str, str]) -> Command:
+    """Dispatch the next call from one model-declared batch in original order."""
+
+    pending = list(state.get("pending_tool_calls") or [])
+    if not pending:
+        return Command(goto="supervisor", update={"pending_tool_calls": []})
+    current, *remaining = pending
+    target = delegates.get(str(current.get("name") or ""), "tools")
+    if target != "tools":
+        trace.gap()
+        trace.event(f"→ delegating to {target}")
+    return Command(
+        goto=target,
+        update={
+            "messages": [AIMessage(content="", tool_calls=[current])],
+            "pending_tool_calls": remaining,
+            "delegations": 1 if target != "tools" else 0,
+        },
     )
 
 
@@ -174,6 +237,8 @@ def _after_tools(state: TurnState) -> str:
     )
     if any(str(message.content) == tools.USER_DECLINED for message in latest):
         return "declined"
+    if state.get("pending_tool_calls"):
+        return "advance_tools"
     if state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS:
         return "force_final"
     return "supervisor"
@@ -191,7 +256,9 @@ def _declined(state: TurnState) -> dict:
     )
     notice = action_decline.user_notice(outcome)
     _stream_text(notice)
-    return {"messages": [AIMessage(content=notice)]}
+    response = AIMessage(content=notice)
+    _stream_completion(response)
+    return {"messages": [response]}
 
 
 def _force_final(state: TurnState, model: str) -> dict:
@@ -207,7 +274,9 @@ def _force_final(state: TurnState, model: str) -> dict:
     ):
         parts.append(chunk)
         _stream_text(chunk)
-    return {"messages": [AIMessage(content="".join(parts).strip())]}
+    response = AIMessage(content="".join(parts).strip())
+    _stream_completion(response)
+    return {"messages": [response]}
 
 
 def _specialist_result(
@@ -221,37 +290,48 @@ def _specialist_result(
     trace.node(node_name)
     trace.block("received  ← supervisor", task)
     if unavailable:
-        report = unavailable
-    elif task:
-        raw_report = runner(task)
-        report = (
-            raw_report
-            if isinstance(raw_report, action_decline.Signal)
-            else raw_report.strip()
+        result = tool_outcome.ToolOutcome.error(unavailable)
+    elif not task:
+        result = tool_outcome.ToolOutcome.error(
+            f"No task was provided to the {node_name} agent."
         )
     else:
-        report = f"No task was provided to the {node_name} agent."
+        try:
+            raw_report = runner(task)
+        except Exception as exc:
+            result = tool_outcome.ToolOutcome.error(
+                f"The {node_name} agent failed: {exc}"
+            )
+        else:
+            if isinstance(raw_report, action_decline.Signal):
+                decline = action_decline.parse(raw_report) or {}
+                result = tool_outcome.ToolOutcome.declined(
+                    action_decline.MESSAGE,
+                    action_decline.artifact(decline),
+                )
+            else:
+                result = tool_outcome.ToolOutcome.success(str(raw_report).strip())
     decline = (
-        action_decline.parse(report)
-        if isinstance(report, action_decline.Signal)
+        action_decline.from_artifact(result.artifact)
+        if isinstance(result.artifact, dict)
         else None
     )
-    visible_report = action_decline.MESSAGE if decline is not None else report
+    visible_report = str(result.content)
     trace.block("returned  → supervisor", visible_report)
     trace.gap()
     return Command(
-        goto="declined" if decline is not None else "supervisor",
+        goto=(
+            "declined"
+            if decline is not None
+            else "advance_tools"
+            if state.get("pending_tool_calls")
+            else "supervisor"
+        ),
         update={
             "messages": [
-                ToolMessage(
-                    content=visible_report,
+                result.as_tool_message(
                     name=tool_name,
                     tool_call_id=call_id,
-                    artifact=(
-                        action_decline.artifact(decline)
-                        if decline is not None
-                        else None
-                    ),
                 )
             ]
         },
@@ -480,8 +560,9 @@ def _compile_graph(
     def execute_general_tool(request, execute):
         with general_tool_lock:
             if declined_batch.is_set():
-                return ToolMessage(
-                    content="Skipped — the user declined a command in this batch.",
+                return tool_outcome.ToolOutcome.skipped(
+                    "Skipped — the user declined a command in this batch."
+                ).as_tool_message(
                     name=request.tool_call["name"],
                     tool_call_id=request.tool_call["id"],
                 )
@@ -491,7 +572,14 @@ def _compile_graph(
                 and str(result.content) == tools.USER_DECLINED
             ):
                 declined_batch.set()
-            return result
+                return tool_outcome.normalize(
+                    result, outcome_status="declined"
+                )
+            return (
+                tool_outcome.normalize(result)
+                if isinstance(result, ToolMessage)
+                else result
+            )
 
     graph = StateGraph(TurnState)
     graph.add_node(
@@ -507,6 +595,10 @@ def _compile_graph(
             handle_tool_errors=True,
             wrap_tool_call=execute_general_tool,
         ),
+    )
+    graph.add_node(
+        "advance_tools",
+        lambda state: _advance_tool_batch(state, delegates),
     )
     graph.add_node("declined", _declined)
     graph.add_node("force_final", lambda state: _force_final(state, model))
@@ -543,6 +635,7 @@ def _compile_graph(
         _after_tools,
         {
             "supervisor": "supervisor",
+            "advance_tools": "advance_tools",
             "declined": "declined",
             "force_final": "force_final",
         },
@@ -594,6 +687,39 @@ class Agent:
         attachments: list[dict] | None = None,
     ) -> Iterator[str]:
         """Run and stream one complete LangGraph turn."""
+
+        return self._respond(
+            user_input,
+            voice=voice,
+            attachments=attachments,
+        )
+
+    def respond_with_completions(
+        self,
+        user_input: str,
+        *,
+        on_completion: Callable[[AssistantCompletion], None],
+        voice: bool = False,
+        attachments: list[dict] | None = None,
+    ) -> Iterator[str]:
+        """Stream a turn and report each real model-completion boundary."""
+
+        return self._respond(
+            user_input,
+            voice=voice,
+            attachments=attachments,
+            on_completion=on_completion,
+        )
+
+    def _respond(
+        self,
+        user_input: str,
+        *,
+        voice: bool = False,
+        attachments: list[dict] | None = None,
+        on_completion: Callable[[AssistantCompletion], None] | None = None,
+    ) -> Iterator[str]:
+        """Shared graph runner for token and completion-aware consumers."""
 
         if self._profile_managed_prompt:
             self.conversation.system_prompt = cfg.build_system_prompt(db.get_profile())
@@ -666,6 +792,7 @@ class Agent:
             "messages": initial_messages,
             "tool_rounds": 0,
             "delegations": 0,
+            "pending_tool_calls": [],
         }
         input_len = len(initial_messages)
         graph = _compile_graph(
@@ -686,7 +813,21 @@ class Agent:
                 version="v2",
             ):
                 if event["type"] == "custom":
-                    chunk = str(event["data"])
+                    data = event["data"]
+                    if (
+                        isinstance(data, dict)
+                        and data.get("type") == _ASSISTANT_COMPLETION_EVENT
+                    ):
+                        _report_completion(
+                            on_completion,
+                            AssistantCompletion(
+                                text=str(data.get("text") or "").strip(),
+                                has_tool_calls=bool(data.get("has_tool_calls")),
+                                is_final=bool(data.get("is_final")),
+                            ),
+                        )
+                        continue
+                    chunk = str(data)
                     streamed.append(chunk)
                     yield chunk
                 elif event["type"] == "values":
@@ -694,6 +835,14 @@ class Agent:
         except Exception as exc:
             chunk = f"\n[agent error: {exc}]"
             streamed.append(chunk)
+            _report_completion(
+                on_completion,
+                AssistantCompletion(
+                    text=chunk.strip(),
+                    has_tool_calls=False,
+                    is_final=True,
+                ),
+            )
             yield chunk
 
         produced = (result_state or {}).get("messages", [])[input_len:]

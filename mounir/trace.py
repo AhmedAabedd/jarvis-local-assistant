@@ -8,10 +8,12 @@ Vocabulary:
     event(text)               a small sub-step           ⎿
     tool(name, params, res)   a tool call + its params   ⏺
     block(title, body)        a larger payload in/out    ▌ │
+    chat_completion(message)  one complete model response ╭ ╰
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import textwrap
@@ -109,6 +111,24 @@ def block(title: str, body: str, max_lines: int = 60) -> None:
             if shown >= max_lines:
                 _out(f"  {PURPLE}│{RESET} {DIM}… (truncated){RESET}")
                 return
+
+
+def chat_completion(message: dict) -> None:
+    """Print one complete canonical chat response inside clear separators."""
+
+    rendered = json.dumps(message, ensure_ascii=False, indent=2, default=str)
+    width = max(48, min(_width() - 4, 116))
+    title = " CHAT COMPLETION "
+    top = f"  {PURPLE}╭─{RESET}{BOLD}{LAV}{title}{RESET}"
+    top += f"{PURPLE}{'─' * max(1, width - len(title) - 1)}╮{RESET}"
+    lines = [top]
+    for line in rendered.splitlines() or ["{}"]:
+        lines.append(f"  {PURPLE}│{RESET} {line}")
+    footer = " END CHAT COMPLETION "
+    bottom = f"  {PURPLE}╰─{RESET}{BOLD}{DIM}{footer}{RESET}"
+    bottom += f"{PURPLE}{'─' * max(1, width - len(footer) - 1)}╯{RESET}"
+    lines.append(bottom)
+    _out("\n".join(lines))
 
 
 def log(name: str, message: str = "") -> None:

@@ -18,6 +18,7 @@ import { useProfile } from '../../hooks/useStudioData'
 import { FluidVoiceOrb, type VoiceState } from './FluidVoiceOrb'
 import { ToolApprovalPanel } from './ToolApprovalPanel'
 import { useChatSocket } from './useChatSocket'
+import { playVoiceAudio, readVoiceStream } from './voiceStream'
 
 function notificationText(item: Notification) {
   return item.message || item.content || ''
@@ -179,28 +180,62 @@ export function ChatPage() {
           new Blob(chunks.current, { type: mediaRecorder.mimeType }),
           'voice.webm',
         )
+        let voiceTurnStarted = false
+        let playback = Promise.resolve()
         try {
-          const response = await fetch('/api/voice', { method: 'POST', body })
-          const data = await response.json()
-          if (!response.ok) throw new Error(data.error || 'Voice request failed.')
-          if (data.text) chat.appendVoiceTurn(data.text, data.reply || '')
-          setAttachmentError(
-            data.voice_error ? `Voice output unavailable: ${data.voice_error}` : '',
-          )
-          if (data.audio_b64) {
-            setVoiceState('speaking')
-            const audio = new Audio(
-              `data:${data.audio_mime || 'audio/wav'};base64,${data.audio_b64}`,
+          const response = await fetch('/api/voice', {
+            method: 'POST',
+            body,
+            headers: { Accept: 'application/x-ndjson' },
+          })
+          if (!response.ok) {
+            const data = await response.json().catch(() => ({}))
+            throw new Error(data.error || 'Voice request failed.')
+          }
+
+          if (!response.headers.get('content-type')?.includes('application/x-ndjson')) {
+            // Keep the orb compatible with an older backend during an upgrade.
+            const data = await response.json()
+            if (data.text) chat.appendVoiceTurn(data.text, data.reply || '')
+            setAttachmentError(
+              data.voice_error ? `Voice output unavailable: ${data.voice_error}` : '',
             )
-            audio.onended = () => setVoiceState('ready')
-            audio.onerror = () => setVoiceState('ready')
-            await audio.play()
-          } else setVoiceState('ready')
-        } catch (error) {
-          chat.appendVoiceTurn(
-            'Voice input',
-            error instanceof Error ? error.message : 'Voice request failed.',
+            if (data.audio_b64) {
+              setVoiceState('speaking')
+              await playVoiceAudio(data.audio_b64, data.audio_mime)
+            }
+            setVoiceState('ready')
+            return
+          }
+
+          const voiceErrors: string[] = []
+          for await (const packet of readVoiceStream(response)) {
+            if (packet.type === 'transcript') {
+              if (packet.text) {
+                chat.beginVoiceTurn(packet.text)
+                voiceTurnStarted = true
+              }
+            } else if (packet.type === 'completion') {
+              chat.appendVoiceCompletion(packet.text)
+            } else if (packet.type === 'audio') {
+              setVoiceState('speaking')
+              playback = playback.then(() => playVoiceAudio(packet.audio_b64, packet.audio_mime))
+            } else if (packet.type === 'voice_error') {
+              if (!voiceErrors.includes(packet.message)) voiceErrors.push(packet.message)
+            } else if (packet.type === 'error') {
+              throw new Error(packet.message || 'Voice request failed.')
+            }
+          }
+          await playback
+          setAttachmentError(
+            voiceErrors.length ? `Voice output unavailable: ${voiceErrors.join(' ')}` : '',
           )
+          setVoiceState('ready')
+        } catch (error) {
+          await playback
+          const message = error instanceof Error ? error.message : 'Voice request failed.'
+          if (voiceTurnStarted) chat.appendVoiceCompletion(`Something went wrong: ${message}`)
+          else chat.appendVoiceTurn('Voice input', message)
           setVoiceState('ready')
         }
       }

@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { PlugZap } from 'lucide-react'
 import { useState } from 'react'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import type { VoiceModelRecord } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
@@ -18,21 +18,40 @@ function Detail({ label, value, full = false }: { label: string; value?: string;
   )
 }
 
-export function VoiceModelDetails({ item }: { item: VoiceModelRecord }) {
+function testedModel(error: Error): VoiceModelRecord | undefined {
+  if (!(error instanceof ApiError)) return undefined
+  const model = error.data.model
+  if (!model || typeof model !== 'object' || !('id' in model)) return undefined
+  return model as VoiceModelRecord
+}
+
+export function VoiceModelDetails({
+  item,
+  onTested,
+}: {
+  item: VoiceModelRecord
+  onTested: (saved: VoiceModelRecord) => void
+}) {
   const client = useQueryClient()
   const [message, setMessage] = useState('')
   const test = useMutation({
     mutationFn: () => api.voiceModels.test(item.id),
     onSuccess: async (result) => {
       setMessage(result.message)
+      onTested(result.model)
       await Promise.all([
         client.invalidateQueries({ queryKey: keys.voiceModels }),
         client.invalidateQueries({ queryKey: keys.modelCatalog }),
       ])
     },
-    onError: () => {
+    onError: async (error) => {
       setMessage('')
-      void client.invalidateQueries({ queryKey: keys.voiceModels })
+      const saved = testedModel(error)
+      if (saved) onTested(saved)
+      await Promise.all([
+        client.invalidateQueries({ queryKey: keys.voiceModels }),
+        client.invalidateQueries({ queryKey: keys.modelCatalog }),
+      ])
     },
   })
   const options = Object.entries(item.provider_options || {})
@@ -60,6 +79,10 @@ export function VoiceModelDetails({ item }: { item: VoiceModelRecord }) {
             </Button>
           </span>
         </div>
+        <Feedback
+          message={test.error instanceof Error ? test.error.message : message}
+          kind={message ? 'success' : 'error'}
+        />
         <div className="card__body detail-grid resource-detail-body">
           <Detail label="Name" value={item.name} />
           <Detail label="Location" value={readable(item.location)} />
@@ -93,10 +116,6 @@ export function VoiceModelDetails({ item }: { item: VoiceModelRecord }) {
           {item.last_error && <Detail label="Last test error" value={item.last_error} full />}
         </div>
       </section>
-      <Feedback
-        message={test.error instanceof Error ? test.error.message : message}
-        kind={message ? 'success' : 'error'}
-      />
     </div>
   )
 }

@@ -124,6 +124,27 @@ export function useChatSocket(onHeartbeat: (text: string, title?: string) => voi
     ])
   }, [])
 
+  const beginVoiceTurn = useCallback((text: string) => {
+    if (!text.trim()) return
+    setMessages((current) => [...current, { role: 'user', content: text }])
+  }, [])
+
+  const appendVoiceCompletion = useCallback((text: string) => {
+    const segment = text.trim()
+    if (!segment) return
+    setMessages((current) => {
+      const copy = [...current]
+      const last = copy.at(-1)
+      if (last?.role === 'assistant') {
+        copy[copy.length - 1] = {
+          ...last,
+          content: last.content ? `${last.content}\n\n${segment}` : segment,
+        }
+      } else copy.push({ role: 'assistant', content: segment })
+      return copy
+    })
+  }, [])
+
   return {
     connection,
     messages,
@@ -132,5 +153,7 @@ export function useChatSocket(onHeartbeat: (text: string, title?: string) => voi
     send,
     answerConfirmation,
     appendVoiceTurn,
+    beginVoiceTurn,
+    appendVoiceCompletion,
   }
 }

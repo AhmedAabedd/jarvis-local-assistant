@@ -33,7 +33,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 
-from . import action_decline, trace, tools as mounir_tools
+from . import action_decline, tool_outcome, trace, tools as mounir_tools
 
 ModelCall = Callable[[list[dict], list[dict] | None], dict]
 AsyncModelCall = Callable[[list[dict], list[dict] | None], Awaitable[dict]]
@@ -235,8 +235,9 @@ def run_tool_agent(
         """Confirm configured calls and stop the remaining batch on refusal."""
         with tool_lock:
             if declined_signal["value"]:
-                return ToolMessage(
-                    content="Skipped — an earlier action was declined.",
+                return tool_outcome.ToolOutcome.skipped(
+                    "Skipped — an earlier action was declined."
+                ).as_tool_message(
                     name=request.tool_call["name"],
                     tool_call_id=request.tool_call["id"],
                 )
@@ -250,11 +251,12 @@ def run_tool_agent(
                     signal = action_decline.create(name)
                     outcome = action_decline.parse(signal) or {}
                     declined_signal["value"] = outcome
-                    return ToolMessage(
-                        content=action_decline.MESSAGE,
+                    return tool_outcome.ToolOutcome.declined(
+                        action_decline.MESSAGE,
+                        action_decline.artifact(outcome),
+                    ).as_tool_message(
                         name=name,
                         tool_call_id=request.tool_call["id"],
-                        artifact=action_decline.artifact(outcome),
                     )
             result = execute(request)
             if isinstance(result, ToolMessage):
@@ -263,16 +265,28 @@ def run_tool_agent(
                 )
                 if outcome is not None:
                     declined_signal["value"] = outcome
+                result = tool_outcome.normalize(
+                    result,
+                    outcome_status="declined" if outcome is not None else None,
+                )
             return result
 
-    tool_node = (
-        ToolNode(
-            available_tools,
-            handle_tool_errors=True,
-            wrap_tool_call=execute_sequentially,
+    def normalize_execution(request, execute):
+        result = execute(request)
+        return (
+            tool_outcome.normalize(result)
+            if isinstance(result, ToolMessage)
+            else result
         )
-        if confirmation_tools is not None
-        else ToolNode(available_tools, handle_tool_errors=True)
+
+    tool_node = ToolNode(
+        available_tools,
+        handle_tool_errors=True,
+        wrap_tool_call=(
+            execute_sequentially
+            if confirmation_tools is not None
+            else normalize_execution
+        ),
     )
 
     graph = StateGraph(ToolAgentState)
@@ -405,8 +419,9 @@ async def arun_tool_agent(
         """Preserve tool order and skip every remaining call after a refusal."""
         async with tool_lock:
             if declined_signal["value"]:
-                return ToolMessage(
-                    content="Skipped — an earlier action was declined.",
+                return tool_outcome.ToolOutcome.skipped(
+                    "Skipped — an earlier action was declined."
+                ).as_tool_message(
                     name=request.tool_call["name"],
                     tool_call_id=request.tool_call["id"],
                 )
@@ -417,6 +432,10 @@ async def arun_tool_agent(
                 )
                 if outcome is not None:
                     declined_signal["value"] = outcome
+                result = tool_outcome.normalize(
+                    result,
+                    outcome_status="declined" if outcome is not None else None,
+                )
             return result
 
     graph = StateGraph(ToolAgentState)

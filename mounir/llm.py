@@ -7,7 +7,7 @@ from typing import Iterator
 
 import requests
 
-from . import config
+from . import config, trace
 
 
 class ModelError(RuntimeError):
@@ -323,6 +323,7 @@ def openai_chat(
         message["content"] = re.sub(
             r"(?s)<think>.*?</think>", "", message.get("content") or ""
         ).strip()
+        trace.chat_completion(message)
         return message
     except ModelError:
         raise
@@ -370,6 +371,7 @@ def chat_stream(
             timeout=180,
         )
         collected_calls: dict[int, dict[str, str]] = {}
+        content_parts: list[str] = []
         for raw_line in response.iter_lines(decode_unicode=True):
             if isinstance(raw_line, bytes):
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -387,6 +389,7 @@ def chat_stream(
             delta = choices[0].get("delta") or {}
             content = delta.get("content") or ""
             if isinstance(content, str) and content:
+                content_parts.append(content)
                 yield content
             for position, tool_call in enumerate(delta.get("tool_calls") or []):
                 index = int(tool_call.get("index", position) or 0)
@@ -401,15 +404,20 @@ def chat_stream(
                     current["name"] += str(function["name"])
                 if function.get("arguments"):
                     current["arguments"] += _json_arguments(function["arguments"])
+        canonical_calls = []
+        for call in collected_calls.values():
+            try:
+                arguments = json.loads(call["arguments"] or "{}")
+            except (TypeError, ValueError):
+                arguments = {}
+            canonical_calls.append(
+                _canonical_tool_call(call["name"], arguments, call["id"])
+            )
+        trace.chat_completion(
+            {"content": "".join(content_parts), "tool_calls": canonical_calls}
+        )
         if tool_calls_out is not None:
-            for call in collected_calls.values():
-                try:
-                    arguments = json.loads(call["arguments"] or "{}")
-                except (TypeError, ValueError):
-                    arguments = {}
-                tool_calls_out.append(
-                    _canonical_tool_call(call["name"], arguments, call["id"])
-                )
+            tool_calls_out.extend(canonical_calls)
     except ModelError:
         raise
     except Exception as exc:

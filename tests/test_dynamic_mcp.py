@@ -36,9 +36,11 @@ from mounir import (
     llm as llm_mod,
     mcp_agents,
     mcp_oauth,
+    tool_outcome,
     tools as mounir_tools,
+    trace,
 )
-from mounir.agent import Agent
+from mounir.agent import Agent, AssistantCompletion
 from mounir.memory import Conversation
 from mounir.specialists import knowledge as knowledge_agent
 from mounir.specialists import mcp_agent
@@ -550,9 +552,48 @@ class DatabaseTests(TemporaryDatabaseTest):
             result = speech_adapters.synthesize("hello", runtime)
 
         self.assertTrue(post.call_args.args[0].startswith("https://api.deepgram.com/v2/speak?"))
+        self.assertNotIn("sample_rate=", post.call_args.args[0])
         self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Token deepgram-key")
         self.assertEqual(result.mime_type, "audio/pcm")
         self.assertEqual(result.sample_rate, 24000)
+
+    def test_deepgram_omits_sample_rate_for_default_or_compressed_audio(self):
+        from mounir import speech_adapters
+
+        response = Mock(content=b"mp3", ok=True, headers={"Content-Type": "audio/mpeg"})
+        for output_format in ("auto", "mp3"):
+            runtime = {
+                "adapter": "deepgram",
+                "model": "flux-alexis-en",
+                "base_url": "https://api.deepgram.com",
+                "api_key": "deepgram-key",
+                "provider_options": {"output_format": output_format, "sample_rate": 24000},
+            }
+            with self.subTest(output_format=output_format), patch(
+                "requests.post", return_value=response
+            ) as post:
+                result = speech_adapters.synthesize("hello", runtime)
+
+            self.assertNotIn("sample_rate=", post.call_args.args[0])
+            self.assertIsNone(result.sample_rate)
+
+    def test_deepgram_sends_sample_rate_for_linear_audio(self):
+        from mounir import speech_adapters
+
+        response = Mock(content=b"pcm", ok=True, headers={"Content-Type": "audio/pcm"})
+        runtime = {
+            "adapter": "deepgram",
+            "model": "aura-2-thalia-en",
+            "base_url": "https://api.deepgram.com",
+            "api_key": "deepgram-key",
+            "provider_options": {"output_format": "pcm", "sample_rate": 16000},
+        }
+        with patch("requests.post", return_value=response) as post:
+            result = speech_adapters.synthesize("hello", runtime)
+
+        self.assertIn("encoding=linear16", post.call_args.args[0])
+        self.assertIn("sample_rate=16000", post.call_args.args[0])
+        self.assertEqual(result.sample_rate, 16000)
 
     def test_speech_error_redacts_credentials(self):
         from mounir import speech_adapters
@@ -1335,7 +1376,10 @@ class DatabaseTests(TemporaryDatabaseTest):
             "choices": [{"message": {"content": "ready", "tool_calls": []}}]
         }
 
-        with patch.object(llm_mod.requests, "post", return_value=response) as post:
+        with (
+            patch.object(llm_mod.requests, "post", return_value=response) as post,
+            patch.object(llm_mod.trace, "chat_completion") as completion,
+        ):
             result = llm_mod.openai_chat(
                 [{"role": "user", "content": "hello"}],
                 model="custom-test",
@@ -1345,6 +1389,9 @@ class DatabaseTests(TemporaryDatabaseTest):
             )
 
         self.assertEqual(result["content"], "ready")
+        completion.assert_called_once_with(
+            {"content": "ready", "tool_calls": []}
+        )
         request = post.call_args
         self.assertEqual(request.args[0], "https://models.example.test/v1/chat/completions")
         self.assertEqual(request.kwargs["json"]["model"], "custom-test")
@@ -1457,9 +1504,10 @@ class DatabaseTests(TemporaryDatabaseTest):
         )
 
         calls = []
-        with patch.object(
-            llm_mod.requests, "post", return_value=response
-        ) as post:
+        with (
+            patch.object(llm_mod.requests, "post", return_value=response) as post,
+            patch.object(llm_mod.trace, "chat_completion") as completion,
+        ):
             text = "".join(
                 llm_mod.chat_stream(
                     [{"role": "user", "content": "read notes"}],
@@ -1474,6 +1522,32 @@ class DatabaseTests(TemporaryDatabaseTest):
         self.assertNotIn("temperature", post.call_args.kwargs["json"])
         self.assertEqual(calls[0]["function"]["name"], "read_file")
         self.assertEqual(calls[0]["function"]["arguments"], {"path": "notes.md"})
+        completion.assert_called_once_with(
+            {"content": "working ", "tool_calls": calls}
+        )
+
+    def test_chat_completion_trace_has_top_and_bottom_separators(self):
+        with patch.object(trace, "_out") as output:
+            trace.chat_completion(
+                {
+                    "content": "I’ll check.",
+                    "tool_calls": [
+                        {
+                            "id": "browser_1",
+                            "function": {
+                                "name": "open_browser",
+                                "arguments": {"url": "example.com"},
+                            },
+                        }
+                    ],
+                }
+            )
+
+        rendered = output.call_args.args[0]
+        self.assertIn("CHAT COMPLETION", rendered)
+        self.assertIn("END CHAT COMPLETION", rendered)
+        self.assertIn('"content": "I’ll check."', rendered)
+        self.assertIn('"name": "open_browser"', rendered)
 
     def test_builtin_specialist_enforces_heartbeat_tool_allowlist(self):
         calls = []
@@ -2435,7 +2509,11 @@ class DatabaseTests(TemporaryDatabaseTest):
 
         with (
             patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
-            patch.object(mounir_tools, "open_browser", return_value="opened"),
+            patch.object(
+                mounir_tools,
+                "_open_browser_outcome",
+                return_value=tool_outcome.ToolOutcome.success("opened"),
+            ),
         ):
             reply = "".join(
                 Agent(conversation=Conversation(system_prompt="test")).respond("list")
@@ -2443,6 +2521,327 @@ class DatabaseTests(TemporaryDatabaseTest):
 
         self.assertEqual(reply, "done")
         self.assertEqual(observed, ["opened"])
+
+    def test_supervisor_executes_mixed_direct_and_delegation_batch_in_order(self):
+        db.init()
+        execution_order = []
+        observed_results = []
+        model_calls = 0
+
+        def fake_chat(messages, tools=None, tool_calls_out=None, **_kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            results = [
+                message
+                for message in messages
+                if message.get("role") == "tool"
+            ]
+            if not results:
+                for call_id, name, arguments in (
+                    ("browser_1", "open_browser", {"url": "example.com"}),
+                    ("media_1", "delegate_to_media", {"task": "Inspect notes"}),
+                    ("path_1", "open_path", {"target": "/tmp/report.txt"}),
+                ):
+                    tool_calls_out.append(
+                        SimpleNamespace(
+                            id=call_id,
+                            function=SimpleNamespace(
+                                name=name,
+                                arguments=arguments,
+                            ),
+                        )
+                    )
+                yield "I’ll handle all three actions."
+                return
+            observed_results.extend(
+                (message.get("tool_call_id"), message.get("content"))
+                for message in results
+            )
+            yield "All three actions finished."
+
+        def browser_result(_url):
+            execution_order.append("open_browser")
+            return tool_outcome.ToolOutcome.success("browser opened")
+
+        def media_result(_task, **_kwargs):
+            execution_order.append("delegate_to_media")
+            return "notes inspected"
+
+        def path_result(_target):
+            execution_order.append("open_path")
+            return tool_outcome.ToolOutcome.success("path opened")
+
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(mounir_tools, "_open_browser_outcome", browser_result),
+            patch.object(langgraph_agent, "run_media", media_result),
+            patch.object(mounir_tools, "_open_path_outcome", path_result),
+        ):
+            reply = "".join(
+                Agent(conversation=Conversation(system_prompt="test")).respond(
+                    "Do all three"
+                )
+            )
+
+        self.assertEqual(
+            execution_order,
+            ["open_browser", "delegate_to_media", "open_path"],
+        )
+        self.assertEqual(
+            observed_results,
+            [
+                ("browser_1", "browser opened"),
+                ("media_1", "notes inspected"),
+                ("path_1", "path opened"),
+            ],
+        )
+        self.assertEqual(model_calls, 2)
+        self.assertEqual(
+            reply,
+            "I’ll handle all three actions.All three actions finished.",
+        )
+
+    def test_mixed_batch_continues_after_a_structured_tool_error(self):
+        db.init()
+        execution_order = []
+        observed_results = []
+
+        def fake_chat(messages, tools=None, tool_calls_out=None, **_kwargs):
+            results = [
+                message
+                for message in messages
+                if message.get("role") == "tool"
+            ]
+            if not results:
+                for call_id, name, arguments in (
+                    ("browser_1", "open_browser", {"url": "example.com"}),
+                    ("media_1", "delegate_to_media", {"task": "Inspect notes"}),
+                ):
+                    tool_calls_out.append(
+                        SimpleNamespace(
+                            id=call_id,
+                            function=SimpleNamespace(
+                                name=name,
+                                arguments=arguments,
+                            ),
+                        )
+                    )
+                return
+            observed_results.extend(message.get("content") for message in results)
+            yield "finished"
+
+        def browser_result(_url):
+            execution_order.append("open_browser")
+            return tool_outcome.ToolOutcome.error("browser failed")
+
+        def media_result(_task, **_kwargs):
+            execution_order.append("delegate_to_media")
+            return "notes inspected"
+
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(mounir_tools, "_open_browser_outcome", browser_result),
+            patch.object(langgraph_agent, "run_media", media_result),
+        ):
+            reply = "".join(
+                Agent(conversation=Conversation(system_prompt="test")).respond(
+                    "Try both"
+                )
+            )
+
+        self.assertEqual(execution_order, ["open_browser", "delegate_to_media"])
+        self.assertEqual(observed_results, ["browser failed", "notes inspected"])
+        self.assertEqual(reply, "finished")
+
+    def test_declined_call_still_stops_the_remaining_mixed_batch(self):
+        db.init()
+
+        def fake_chat(_messages, tools=None, tool_calls_out=None, **_kwargs):
+            for call_id, name, arguments in (
+                ("bash_1", "bash", {"command": "safe-command"}),
+                ("media_1", "delegate_to_media", {"task": "Inspect notes"}),
+            ):
+                tool_calls_out.append(
+                    SimpleNamespace(
+                        id=call_id,
+                        function=SimpleNamespace(
+                            name=name,
+                            arguments=arguments,
+                        ),
+                    )
+                )
+            if False:
+                yield ""
+
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(langgraph_agent, "run_media") as run_media,
+            mounir_tools.use_confirmation_handler(lambda _action: False),
+        ):
+            reply = "".join(
+                Agent(conversation=Conversation(system_prompt="test")).respond(
+                    "Run and inspect"
+                )
+            )
+
+        run_media.assert_not_called()
+        self.assertIn("declined", reply)
+
+    def test_direct_tool_messages_carry_structured_outcomes(self):
+        with patch.object(
+            mounir_tools.browser_control,
+            "open_default",
+            return_value=False,
+        ):
+            message = mounir_tools.open_browser_tool.invoke(
+                {
+                    "type": "tool_call",
+                    "id": "browser_1",
+                    "name": "open_browser",
+                    "args": {"url": "example.com"},
+                }
+            )
+
+        normalized = tool_outcome.normalize(message)
+        self.assertEqual(tool_outcome.status(normalized), "error")
+        self.assertEqual(normalized.status, "error")
+        self.assertIn("could not open", str(normalized.content).lower())
+
+    def test_delegation_exceptions_become_structured_error_results(self):
+        db.init()
+        state = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "media_1",
+                            "function": {
+                                "name": "delegate_to_media",
+                                "arguments": '{"task":"Inspect notes"}',
+                            },
+                        }
+                    ],
+                }
+            ],
+            "pending_tool_calls": [],
+        }
+
+        with patch.object(
+            langgraph_agent,
+            "run_media",
+            side_effect=RuntimeError("media unavailable"),
+        ):
+            command = langgraph_agent._media(state)
+
+        message = command.update["messages"][0]
+        self.assertEqual(command.goto, "supervisor")
+        self.assertEqual(tool_outcome.status(message), "error")
+        self.assertEqual(message.status, "error")
+        self.assertIn("media unavailable", str(message.content))
+
+    def test_agent_reports_real_completion_boundaries_across_tool_rounds(self):
+        db.init()
+
+        def fake_chat(messages, tools=None, tool_calls_out=None, **_kwargs):
+            completed_tools = sum(
+                message.get("role") == "tool" for message in messages
+            )
+            if completed_tools < 2:
+                tool_calls_out.append(
+                    SimpleNamespace(
+                        id=f"browser_{completed_tools}",
+                        function=SimpleNamespace(
+                            name="open_browser",
+                            arguments={"url": f"https://example.com/{completed_tools}"},
+                        ),
+                    )
+                )
+                yield (
+                    "I’ll open the site."
+                    if completed_tools == 0
+                    else "I’ll check the second page."
+                )
+                return
+            yield "Everything is open."
+
+        completions: list[AssistantCompletion] = []
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(
+                mounir_tools,
+                "_open_browser_outcome",
+                return_value=tool_outcome.ToolOutcome.success("opened"),
+            ) as opened,
+        ):
+            reply = "".join(
+                Agent(
+                    conversation=Conversation(system_prompt="test")
+                ).respond_with_completions(
+                    "Open both pages",
+                    on_completion=completions.append,
+                )
+            )
+
+        self.assertEqual(
+            [item.text for item in completions],
+            [
+                "I’ll open the site.",
+                "I’ll check the second page.",
+                "Everything is open.",
+            ],
+        )
+        self.assertEqual(
+            [(item.has_tool_calls, item.is_final) for item in completions],
+            [(True, False), (True, False), (False, True)],
+        )
+        self.assertEqual(opened.call_count, 2)
+        self.assertEqual(
+            reply,
+            "I’ll open the site.I’ll check the second page.Everything is open.",
+        )
+
+    def test_empty_tool_completion_does_not_create_a_spoken_segment(self):
+        db.init()
+
+        def fake_chat(messages, tools=None, tool_calls_out=None, **_kwargs):
+            if not any(message.get("role") == "tool" for message in messages):
+                tool_calls_out.append(
+                    SimpleNamespace(
+                        id="browser_1",
+                        function=SimpleNamespace(
+                            name="open_browser",
+                            arguments={"url": "https://example.com"},
+                        ),
+                    )
+                )
+                if False:
+                    yield ""
+                return
+            yield "The page is open."
+
+        completions: list[AssistantCompletion] = []
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(
+                mounir_tools,
+                "_open_browser_outcome",
+                return_value=tool_outcome.ToolOutcome.success("opened"),
+            ),
+        ):
+            reply = "".join(
+                Agent(
+                    conversation=Conversation(system_prompt="test")
+                ).respond_with_completions(
+                    "Open the page",
+                    on_completion=completions.append,
+                )
+            )
+
+        self.assertEqual(reply, "The page is open.")
+        self.assertEqual([item.text for item in completions], ["The page is open."])
+        self.assertTrue(completions[0].is_final)
 
     def test_foreign_keys_prevent_deleting_in_use_presets(self):
         db.init()
@@ -3359,6 +3758,120 @@ class TransportTests(unittest.TestCase):
 
 
 class AdminApiTests(TemporaryDatabaseTest):
+    def test_voice_api_streams_one_audio_result_per_model_completion(self):
+        import httpx
+        import server as web_server
+        from mounir import speech_adapters
+
+        class CompletionAgent:
+            @staticmethod
+            def respond_with_completions(
+                _text, *, on_completion, voice=False, **_kwargs
+            ):
+                self.assertTrue(voice)
+                on_completion(AssistantCompletion("I’ll check it.", True, False))
+                yield "I’ll check it."
+                on_completion(AssistantCompletion("It is ready.", False, True))
+                yield "It is ready."
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            runtime = {"adapter": "openai_compatible", "api_key": "secret"}
+            with (
+                patch.object(web_server, "agent", CompletionAgent()),
+                patch.object(web_server, "_decode_browser_audio", return_value=[0.0]),
+                patch.object(web_server.stt, "transcribe", return_value=("Check it", "en")),
+                patch.object(web_server.db, "get_voice_runtime", return_value=runtime),
+                patch.object(
+                    web_server.speech_adapters,
+                    "synthesize",
+                    side_effect=[
+                        speech_adapters.SpeechAdapterError("first segment failed"),
+                        speech_adapters.AudioResult(b"second-mp3", "audio/mpeg", "mp3"),
+                    ],
+                ) as synthesize,
+            ):
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://localhost"
+                ) as client:
+                    response = await client.post(
+                        "/api/voice",
+                        headers={"Accept": "application/x-ndjson"},
+                        files={"file": ("voice.webm", b"recording", "audio/webm")},
+                    )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(
+                "application/x-ndjson", response.headers.get("content-type", "")
+            )
+            events = [json.loads(line) for line in response.text.splitlines()]
+            self.assertEqual(
+                [event["type"] for event in events],
+                [
+                    "transcript",
+                    "completion",
+                    "voice_error",
+                    "completion",
+                    "audio",
+                    "done",
+                ],
+            )
+            self.assertEqual(events[1]["index"], 1)
+            self.assertTrue(events[1]["has_tool_calls"])
+            self.assertEqual(events[3]["index"], 2)
+            self.assertTrue(events[3]["is_final"])
+            self.assertEqual(base64.b64decode(events[4]["audio_b64"]), b"second-mp3")
+            self.assertEqual(events[4]["audio_mime"], "audio/mpeg")
+            self.assertEqual(
+                [call.args[0] for call in synthesize.call_args_list],
+                ["I’ll check it.", "It is ready."],
+            )
+
+        asyncio.run(exercise_api())
+
+    def test_voice_api_keeps_legacy_single_json_response_without_stream_accept(self):
+        import httpx
+        import server as web_server
+        from mounir import speech_adapters
+
+        class LegacyAgent:
+            @staticmethod
+            def respond(_text, *, voice=False, **_kwargs):
+                self.assertTrue(voice)
+                yield "Complete reply"
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=web_server.app)
+            with (
+                patch.object(web_server, "agent", LegacyAgent()),
+                patch.object(web_server, "_decode_browser_audio", return_value=[0.0]),
+                patch.object(web_server.stt, "transcribe", return_value=("Hello", "en")),
+                patch.object(web_server.db, "get_voice_runtime", return_value={}),
+                patch.object(
+                    web_server.speech_adapters,
+                    "synthesize",
+                    return_value=speech_adapters.AudioResult(
+                        b"legacy-wav", "audio/wav", "wav"
+                    ),
+                ) as synthesize,
+            ):
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://localhost"
+                ) as client:
+                    response = await client.post(
+                        "/api/voice",
+                        files={"file": ("voice.webm", b"recording", "audio/webm")},
+                    )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["text"], "Hello")
+            self.assertEqual(payload["reply"], "Complete reply")
+            self.assertEqual(base64.b64decode(payload["audio_b64"]), b"legacy-wav")
+            synthesize.assert_called_once()
+
+        asyncio.run(exercise_api())
+
     def test_builtin_api_saves_action_confirmation_rules(self):
         import httpx
         import server as web_server
@@ -3445,9 +3958,22 @@ class AdminApiTests(TemporaryDatabaseTest):
                     tested = await client.post(f"/api/voice-models/{model['id']}/test")
                 self.assertEqual(tested.status_code, 200)
                 self.assertEqual(tested.json()["mime_type"], "audio/wav")
+                self.assertEqual(tested.json()["model"]["connection_status"], "connected")
+
+                with patch.object(
+                    web_server.speech_adapters,
+                    "synthesize",
+                    side_effect=speech_adapters.SpeechAdapterError("Provider rejected audio"),
+                ):
+                    failed = await client.post(f"/api/voice-models/{model['id']}/test")
+                self.assertEqual(failed.status_code, 400)
+                self.assertEqual(failed.json()["model"]["connection_status"], "failed")
+                self.assertEqual(failed.json()["model"]["last_error"], "Provider rejected audio")
 
         asyncio.run(exercise_api())
-        self.assertEqual(db.get_voice_model(model["id"])["connection_status"], "connected")
+        saved = db.get_voice_model(model["id"])
+        self.assertEqual(saved["connection_status"], "failed")
+        self.assertEqual(saved["last_error"], "Provider rejected audio")
 
     def test_heartbeat_task_crud_api_keeps_tool_confirmation_safety(self):
         import httpx
@@ -4692,6 +5218,38 @@ These are previews of relevant pages, not their complete content.
         self.assertIn("declined", reply)
         self.assertEqual(observed, ["safe-command"])
 
+    def test_declined_tool_emits_a_final_completion_after_the_tool_message(self):
+        def fake_chat(_messages, tool_calls_out=None, **_kwargs):
+            tool_calls_out.append(
+                SimpleNamespace(
+                    id="bash_1",
+                    function=SimpleNamespace(
+                        name="bash", arguments={"command": "safe-command"}
+                    ),
+                )
+            )
+            yield "I’ll run that command."
+
+        completions: list[AssistantCompletion] = []
+        agent = Agent(conversation=Conversation(system_prompt="test"))
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(mounir_tools, "confirm_fn", return_value=False),
+            mounir_tools.use_confirmation_handler(lambda _action: False),
+        ):
+            reply = "".join(
+                agent.respond_with_completions(
+                    "run it", on_completion=completions.append
+                )
+            )
+
+        self.assertEqual(completions[0].text, "I’ll run that command.")
+        self.assertTrue(completions[0].has_tool_calls)
+        self.assertFalse(completions[0].is_final)
+        self.assertIn("declined", completions[1].text)
+        self.assertTrue(completions[1].is_final)
+        self.assertIn("declined", reply)
+
     def test_telegram_turn_uses_telegram_confirmation_handler(self):
         db.init()
 
@@ -4808,6 +5366,158 @@ These are previews of relevant pages, not their complete content.
         self.assertTrue(fake_agent.voice)
         self.assertIn('Reply "yes" to allow or "no" to deny', fake_bot.sent[-1][1])
         self.assertEqual(fake_bot.sent_voice, [(42, b"opus", {})])
+
+    def test_telegram_sends_one_ordered_voice_per_model_completion(self):
+        db.init()
+
+        class FakeBot:
+            def __init__(self):
+                self.sent_voice = []
+                self.voice_sent = threading.Condition()
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def send_chat_action(self, *_args, **_kwargs):
+                return None
+
+            def send_voice(self, chat_id, voice, **kwargs):
+                with self.voice_sent:
+                    self.sent_voice.append((chat_id, voice.read(), kwargs))
+                    self.voice_sent.notify_all()
+
+        def fake_chat(messages, tools=None, tool_calls_out=None, **_kwargs):
+            completed_tools = sum(
+                message.get("role") == "tool" for message in messages
+            )
+            replies = [
+                "I’ll open YouTube.",
+                "I’ll open the requested video.",
+                "The video is open. Enjoy!",
+            ]
+            if completed_tools < 2:
+                tool_calls_out.append(
+                    SimpleNamespace(
+                        id=f"browser_{completed_tools}",
+                        function=SimpleNamespace(
+                            name="open_browser",
+                            arguments={
+                                "url": f"https://youtube.com/{completed_tools}"
+                            },
+                        ),
+                    )
+                )
+            yield replies[completed_tools]
+
+        fake_bot = FakeBot()
+        tool_saw_live_voice = []
+
+        def open_browser(_url):
+            expected_count = len(tool_saw_live_voice) + 1
+            with fake_bot.voice_sent:
+                tool_saw_live_voice.append(
+                    fake_bot.voice_sent.wait_for(
+                        lambda: len(fake_bot.sent_voice) >= expected_count,
+                        timeout=1,
+                    )
+                )
+            return tool_outcome.ToolOutcome.success("opened")
+
+        bridge = TelegramBridge(
+            agent=Agent(conversation=Conversation(system_prompt="test")),
+            token="123:abc",
+            chat_id="42",
+            reply_mode="voice",
+            bot_factory=lambda _token: fake_bot,
+        )
+        with (
+            patch.object(langgraph_agent.llm, "chat_stream", fake_chat),
+            patch.object(
+                mounir_tools,
+                "_open_browser_outcome",
+                side_effect=open_browser,
+            ) as opened,
+            patch(
+                "mounir.telegram_bridge.tts.synthesize_wav",
+                side_effect=lambda segment: segment.encode(),
+            ) as synthesize,
+            patch.object(
+                bridge,
+                "_encode_voice",
+                side_effect=lambda audio: io.BytesIO(audio),
+            ),
+        ):
+            bridge._answer(42, "Open a YouTube video")
+
+        expected = [
+            "I’ll open YouTube.",
+            "I’ll open the requested video.",
+            "The video is open. Enjoy!",
+        ]
+        self.assertEqual(
+            [call.args[0] for call in synthesize.call_args_list], expected
+        )
+        self.assertEqual(
+            [voice for _chat_id, voice, _kwargs in fake_bot.sent_voice],
+            [item.encode() for item in expected],
+        )
+        self.assertEqual(opened.call_count, 2)
+        self.assertEqual(tool_saw_live_voice, [True, True])
+
+    def test_one_voice_segment_failure_does_not_stop_later_segments(self):
+        db.init()
+
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+                self.sent_voice = []
+
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def send_message(self, chat_id, text, **kwargs):
+                self.sent.append((chat_id, text, kwargs))
+
+            def send_chat_action(self, *_args, **_kwargs):
+                return None
+
+            def send_voice(self, chat_id, voice, **kwargs):
+                self.sent_voice.append((chat_id, voice.read(), kwargs))
+
+        class CompletionAgent:
+            conversation = Conversation(system_prompt="test")
+
+            @staticmethod
+            def respond_with_completions(
+                _text, *, on_completion, voice=False, **_kwargs
+            ):
+                self.assertTrue(voice)
+                on_completion(AssistantCompletion("First update", True, False))
+                yield "First update"
+                on_completion(AssistantCompletion("Final update", False, True))
+                yield "Final update"
+
+        fake_bot = FakeBot()
+        bridge = TelegramBridge(
+            agent=CompletionAgent(),
+            token="123:abc",
+            chat_id="42",
+            reply_mode="voice",
+            bot_factory=lambda _token: fake_bot,
+        )
+        with (
+            patch(
+                "mounir.telegram_bridge.tts.synthesize_wav",
+                side_effect=[RuntimeError("first TTS failed"), b"second"],
+            ),
+            patch.object(
+                bridge, "_encode_voice", return_value=io.BytesIO(b"second-opus")
+            ),
+        ):
+            bridge._answer(42, "Do the task")
+
+        self.assertEqual([item[1] for item in fake_bot.sent], ["First update"])
+        self.assertEqual(fake_bot.sent_voice, [(42, b"second-opus", {})])
 
     def test_telegram_confirmation_keeps_waiting_after_an_unclear_reply(self):
         db.init()

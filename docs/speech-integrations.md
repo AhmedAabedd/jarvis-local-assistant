@@ -1,5 +1,8 @@
 # Speech integration architecture
 
+Ongoing live-provider verification work is tracked in
+[Speech integration verification to-do](speech-to-do.md).
+
 Mounir treats speech universality as a capability contract, not as a claim that every
 speech model accepts the same request. The common application contract is normalized;
 provider-specific wire formats remain isolated in adapters.
@@ -46,6 +49,15 @@ Only the modes in this table are advertised by the API and UI. Native realtime
 WebSocket sessions, bidirectional interruption, and asynchronous long-audio jobs need
 different lifecycle contracts and are intentionally not simulated by the one-shot
 pipeline.
+
+## Completion delivery
+
+The web voice orb and Telegram voice replies call a configured one-shot TTS adapter
+once for each nonempty supervisor model completion. The boundary comes from the model
+response itself, not punctuation or language-specific sentence splitting. Completion
+audio is delivered in model order; a synthesis failure is reported for that segment
+without discarding later segments. The web endpoint keeps its original single-response
+JSON contract for callers that do not request the completion event stream.
 
 ## OpenAI-compatible behavior
 

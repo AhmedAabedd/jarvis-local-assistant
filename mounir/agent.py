@@ -2,4 +2,6 @@
 
 from __future__ import annotations
 
-from .langgraph_agent import Agent, build_graph
+from .langgraph_agent import Agent, AssistantCompletion, build_graph
+
+__all__ = ["Agent", "AssistantCompletion", "build_graph"]

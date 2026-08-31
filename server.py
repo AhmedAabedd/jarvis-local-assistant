@@ -5,7 +5,7 @@ Serves:
   - GET  / and /admin      -> the compiled React application
   - WS   /ws/chat          -> text chat, streams Mounir's reply token by token
   - POST /api/chat/attachments -> upload an image for multimodal web chat
-  - POST /api/voice        -> upload audio, returns transcript + spoken reply (base64 wav)
+  - POST /api/voice        -> upload audio, returns one-shot JSON or completion audio events
 
 Also owns the heartbeat scheduler, Telegram long-polling bridge, and signed
 WhatsApp Cloud API webhook. Every channel keeps separate conversation history,
@@ -45,11 +45,18 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from mounir.agent import Agent
+from mounir.agent import Agent, AssistantCompletion
 from mounir import (
     agent_skills,
     chat_attachments,
@@ -636,38 +643,178 @@ async def ws_chat(ws: WebSocket):
             _ui.update(ws=None, loop=None, out=None)
 
 
-@app.post("/api/voice")
-async def voice_turn(file: UploadFile = File(...)):
-    """Accept a recorded WAV clip, transcribe it, run the agent, return:
-    { "text": user_text, "reply": full_reply_text, "audio_b64": <wav bytes> }
+VOICE_STREAM_MEDIA_TYPE = "application/x-ndjson"
 
-    The browser records audio (MediaRecorder) and posts it here; this mirrors
-    voice.py's _handle_utterance but over HTTP for the web UI.
-    """
-    import numpy as np
+
+def _decode_browser_audio(raw: bytes):
+    """Convert a MediaRecorder upload into the mono array expected by STT."""
     import soundfile as sf
     import subprocess
 
-    raw = await file.read()
-
-    # Browser MediaRecorder sends WebM/Opus — soundfile/libsndfile can't read
-    # that directly, so convert to WAV via ffmpeg first (in-memory, no temp files).
+    # Browser MediaRecorder commonly sends WebM/Opus, which libsndfile cannot
+    # read directly. Keep conversion in memory and independent of the provider.
     proc = subprocess.run(
         ["ffmpeg", "-i", "pipe:0", "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1"],
         input=raw,
         capture_output=True,
     )
     if proc.returncode != 0:
+        detail = proc.stderr.decode(errors="ignore")[-300:]
+        raise ValueError(f"ffmpeg conversion failed: {detail}")
+
+    wav_np, _sample_rate = sf.read(io.BytesIO(proc.stdout), dtype="float32")
+    if wav_np.ndim > 1:
+        wav_np = wav_np.mean(axis=1)
+    return wav_np
+
+
+def _ndjson_event(payload: dict) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+async def _stream_voice_completions(text: str, lang: str):
+    """Yield transcript, model completions, and their audio in model order."""
+    yield _ndjson_event({"type": "transcript", "text": text, "lang": lang})
+    if not text:
+        yield _ndjson_event({"type": "done", "reply": ""})
+        return
+
+    loop = asyncio.get_running_loop()
+    completions: asyncio.Queue[tuple[int, AssistantCompletion] | object] = (
+        asyncio.Queue()
+    )
+    finished = object()
+    result: dict[str, str] = {"reply": "", "error": ""}
+
+    def run_agent() -> None:
+        queued = 0
+
+        def queue_completion(completion: AssistantCompletion) -> None:
+            nonlocal queued
+            if not completion.text.strip():
+                return
+            queued += 1
+            loop.call_soon_threadsafe(
+                completions.put_nowait, (queued, completion)
+            )
+
+        try:
+            with _agent_lock:
+                with tools.use_confirmation_handler(_web_confirm):
+                    completion_response = getattr(
+                        agent, "respond_with_completions", None
+                    )
+                    if callable(completion_response):
+                        response = completion_response(
+                            text,
+                            voice=True,
+                            on_completion=queue_completion,
+                        )
+                    else:
+                        response = agent.respond(text, voice=True)
+                    result["reply"] = "".join(response).strip()
+                    if not queued and result["reply"]:
+                        queue_completion(
+                            AssistantCompletion(
+                                text=result["reply"],
+                                has_tool_calls=False,
+                                is_final=True,
+                            )
+                        )
+        except Exception as exc:
+            result["error"] = str(exc)
+        finally:
+            loop.call_soon_threadsafe(completions.put_nowait, finished)
+
+    worker = asyncio.create_task(asyncio.to_thread(run_agent))
+    tts_runtime = None
+    try:
+        tts_runtime = db.get_voice_runtime("tts")
+    except Exception as exc:
+        # Configuration failures are reported per completion so text delivery
+        # and later model work remain visible to the user.
+        tts_runtime_error = speech_adapters.safe_error(exc, None)
+    else:
+        tts_runtime_error = ""
+
+    while True:
+        item = await completions.get()
+        if item is finished:
+            break
+        index, completion = item
+        segment = completion.text.strip()
+        yield _ndjson_event(
+            {
+                "type": "completion",
+                "index": index,
+                "text": segment,
+                "has_tool_calls": completion.has_tool_calls,
+                "is_final": completion.is_final,
+            }
+        )
+
+        voice_error = tts_runtime_error
+        audio_result = None
+        if not voice_error:
+            try:
+                audio_result = await asyncio.to_thread(
+                    speech_adapters.synthesize, segment, tts_runtime
+                )
+                audio_result = audio_result.for_browser()
+                if not audio_result.data:
+                    voice_error = "Text-to-speech returned no audio."
+            except Exception as exc:
+                voice_error = speech_adapters.safe_error(exc, tts_runtime)
+
+        if voice_error:
+            yield _ndjson_event(
+                {
+                    "type": "voice_error",
+                    "index": index,
+                    "text": segment,
+                    "message": voice_error,
+                }
+            )
+            continue
+
+        yield _ndjson_event(
+            {
+                "type": "audio",
+                "index": index,
+                "audio_b64": base64.b64encode(audio_result.data).decode("ascii"),
+                "audio_mime": audio_result.mime_type or "audio/wav",
+            }
+        )
+
+    await worker
+    if result["error"]:
+        yield _ndjson_event({"type": "error", "message": result["error"]})
+    yield _ndjson_event({"type": "done", "reply": result["reply"]})
+
+
+@app.post("/api/voice")
+async def voice_turn(request: Request, file: UploadFile = File(...)):
+    """Transcribe a recording and return JSON or ordered completion events.
+
+    ``Accept: application/x-ndjson`` selects the completion-aware response used
+    by the orb. Other callers retain the legacy single JSON response.
+    """
+    raw = await file.read()
+    try:
+        wav_np = await asyncio.to_thread(_decode_browser_audio, raw)
+    except ValueError as exc:
         return JSONResponse(
-            {"error": f"ffmpeg conversion failed: {proc.stderr.decode(errors='ignore')[-300:]}"},
+            {"error": str(exc)},
             status_code=500,
         )
 
-    wav_np, sr = sf.read(io.BytesIO(proc.stdout), dtype="float32")
-    if wav_np.ndim > 1:
-        wav_np = wav_np.mean(axis=1)
-
     text, lang = await asyncio.to_thread(stt.transcribe, wav_np)
+    if VOICE_STREAM_MEDIA_TYPE in request.headers.get("accept", "").lower():
+        return StreamingResponse(
+            _stream_voice_completions(text, lang),
+            media_type=VOICE_STREAM_MEDIA_TYPE,
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     if not text:
         return JSONResponse({"text": "", "reply": "", "audio_b64": ""})
 
@@ -796,12 +943,19 @@ async def test_voice_model(model_id: int):
                 "ok": True, "kind": "stt", "language": result.language,
                 "message": "Transcription request succeeded.",
             }
-        db.save_voice_model_test(model_id)
+        saved = db.save_voice_model_test(model_id)
+        summary["model"] = db.voice_model_for_api(saved) if saved else None
         return summary
     except Exception as exc:
         error = speech_adapters.safe_error(exc, runtime)
-        db.save_voice_model_test(model_id, error=error)
-        return JSONResponse({"error": error}, status_code=400)
+        saved = db.save_voice_model_test(model_id, error=error)
+        return JSONResponse(
+            {
+                "error": error,
+                "model": db.voice_model_for_api(saved) if saved else None,
+            },
+            status_code=400,
+        )
 
 
 @app.put("/api/voice-settings")

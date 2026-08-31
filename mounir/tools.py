@@ -12,7 +12,7 @@ from typing import Annotated, Callable, Iterator
 
 from langchain_core.tools import tool
 
-from . import browser_control
+from . import browser_control, tool_outcome
 
 # Specialist agents are reached through LangGraph handoffs. These functions
 # remain defensive fallbacks for direct tool invocation.
@@ -115,32 +115,56 @@ USER_DECLINED = (
 )
 
 
-def open_browser(url: str = "") -> str:
-    """Open a URL in the operating system's configured default browser."""
+def _open_browser_outcome(url: str = "") -> tool_outcome.ToolOutcome:
     url = (url or "").strip()
     if url and not url.startswith(("http://", "https://")):
         url = "https://" + url
     try:
         opened = browser_control.open_default(url)
     except Exception as exc:
-        return f"Could not open the default browser: {exc}"
+        return tool_outcome.ToolOutcome.error(
+            f"Could not open the default browser: {exc}"
+        )
     if not opened:
-        return "The operating system could not open its default browser."
-    return f"Opening {url} in the default browser." if url else "Opening the default browser."
+        return tool_outcome.ToolOutcome.error(
+            "The operating system could not open its default browser."
+        )
+    return tool_outcome.ToolOutcome.success(
+        f"Opening {url} in the default browser."
+        if url
+        else "Opening the default browser."
+    )
+
+
+def open_browser(url: str = "") -> str:
+    """Open a URL in the operating system's configured default browser."""
+
+    return str(_open_browser_outcome(url).content)
+
+
+def _close_browser_outcome() -> tool_outcome.ToolOutcome:
+    app = browser_control.default_browser()
+    if app is None:
+        return tool_outcome.ToolOutcome.error(
+            "Could not identify the operating system's default browser."
+        )
+    if not request_confirmation(f"Close {app.name} and all of its open windows?"):
+        return tool_outcome.ToolOutcome.declined(USER_DECLINED)
+    closed, message = browser_control.close_default(app)
+    return (
+        tool_outcome.ToolOutcome.success(message)
+        if closed
+        else tool_outcome.ToolOutcome.error(message)
+    )
 
 
 def close_browser() -> str:
     """Close the operating system's configured default browser after confirmation."""
-    app = browser_control.default_browser()
-    if app is None:
-        return "Could not identify the operating system's default browser."
-    if not request_confirmation(f"Close {app.name} and all of its open windows?"):
-        return USER_DECLINED
-    _, message = browser_control.close_default(app)
-    return message
+
+    return str(_close_browser_outcome().content)
 
 
-def play_on_youtube(query: str) -> str:
+def _play_on_youtube_outcome(query: str) -> tool_outcome.ToolOutcome:
     """Find the top YouTube result for a search and open it in the browser.
 
     yt-dlp's ytsearch resolves the query to a video without an API key; flat
@@ -148,29 +172,44 @@ def play_on_youtube(query: str) -> str:
     """
     query = " ".join((query or "").split())
     if not query:
-        return "Nothing to play — give a song/video name."
+        return tool_outcome.ToolOutcome.error(
+            "Nothing to play — give a song/video name."
+        )
 
     from yt_dlp import YoutubeDL
 
     try:
-        with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True}) as ydl:
+        with YoutubeDL(
+            {"quiet": True, "no_warnings": True, "extract_flat": True}
+        ) as ydl:
             info = ydl.extract_info(f"ytsearch1:{query}", download=False)
         entries = (info or {}).get("entries") or []
     except Exception as exc:
-        return f"YouTube search failed: {exc}"
+        return tool_outcome.ToolOutcome.error(f"YouTube search failed: {exc}")
     if not entries:
-        return f"No YouTube results for '{query}'."
+        return tool_outcome.ToolOutcome.error(
+            f"No YouTube results for '{query}'."
+        )
 
     top = entries[0]
     url = top.get("url") or f"https://www.youtube.com/watch?v={top.get('id', '')}"
     title = top.get("title") or query
-    opened = open_browser(url)
-    if not opened.startswith("Opening"):
-        return f"Found \"{title}\" ({url}) but couldn't open the browser: {opened}"
-    return f"Playing \"{title}\" — {url}"
+    opened = _open_browser_outcome(url)
+    if opened.status != "success":
+        return tool_outcome.ToolOutcome.error(
+            f"Found \"{title}\" ({url}) but couldn't open the browser: "
+            f"{opened.content}"
+        )
+    return tool_outcome.ToolOutcome.success(f"Playing \"{title}\" — {url}")
 
 
-def open_path(target: str) -> str:
+def play_on_youtube(query: str) -> str:
+    """Find the top YouTube result for a search and open it in the browser."""
+
+    return str(_play_on_youtube_outcome(query).content)
+
+
+def _open_path_outcome(target: str) -> tool_outcome.ToolOutcome:
     """Open a file, folder, or URL with the system default app (via xdg-open).
 
     Opens `target` the way double-clicking it would: a PDF in the PDF viewer, an
@@ -179,11 +218,15 @@ def open_path(target: str) -> str:
     """
     target = (target or "").strip()
     if not target:
-        return "Nothing to open — give a file, folder, or URL."
+        return tool_outcome.ToolOutcome.error(
+            "Nothing to open — give a file, folder, or URL."
+        )
 
     opener = shutil.which("xdg-open")
     if opener is None:
-        return "Can't open it: xdg-open isn't available (install the xdg-utils package)."
+        return tool_outcome.ToolOutcome.error(
+            "Can't open it: xdg-open isn't available (install the xdg-utils package)."
+        )
 
     # Expand ~ for local paths; a bare domain like "youtube.com" gets an
     # https:// scheme so xdg-open treats it as a URL, not a filename.
@@ -193,7 +236,9 @@ def open_path(target: str) -> str:
         if p.exists():
             target = str(p)
         elif looks_like_path:
-            return f"No such file or directory: {p}"
+            return tool_outcome.ToolOutcome.error(
+                f"No such file or directory: {p}"
+            )
         elif "." in target and " " not in target:
             target = "https://" + target  # a bare domain like "youtube.com"
 
@@ -206,14 +251,28 @@ def open_path(target: str) -> str:
             start_new_session=True,  # detach the opened app so it survives this turn
         ).wait(timeout=5)
     except subprocess.TimeoutExpired:
-        return f"Opening {target}."
+        return tool_outcome.ToolOutcome.success(f"Opening {target}.")
     except Exception as exc:
-        return f"Could not open {target}: {exc}"
+        return tool_outcome.ToolOutcome.error(f"Could not open {target}: {exc}")
 
-    return f"Opening {target}." if code == 0 else f"Could not open {target}."
+    return (
+        tool_outcome.ToolOutcome.success(f"Opening {target}.")
+        if code == 0
+        else tool_outcome.ToolOutcome.error(f"Could not open {target}.")
+    )
 
 
-def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: bool = False) -> str:
+def open_path(target: str) -> str:
+    """Open a file, folder, or URL with the system default application."""
+
+    return str(_open_path_outcome(target).content)
+
+
+def _bash_outcome(
+    command: str,
+    timeout: int = BASH_DEFAULT_TIMEOUT,
+    run_in_background: bool = False,
+) -> tool_outcome.ToolOutcome:
     """Run a shell command on the local machine, but only after the user confirms.
 
     timeout: seconds before a foreground command is killed (clamped to BASH_MAX_TIMEOUT).
@@ -222,9 +281,9 @@ def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: b
     """
     command = (command or "").strip()
     if not command:
-        return "No command given."
+        return tool_outcome.ToolOutcome.error("No command given.")
     if not request_confirmation(command):
-        return USER_DECLINED
+        return tool_outcome.ToolOutcome.declined(USER_DECLINED)
 
     if run_in_background:
         try:
@@ -237,8 +296,12 @@ def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: b
                 start_new_session=True,  # detach so it survives this turn
             )
         except Exception as exc:
-            return f"Command failed to start: {exc}"
-        return f"Started in the background (PID {proc.pid}): {command}"
+            return tool_outcome.ToolOutcome.error(
+                f"Command failed to start: {exc}"
+            )
+        return tool_outcome.ToolOutcome.success(
+            f"Started in the background (PID {proc.pid}): {command}"
+        )
 
     try:
         timeout = int(timeout)
@@ -255,9 +318,11 @@ def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: b
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return f"Command timed out after {timeout}s and was killed."
+        return tool_outcome.ToolOutcome.error(
+            f"Command timed out after {timeout}s and was killed."
+        )
     except Exception as exc:
-        return f"Command failed to start: {exc}"
+        return tool_outcome.ToolOutcome.error(f"Command failed to start: {exc}")
 
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
@@ -269,52 +334,70 @@ def bash(command: str, timeout: int = BASH_DEFAULT_TIMEOUT, run_in_background: b
     result = "\n".join(parts)
     if len(result) > BASH_MAX_OUTPUT:
         result = result[:BASH_MAX_OUTPUT] + "\n… [output truncated]"
-    return result
+    return (
+        tool_outcome.ToolOutcome.success(result)
+        if proc.returncode == 0
+        else tool_outcome.ToolOutcome.error(result)
+    )
 
 
-@tool("open_browser")
+def bash(
+    command: str,
+    timeout: int = BASH_DEFAULT_TIMEOUT,
+    run_in_background: bool = False,
+) -> str:
+    """Run a confirmed shell command and return its human-readable result."""
+
+    return str(_bash_outcome(command, timeout, run_in_background).content)
+
+
+@tool("open_browser", response_format="content_and_artifact")
 def open_browser_tool(
     url: Annotated[str, "Optional URL or site."] = "",
-) -> str:
+):
     """Open the default browser, optionally at a URL."""
 
-    return open_browser(url)
+    return _open_browser_outcome(url).as_tool_response()
 
 
-@tool("close_browser")
-def close_browser_tool() -> str:
+@tool("close_browser", response_format="content_and_artifact")
+def close_browser_tool():
     """Close the detected default browser after user confirmation."""
 
-    return close_browser()
+    return _close_browser_outcome().as_tool_response()
 
 
-@tool("play_on_youtube")
+@tool("play_on_youtube", response_format="content_and_artifact")
 def play_on_youtube_tool(
     query: Annotated[str, "Song, artist, or video to search for."],
-) -> str:
+):
     """Find and open the top YouTube result for a requested song or video."""
 
-    return play_on_youtube(query)
+    return _play_on_youtube_outcome(query).as_tool_response()
 
 
-@tool("open_path")
+@tool("open_path", response_format="content_and_artifact")
 def open_path_tool(
     target: Annotated[str, "File path, folder path, or URL."],
-) -> str:
+):
     """Open a local path or URL with the operating system's default app."""
 
-    return open_path(target)
+    return _open_path_outcome(target).as_tool_response()
 
 
-@tool("bash")
+@tool("bash", response_format="content_and_artifact")
 def bash_tool(
     command: Annotated[str, "Exact shell command."],
-    timeout: Annotated[int, "Foreground timeout in seconds, at most 600."] = BASH_DEFAULT_TIMEOUT,
-    run_in_background: Annotated[bool, "Launch detached and return immediately."] = False,
-) -> str:
+    timeout: Annotated[
+        int, "Foreground timeout in seconds, at most 600."
+    ] = BASH_DEFAULT_TIMEOUT,
+    run_in_background: Annotated[
+        bool, "Launch detached and return immediately."
+    ] = False,
+):
     """Run a shell command after confirmation and return its status and output."""
 
-    return bash(command, timeout, run_in_background)
+    return _bash_outcome(command, timeout, run_in_background).as_tool_response()
 
 
 @tool("delegate_to_knowledge")

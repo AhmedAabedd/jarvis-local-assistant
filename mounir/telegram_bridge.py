@@ -9,6 +9,7 @@ from __future__ import annotations
 import hmac
 import io
 import mimetypes
+import queue
 import re
 import secrets
 import subprocess
@@ -21,7 +22,7 @@ from pathlib import Path
 import telebot
 
 from . import chat_attachments, config, db, stt, tools, trace, tts
-from .agent import Agent
+from .agent import Agent, AssistantCompletion
 
 MAX_MESSAGE_CHARS = 4096
 CONFIRM_TIMEOUT_SECONDS = 120
@@ -323,6 +324,17 @@ class TelegramBridge:
             bot.send_chat_action(chat_id, "upload_voice")
             bot.send_voice(chat_id, voice)
 
+    def _deliver_voice_segment(self, chat_id: int, text: str) -> None:
+        """Deliver one completion independently without stopping later segments."""
+        try:
+            self._send_voice(chat_id, text)
+        except Exception as exc:
+            trace.kv("telegram voice", f"segment failed, sent text instead: {exc}")
+            try:
+                self._send(chat_id, text)
+            except Exception as send_exc:
+                trace.kv("telegram", f"segment delivery failed: {send_exc}")
+
     def send_notification(self, text: str) -> bool:
         """Send a proactive message to the paired chat, if one exists."""
         chat_id = self._allowed_chat()
@@ -420,6 +432,37 @@ class TelegramBridge:
     ) -> None:
         """Run one authorized Telegram turn using the saved output mode."""
         reply_mode = self.reply_mode
+        delivery_queue: queue.Queue[object] | None = None
+        delivery_thread: threading.Thread | None = None
+        delivery_stop = object()
+        queued_segments = 0
+
+        if reply_mode == "voice":
+            delivery_queue = queue.Queue()
+
+            def deliver_segments() -> None:
+                assert delivery_queue is not None
+                while True:
+                    item = delivery_queue.get()
+                    if item is delivery_stop:
+                        return
+                    self._deliver_voice_segment(chat_id, str(item))
+
+            delivery_thread = threading.Thread(
+                target=deliver_segments,
+                name="mounir-telegram-voice-delivery",
+                daemon=True,
+            )
+            delivery_thread.start()
+
+        def queue_completion(completion: AssistantCompletion) -> None:
+            nonlocal queued_segments
+            segment = completion.text.strip()
+            if delivery_queue is None or not segment:
+                return
+            queued_segments += 1
+            delivery_queue.put(segment)
+
         with self.turn_lock:
             trace.node("telegram")
             trace.event(f"← {text[:120]}")
@@ -433,25 +476,37 @@ class TelegramBridge:
                     attachment_args = (
                         {"attachments": attachments} if attachments else {}
                     )
-                    response = (
-                        self.agent.respond(text, voice=True, **attachment_args)
-                        if reply_mode == "voice"
-                        else self.agent.respond(text, **attachment_args)
+                    completion_response = getattr(
+                        self.agent, "respond_with_completions", None
                     )
+                    if reply_mode == "voice" and callable(completion_response):
+                        response = completion_response(
+                            text,
+                            voice=True,
+                            on_completion=queue_completion,
+                            **attachment_args,
+                        )
+                    elif reply_mode == "voice":
+                        response = self.agent.respond(
+                            text, voice=True, **attachment_args
+                        )
+                    else:
+                        response = self.agent.respond(text, **attachment_args)
                     reply = "".join(response).strip()
             except Exception as exc:
                 reply = f"[error] {exc}"
             finally:
                 done.set()
                 typing.join(timeout=1)
-        outbound = reply or "(no reply)"
-        if reply_mode == "voice":
-            try:
-                self._send_voice(chat_id, outbound)
-            except Exception as exc:
-                trace.kv("telegram voice", f"reply failed, sent text instead: {exc}")
-                self._send(chat_id, outbound)
-        else:
+            outbound = reply or "(no reply)"
+            if reply_mode == "voice":
+                assert delivery_queue is not None
+                assert delivery_thread is not None
+                if not queued_segments:
+                    delivery_queue.put(outbound)
+                delivery_queue.put(delivery_stop)
+                delivery_thread.join()
+        if reply_mode != "voice":
             self._send(chat_id, outbound)
         trace.event(f"→ {len(reply)} chars")
 
