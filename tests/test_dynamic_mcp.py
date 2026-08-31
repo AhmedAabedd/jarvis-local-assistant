@@ -47,7 +47,7 @@ from mounir.specialists import mcp_agent
 from mounir.specialists import media as media_agent
 from mounir.specialists import system as system_agent
 from mounir.specialists.mcp_agent import _call, _mcp_session, _system_prompt, discover_tools
-from mounir.telegram_bridge import TelegramBridge
+from mounir.telegram_bridge import TELEGRAM_SYSTEM_CONTEXT, TelegramBridge
 
 
 def _create_moss_package_fixture(
@@ -5307,6 +5307,45 @@ These are previews of relevant pages, not their complete content.
         self.assertFalse(outside_turn)
         fallback.assert_called_once_with("outside")
         self.assertEqual(fake_bot.sent[-1][1], "Telegram reply")
+
+    def test_telegram_turn_injects_ephemeral_remote_channel_context(self):
+        db.init()
+        observed = {}
+
+        class FakeBot:
+            def register_message_handler(self, *_args, **_kwargs):
+                return None
+
+            def send_chat_action(self, *_args, **_kwargs):
+                return None
+
+            def send_message(self, *_args, **_kwargs):
+                return None
+
+        def fake_chat(messages, **_kwargs):
+            observed["messages"] = messages
+            yield "Telegram reply"
+
+        conversation = Conversation(system_prompt="test")
+        bridge = TelegramBridge(
+            agent=Agent(conversation=conversation, use_tools=False),
+            token="123:abc",
+            chat_id="42",
+            reply_mode="text",
+            bot_factory=lambda _token: FakeBot(),
+        )
+
+        with patch.object(langgraph_agent.llm, "chat_stream", fake_chat):
+            bridge._answer(42, "hello")
+
+        self.assertIn(
+            {"role": "system", "content": TELEGRAM_SYSTEM_CONTEXT},
+            observed["messages"],
+        )
+        self.assertNotIn(
+            TELEGRAM_SYSTEM_CONTEXT,
+            [message["content"] for message in conversation.display_messages()],
+        )
 
     def test_telegram_confirmation_stays_text_and_voice_mode_reply_stays_voice(self):
         db.init()

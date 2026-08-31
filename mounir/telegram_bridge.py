@@ -7,6 +7,7 @@ the same class as a standalone compatibility entry point.
 from __future__ import annotations
 
 import hmac
+import inspect
 import io
 import mimetypes
 import queue
@@ -36,6 +37,27 @@ BOT_COMMANDS = (
     ("reset", "Clear the conversation"),
     ("help", "Show available commands"),
 )
+TELEGRAM_SYSTEM_CONTEXT = (
+    "CHANNEL CONTEXT: You are being used through Telegram. The user may be "
+    "remote and not physically near the computer where you are running."
+)
+
+
+def _system_context_args(callback) -> dict[str, str]:
+    """Pass turn context when an agent implementation supports the new option."""
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        return {}
+    accepts_keywords = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    return (
+        {"system_context": TELEGRAM_SYSTEM_CONTEXT}
+        if "system_context" in parameters or accepts_keywords
+        else {}
+    )
 
 
 class _PollingExceptionHandler:
@@ -485,13 +507,23 @@ class TelegramBridge:
                             voice=True,
                             on_completion=queue_completion,
                             **attachment_args,
+                            **_system_context_args(completion_response),
                         )
                     elif reply_mode == "voice":
-                        response = self.agent.respond(
-                            text, voice=True, **attachment_args
+                        respond = self.agent.respond
+                        response = respond(
+                            text,
+                            voice=True,
+                            **attachment_args,
+                            **_system_context_args(respond),
                         )
                     else:
-                        response = self.agent.respond(text, **attachment_args)
+                        respond = self.agent.respond
+                        response = respond(
+                            text,
+                            **attachment_args,
+                            **_system_context_args(respond),
+                        )
                     reply = "".join(response).strip()
             except Exception as exc:
                 reply = f"[error] {exc}"

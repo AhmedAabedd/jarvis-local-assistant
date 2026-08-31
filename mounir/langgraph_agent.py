@@ -685,6 +685,7 @@ class Agent:
         *,
         voice: bool = False,
         attachments: list[dict] | None = None,
+        system_context: str = "",
     ) -> Iterator[str]:
         """Run and stream one complete LangGraph turn."""
 
@@ -692,6 +693,7 @@ class Agent:
             user_input,
             voice=voice,
             attachments=attachments,
+            system_context=system_context,
         )
 
     def respond_with_completions(
@@ -701,6 +703,7 @@ class Agent:
         on_completion: Callable[[AssistantCompletion], None],
         voice: bool = False,
         attachments: list[dict] | None = None,
+        system_context: str = "",
     ) -> Iterator[str]:
         """Stream a turn and report each real model-completion boundary."""
 
@@ -708,6 +711,7 @@ class Agent:
             user_input,
             voice=voice,
             attachments=attachments,
+            system_context=system_context,
             on_completion=on_completion,
         )
 
@@ -717,6 +721,7 @@ class Agent:
         *,
         voice: bool = False,
         attachments: list[dict] | None = None,
+        system_context: str = "",
         on_completion: Callable[[AssistantCompletion], None] | None = None,
     ) -> Iterator[str]:
         """Shared graph runner for token and completion-aware consumers."""
@@ -725,6 +730,19 @@ class Agent:
             self.conversation.system_prompt = cfg.build_system_prompt(db.get_profile())
         self.conversation.add_user(user_input, attachments=attachments)
         messages = self.conversation.to_messages()
+        if system_context.strip():
+            insert_at = next(
+                (
+                    index
+                    for index, message in enumerate(messages)
+                    if message.get("role") != "system"
+                ),
+                len(messages),
+            )
+            messages.insert(
+                insert_at,
+                {"role": "system", "content": system_context.strip()},
+            )
         dynamic_specs = None
         skill_tool = None
         if self.use_tools:
