@@ -123,6 +123,47 @@ class DatabaseTests(TemporaryDatabaseTest):
             dedupe_tools=["send_email"],
         )
 
+    def test_subagent_developer_limits_are_saved_and_used_in_runtime_spec(self):
+        db.init()
+        model = db.add_model(
+            "Research model", "research-test", "Ollama",
+            "http://localhost:11434/v1", "",
+        )
+        agent = db.add_subagent(
+            "Researcher", "Researches sources.", "", model["id"],
+            max_tool_rounds=30,
+            tool_timeout_seconds=45,
+            task_timeout_seconds=420,
+        )
+
+        self.assertEqual(agent["max_tool_rounds"], 30)
+        spec = next(item for item in db.build_specs() if item["id"] == agent["id"])
+        self.assertEqual(spec["max_tool_rounds"], 30)
+        self.assertEqual(spec["tool_timeout_seconds"], 45)
+        self.assertEqual(spec["task_timeout_seconds"], 420)
+        self.assertEqual(mcp_agent._max_tool_rounds(spec), 30)
+        self.assertEqual(mcp_agent._tool_timeout_seconds(spec), 45)
+        self.assertEqual(mcp_agent._task_timeout_seconds(spec), 420)
+
+        updated = db.update_subagent(
+            agent["id"],
+            max_tool_rounds=24,
+            tool_timeout_seconds=20,
+            task_timeout_seconds=240,
+        )
+        self.assertEqual(updated["max_tool_rounds"], 24)
+        self.assertEqual(updated["tool_timeout_seconds"], 20)
+        self.assertEqual(updated["task_timeout_seconds"], 240)
+        public = db.subagent_for_api(updated)
+        self.assertEqual(
+            public["developer_defaults"]["tool_timeout_seconds"],
+            config.SUBAGENT_TOOL_TIMEOUT_SECONDS,
+        )
+        with self.assertRaisesRegex(ValueError, "between 1 and 100"):
+            db.update_subagent(agent["id"], max_tool_rounds=101)
+        with self.assertRaisesRegex(ValueError, "at least 1 second"):
+            db.update_subagent(agent["id"], tool_timeout_seconds=0)
+
     def test_text_model_location_is_saved_explicitly(self):
         db.init()
         saved = db.add_model(
@@ -1840,7 +1881,7 @@ class DatabaseTests(TemporaryDatabaseTest):
             {
                 "description", "icon_data", "icon_mime",
                 "confirm_tool_calls", "confirm_tools", "dedupe_tools", "enabled",
-                "parent_agent_id",
+                "max_tool_rounds", "parent_agent_id",
             }
             <= agent_columns
         )

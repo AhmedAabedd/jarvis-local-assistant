@@ -233,7 +233,7 @@ def run(
             base_url=runtime["base_url"],
             api_key=runtime["api_key"],
         ),
-        max_rounds=MAX_TOOL_ROUNDS,
+        max_rounds=db.get_builtin_max_tool_rounds(key, MAX_TOOL_ROUNDS),
         empty_response=f"The {key} agent had nothing to report.",
         exhausted_response=f"The {key} agent reached its tool-round limit; partial result only.",
         error_formatter=lambda _executed, error: f"The {key} agent failed: {error}",

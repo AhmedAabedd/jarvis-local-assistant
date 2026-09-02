@@ -131,12 +131,24 @@ def trace_tool_messages(messages: Sequence[BaseMessage]) -> None:
     }
     for message in messages:
         if isinstance(message, ToolMessage):
+            content = message.content
+            if isinstance(content, list):
+                safe_parts = []
+                image_count = 0
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        image_count += 1
+                    else:
+                        safe_parts.append(part)
+                content = safe_parts
+                if image_count:
+                    content = [*safe_parts, f"[{image_count} visual result(s) omitted]"]
             result = (
                 action_decline.MESSAGE
                 if action_decline.from_artifact(
                     getattr(message, "artifact", None)
                 )
-                else str(message.content)
+                else str(content)
             )
             trace.tool(
                 message.name or "tool",

@@ -227,6 +227,12 @@ export interface McpCredentialFile {
   filename: string
 }
 
+export interface SubagentDeveloperDefaults {
+  max_tool_rounds: number
+  tool_timeout_seconds: number
+  task_timeout_seconds: number
+}
+
 export interface Subagent {
   id: Id
   name: string
@@ -243,6 +249,10 @@ export interface Subagent {
   confirm_tool_calls: boolean
   confirm_tools: string[] | string
   dedupe_tools: string[] | string
+  max_tool_rounds: number
+  tool_timeout_seconds: number
+  task_timeout_seconds: number
+  developer_defaults?: SubagentDeveloperDefaults
   enabled: boolean | number
   has_icon?: boolean
   node_id?: Id
@@ -356,12 +366,17 @@ export interface BuiltinAgent {
   model_id?: Id | null
   generation_model?: string | null
   generation_model_id?: Id | null
+  max_tool_rounds: number
+  default_max_tool_rounds: number
   knowledge_service_status?: string | null
   knowledge_service_last_tested_at?: string | null
   knowledge_service_last_error?: string
   knowledge_protocol?: string | null
   knowledge_protocol_compatible?: boolean | null
   knowledge_protocol_missing_tools?: string[]
+  computer_diagnostics?: Record<string, unknown>
+  computer_backend?: string | null
+  computer_backend_reason?: string
   automatic_knowledge_enabled?: boolean | null
   automatic_knowledge_available?: boolean | null
   embedding_enabled?: boolean | null

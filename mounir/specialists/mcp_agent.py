@@ -33,14 +33,9 @@ from .. import (
     mcp_oauth,
 )
 
-MAX_TOOL_ROUNDS = 8
-MCP_TOOL_TIMEOUT_SECONDS = max(
-    1.0, float(os.environ.get("MOUNIR_MCP_TOOL_TIMEOUT", "60"))
-)
-MCP_AGENT_TIMEOUT_SECONDS = max(
-    MCP_TOOL_TIMEOUT_SECONDS,
-    float(os.environ.get("MOUNIR_MCP_AGENT_TIMEOUT", "300")),
-)
+DEFAULT_MAX_TOOL_ROUNDS = config.SUBAGENT_MAX_TOOL_ROUNDS
+MCP_TOOL_TIMEOUT_SECONDS = config.SUBAGENT_TOOL_TIMEOUT_SECONDS
+MCP_AGENT_TIMEOUT_SECONDS = config.SUBAGENT_TASK_TIMEOUT_SECONDS
 # One tool result can be a whole page or listing — cap it so a huge result
 # can't flood the loop's context.
 MAX_RESULT_CHARS = 8000
@@ -48,6 +43,40 @@ SYSTEM_PROMPT = """\
 You are a focused subagent. Use careful reasoning plus any MCP tools and child
 agent delegation tools provided to you in this conversation.
 """
+
+
+def _max_tool_rounds(spec: dict) -> int:
+    """Resolve the saved per-agent limit, with the legacy default as fallback."""
+    try:
+        value = int(spec.get("max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS))
+    except (TypeError, ValueError):
+        value = DEFAULT_MAX_TOOL_ROUNDS
+    return min(100, max(1, value))
+
+
+def _timeout_seconds(spec: dict, field: str, default: float) -> float:
+    """Resolve one saved per-agent timeout with a safe legacy fallback."""
+    if spec.get(field) is None:
+        # Keep the module-level fallback patchable for embedders and tests. Values
+        # persisted through the public configuration path are still validated at
+        # one second or greater.
+        try:
+            return max(0.001, float(default))
+        except (TypeError, ValueError):
+            return 1.0
+    try:
+        value = float(spec[field])
+    except (TypeError, ValueError):
+        value = float(default)
+    return max(1.0, value)
+
+
+def _tool_timeout_seconds(spec: dict) -> float:
+    return _timeout_seconds(spec, "tool_timeout_seconds", MCP_TOOL_TIMEOUT_SECONDS)
+
+
+def _task_timeout_seconds(spec: dict) -> float:
+    return _timeout_seconds(spec, "task_timeout_seconds", MCP_AGENT_TIMEOUT_SECONDS)
 
 
 def _system_prompt(custom_prompt: str = "") -> str:
@@ -356,7 +385,7 @@ async def _run_async(
                         protected_attempts,
                         namespace,
                         dedupe_tools,
-                        MCP_TOOL_TIMEOUT_SECONDS,
+                        _tool_timeout_seconds(spec),
                     )
                     if isinstance(result, action_decline.Signal):
                         outcome = action_decline.parse(result)
@@ -451,12 +480,12 @@ async def _run_async(
                                 (*lineage, child_node_id),
                                 history,
                             ),
-                            timeout=MCP_AGENT_TIMEOUT_SECONDS,
+                            timeout=_task_timeout_seconds(child),
                         )
                     except TimeoutError:
                         report = (
                             f"{child['name']} agent timed out after "
-                            f"{MCP_AGENT_TIMEOUT_SECONDS:g} seconds."
+                            f"{_task_timeout_seconds(child):g} seconds."
                         )
                     if isinstance(report, action_decline.Signal):
                         outcome = action_decline.parse(report)
@@ -560,7 +589,7 @@ async def _run_async(
                 messages,
                 framework_tools,
                 call_model,
-                max_rounds=MAX_TOOL_ROUNDS,
+                max_rounds=_max_tool_rounds(spec),
                 empty_response=(
                     f"{spec['name']} agent failed: the LLM returned an empty "
                     "response twice."
@@ -635,12 +664,12 @@ def run(
                         ) if spec.get("id") is not None else (),
                         context_history_store,
                     ),
-                    timeout=MCP_AGENT_TIMEOUT_SECONDS,
+                    timeout=_task_timeout_seconds(spec),
                 )
             except TimeoutError:
                 report = (
                     f"{name} agent timed out after "
-                    f"{MCP_AGENT_TIMEOUT_SECONDS:g} seconds. Its final external "
+                    f"{_task_timeout_seconds(spec):g} seconds. Its final external "
                     "state may be unknown; do not retry the task automatically."
                 )
                 context_history.remember(

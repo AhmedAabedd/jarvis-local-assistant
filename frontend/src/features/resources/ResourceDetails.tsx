@@ -1,4 +1,4 @@
-import { BookOpen, Settings2, ShieldCheck, Wrench } from 'lucide-react'
+import { BookOpen, Code2, Settings2, ShieldCheck, Wrench } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { McpServer, ModelRecord, SkillRecord, Subagent } from '../../api/types'
 import { SectionTabs } from '../../components/ui/SectionTabs'
@@ -9,7 +9,7 @@ import { ServerTools } from './ServerTools'
 import { SkillPicker } from './SkillPicker'
 import { ToolChoices } from './ToolChoices'
 
-type AgentDetailsPage = 'configuration' | 'skills' | 'tools' | 'security'
+type AgentDetailsPage = 'configuration' | 'skills' | 'tools' | 'security' | 'developer'
 
 function Detail({
   label,
@@ -199,6 +199,7 @@ function ReadonlyAgentDetails({
                 count: enabledTools.length,
               },
               { id: 'security', label: 'Security', icon: <ShieldCheck size={14} /> },
+              { id: 'developer', label: 'Developer', icon: <Code2 size={14} /> },
             ]}
             onChange={(value) => setPage(value as AgentDetailsPage)}
           />
@@ -288,6 +289,13 @@ function ReadonlyAgentDetails({
                   empty="No repeated-action protection is configured."
                 />
               </div>
+            </div>
+          )}
+          {page === 'developer' && (
+            <div className="detail detail--full developer-settings">
+              <Detail label="Maximum tool rounds" value={agent.max_tool_rounds} />
+              <Detail label="Tool timeout" value={`${agent.tool_timeout_seconds} seconds`} />
+              <Detail label="Task timeout" value={`${agent.task_timeout_seconds} seconds`} />
             </div>
           )}
         </div>

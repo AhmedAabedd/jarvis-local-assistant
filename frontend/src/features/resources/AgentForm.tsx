@@ -1,6 +1,23 @@
-import { BookOpen, Check, ChevronLeft, Settings2, ShieldCheck, Wrench } from 'lucide-react'
+import {
+  BookOpen,
+  Check,
+  ChevronLeft,
+  Code2,
+  RotateCcw,
+  Settings2,
+  ShieldCheck,
+  TriangleAlert,
+  Wrench,
+} from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import type { McpServer, ModelRecord, Subagent, SubagentMcpSource } from '../../api/types'
+import { api } from '../../api/client'
+import type {
+  McpServer,
+  ModelRecord,
+  Subagent,
+  SubagentDeveloperDefaults,
+  SubagentMcpSource,
+} from '../../api/types'
 import { AutoTextarea } from '../../components/ui/AutoTextarea'
 import { Button } from '../../components/ui/Button'
 import { Feedback } from '../../components/ui/Feedback'
@@ -17,7 +34,7 @@ import {
 import { ToolChoices } from './ToolChoices'
 import { SkillPicker } from './SkillPicker'
 
-type FormPage = 'configuration' | 'skills' | 'tools' | 'security'
+type FormPage = 'configuration' | 'skills' | 'tools' | 'security' | 'developer'
 type ConfirmationMode = 'all' | 'selected' | 'none'
 
 export function AgentForm({
@@ -48,6 +65,18 @@ export function AgentForm({
   const [description, setDescription] = useState(item?.description || '')
   const [systemPrompt, setSystemPrompt] = useState(item?.system_prompt || '')
   const [modelId, setModelId] = useState(Number(item?.model_id || 0))
+  const [developerDefaults, setDeveloperDefaults] = useState<SubagentDeveloperDefaults | null>(
+    item?.developer_defaults || null,
+  )
+  const [maxToolRounds, setMaxToolRounds] = useState(
+    Number(item?.max_tool_rounds || item?.developer_defaults?.max_tool_rounds || 0),
+  )
+  const [toolTimeoutSeconds, setToolTimeoutSeconds] = useState(
+    Number(item?.tool_timeout_seconds || item?.developer_defaults?.tool_timeout_seconds || 0),
+  )
+  const [taskTimeoutSeconds, setTaskTimeoutSeconds] = useState(
+    Number(item?.task_timeout_seconds || item?.developer_defaults?.task_timeout_seconds || 0),
+  )
   const [sources, setSources] = useState<SubagentMcpSource[]>(
     item?.mcp_sources?.length
       ? item.mcp_sources
@@ -126,6 +155,9 @@ export function AgentForm({
       description.trim() !== item.description ||
       systemPrompt.trim() !== item.system_prompt ||
       modelId !== Number(item.model_id || 0) ||
+      maxToolRounds !== Number(item.max_tool_rounds) ||
+      toolTimeoutSeconds !== Number(item.tool_timeout_seconds) ||
+      taskTimeoutSeconds !== Number(item.task_timeout_seconds) ||
       JSON.stringify(canonicalSources(sources)) !==
         JSON.stringify(canonicalSources(originalSources)) ||
       JSON.stringify(nextSkills) !== JSON.stringify(originalSkills) ||
@@ -141,12 +173,37 @@ export function AgentForm({
     icon,
     item,
     mode,
+    maxToolRounds,
+    taskTimeoutSeconds,
     modelId,
     name,
     selectedSkills,
     sources,
     systemPrompt,
+    toolTimeoutSeconds,
   ])
+
+  useEffect(() => {
+    if (developerDefaults) return
+    let active = true
+    void api.agents
+      .defaults()
+      .then((defaults) => {
+        if (!active) return
+        setDeveloperDefaults(defaults)
+        if (!item) {
+          setMaxToolRounds(defaults.max_tool_rounds)
+          setToolTimeoutSeconds(defaults.tool_timeout_seconds)
+          setTaskTimeoutSeconds(defaults.task_timeout_seconds)
+        }
+      })
+      .catch(() => {
+        if (active) setError('Could not load the default developer settings.')
+      })
+    return () => {
+      active = false
+    }
+  }, [developerDefaults, item])
 
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange])
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
@@ -164,6 +221,7 @@ export function AgentForm({
     { id: 'skills', label: 'Skills' },
     { id: 'tools', label: 'Tools' },
     { id: 'security', label: 'Security' },
+    { id: 'developer', label: 'Developer' },
   ]
   const currentPageIndex = pages.findIndex((entry) => entry.id === page)
   const hasIcon = Boolean(icon) || (icon === undefined && Boolean(item?.has_icon))
@@ -184,7 +242,7 @@ export function AgentForm({
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setError('')
-    if (!item && page !== 'security') {
+    if (!item && page !== 'developer') {
       const nextPage = pages[currentPageIndex + 1]?.id
       if (nextPage) openPage(nextPage)
       return
@@ -193,6 +251,15 @@ export function AgentForm({
       if (!name.trim()) throw new Error('Enter a name for the subagent.')
       if (!description.trim()) throw new Error('Enter a description for the subagent.')
       if (!modelId) throw new Error('Choose a model for the subagent.')
+      if (!Number.isInteger(maxToolRounds) || maxToolRounds < 1 || maxToolRounds > 100) {
+        throw new Error('Maximum tool rounds must be a whole number between 1 and 100.')
+      }
+      if (!Number.isFinite(toolTimeoutSeconds) || toolTimeoutSeconds < 1) {
+        throw new Error('Tool timeout must be at least 1 second.')
+      }
+      if (!Number.isFinite(taskTimeoutSeconds) || taskTimeoutSeconds < 1) {
+        throw new Error('Task timeout must be at least 1 second.')
+      }
       const confirmedTools = selectedCatalogIsComplete
         ? [...confirmedSelection].filter((tool) => enabledNames.includes(tool))
         : savedRulesForSelectedSources(confirmedSelection)
@@ -212,6 +279,9 @@ export function AgentForm({
         description: description.trim(),
         system_prompt: systemPrompt.trim(),
         model_id: modelId,
+        max_tool_rounds: maxToolRounds,
+        tool_timeout_seconds: toolTimeoutSeconds,
+        task_timeout_seconds: taskTimeoutSeconds,
         mcp_sources: sources.map(({ mcp_server_id, enabled_tools }) => ({
           mcp_server_id,
           enabled_tools,
@@ -264,6 +334,7 @@ export function AgentForm({
               count: enabledTools.length,
             },
             { id: 'security', label: 'Security', icon: <ShieldCheck size={14} /> },
+            { id: 'developer', label: 'Developer', icon: <Code2 size={14} /> },
           ]}
           onChange={(value) => openPage(value as FormPage)}
         />
@@ -451,6 +522,71 @@ export function AgentForm({
               />
             </div>
           )}
+        </div>
+      )}
+
+      {page === 'developer' && (
+        <div className="form-grid subagent-wizard__page developer-settings">
+          <div className="technical-warning">
+            <TriangleAlert size={17} aria-hidden="true" />
+            <span>
+              <strong>Technical settings</strong>
+              These controls are intended for developers and technical users. Non-technical users
+              can leave the default values unchanged.
+            </span>
+          </div>
+          <Field
+            label="Maximum tool rounds"
+            hint="Maximum model-and-tool cycles allowed for one request (1–100)."
+          >
+            <input
+              type="number"
+              min={1}
+              max={100}
+              step={1}
+              value={maxToolRounds || ''}
+              onChange={(event) => setMaxToolRounds(Number(event.target.value))}
+            />
+          </Field>
+          <Field
+            label="Tool timeout"
+            hint="Maximum time allowed for one MCP tool call, in seconds."
+          >
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={toolTimeoutSeconds || ''}
+              onChange={(event) => setToolTimeoutSeconds(Number(event.target.value))}
+            />
+          </Field>
+          <Field
+            label="Task timeout"
+            hint="Maximum time allowed for the complete delegated task, in seconds."
+          >
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={taskTimeoutSeconds || ''}
+              onChange={(event) => setTaskTimeoutSeconds(Number(event.target.value))}
+            />
+          </Field>
+          <div className="developer-settings__actions">
+            <Button
+              type="button"
+              icon={<RotateCcw size={14} />}
+              disabled={!developerDefaults}
+              onClick={() => {
+                if (!developerDefaults) return
+                setMaxToolRounds(developerDefaults.max_tool_rounds)
+                setToolTimeoutSeconds(developerDefaults.tool_timeout_seconds)
+                setTaskTimeoutSeconds(developerDefaults.task_timeout_seconds)
+              }}
+            >
+              Reset to defaults
+            </Button>
+          </div>
         </div>
       )}
 

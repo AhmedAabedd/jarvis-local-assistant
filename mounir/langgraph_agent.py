@@ -41,6 +41,7 @@ from . import (
     workflow_runtime,
 )
 from .memory import Conversation
+from .specialists.computer import run as run_computer
 from .specialists.knowledge import (
     automatic_context as automatic_knowledge_context,
     run as run_knowledge,
@@ -58,6 +59,7 @@ VOICE_RESPONSE_INSTRUCTION = (
 _ASSISTANT_COMPLETION_EVENT = "mounir.assistant_completion"
 
 _DELEGATES = {
+    "delegate_to_computer": "computer",
     "delegate_to_media": "media",
     "delegate_to_knowledge": "knowledge",
     "delegate_to_system": "system",
@@ -366,6 +368,20 @@ def _knowledge(
     )
 
 
+def _computer(
+    state: TurnState,
+    history: context_history.ContextHistory | None = None,
+) -> Command:
+    enabled = db.is_builtin_agent_enabled("computer")
+    return _specialist_result(
+        state,
+        "delegate_to_computer",
+        "computer",
+        lambda task: run_computer(task, context_history_store=history),
+        None if enabled else "The Computer agent is inactive and cannot be used.",
+    )
+
+
 def _system(
     state: TurnState,
     history: context_history.ContextHistory | None = None,
@@ -603,6 +619,7 @@ def _compile_graph(
     graph.add_node("declined", _declined)
     graph.add_node("force_final", lambda state: _force_final(state, model))
     normal_nodes = {
+        "computer": lambda state: _computer(state, context_history_store),
         "media": lambda state: _media(state, context_history_store),
         "knowledge": lambda state: _knowledge(state, context_history_store),
         "system": lambda state: _system(state, context_history_store),

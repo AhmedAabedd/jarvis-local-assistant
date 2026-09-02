@@ -24,6 +24,15 @@ def delegate_to_knowledge(task: str) -> str:
     from .specialists.knowledge import run
     return run(task)
 
+
+def delegate_to_computer(task: str) -> str:
+    """Hand visible desktop interaction to the Computer agent."""
+    from . import db
+    if not db.is_builtin_agent_enabled("computer"):
+        return "The Computer agent is inactive and cannot be used."
+    from .specialists.computer import run
+    return run(task)
+
 def delegate_to_media(task: str) -> str:
     """Delegate any local file or media operation except inspecting directly attached chat images."""
     from . import db
@@ -409,6 +418,18 @@ def delegate_to_knowledge_tool(
     return delegate_to_knowledge(task)
 
 
+@tool("delegate_to_computer")
+def delegate_to_computer_tool(
+    task: Annotated[
+        str,
+        "Visible desktop task, including the target application and desired verified end state.",
+    ],
+) -> str:
+    """Observe or control visible desktop applications with the Computer specialist."""
+
+    return delegate_to_computer(task)
+
+
 @tool("delegate_to_system")
 def delegate_to_system_tool(
     task: Annotated[str, "Desired hardware or system end state."],
@@ -484,6 +505,7 @@ GENERAL_TOOLS = [
 ]
 
 DELEGATE_TOOLS = [
+    delegate_to_computer_tool,
     delegate_to_knowledge_tool,
     delegate_to_system_tool,
     delegate_to_media_tool,

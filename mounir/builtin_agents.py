@@ -16,6 +16,19 @@ if TYPE_CHECKING:
 
 
 _BUILTINS = {
+    "computer": {
+        "name": "Computer",
+        "module": "mounir.specialists.computer",
+        "provider": "Configured model",
+        "default_model": config.MODEL,
+        "description": (
+            "Observes and controls visible desktop applications through a "
+            "restricted set of native desktop tools."
+        ),
+        "safe_tools": {
+            "screenshot", "cursor_position", "get_display_size", "wait",
+        },
+    },
     "media": {
         "name": "Files and Media",
         "module": "mounir.specialists.media",
@@ -129,6 +142,19 @@ def system_prompt(key: str) -> str:
     return str(getattr(module, "SYSTEM_PROMPT", "")).strip()
 
 
+def default_max_tool_rounds(key: str) -> int:
+    """Return the tool-round default shipped by a built-in runtime."""
+    normalized = str(key or "").removeprefix("builtin:").strip()
+    item = _BUILTINS.get(normalized)
+    if item is None:
+        raise ValueError(f"unknown built-in specialist: {key}")
+    module = import_module(item["module"])
+    default = getattr(module, "MAX_TOOL_ROUNDS", None)
+    if default is None:
+        default = getattr(getattr(module, "meta_agent", None), "MAX_TOOL_ROUNDS", 8)
+    return min(100, max(1, int(default)))
+
+
 def capabilities() -> list[dict]:
     """Return built-in tool schemas with heartbeat safety metadata."""
     result: list[dict] = []
@@ -167,6 +193,10 @@ def capabilities() -> list[dict]:
 def default_confirmation_tools(key: str) -> list[str]:
     """Return the shipped safety defaults for one built-in specialist."""
     normalized = str(key or "").removeprefix("builtin:").strip()
+    if normalized == "computer":
+        # Computer has one mandatory approval at session start. Asking again for
+        # every pointer or keyboard action makes an approved GUI task unusable.
+        return []
     item = next(
         (agent for agent in capabilities() if agent["builtin_key"] == normalized),
         None,
@@ -208,7 +238,7 @@ def run(
     if not selected:
         raise ValueError(f"no safe tools selected for {definition['name']}")
     module = import_module(definition["module"])
-    if normalized in {"media", "knowledge", "system"}:
+    if normalized in {"computer", "media", "knowledge", "system"}:
         return module.run(
             task,
             allowed_tools=selected,

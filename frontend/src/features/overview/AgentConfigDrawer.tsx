@@ -1,4 +1,4 @@
-import { BookOpen, Bot, Image as ImageIcon, Settings, X } from 'lucide-react'
+import { BookOpen, Bot, Image as ImageIcon, MonitorCog, Settings, X } from 'lucide-react'
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { ToolInfo } from '../../api/types'
@@ -65,13 +65,15 @@ export function AgentConfigDrawer({
   if (!open) return null
 
   const IdentityIcon =
-    agentKey === 'media'
-      ? ImageIcon
-      : agentKey === 'knowledge'
-        ? BookOpen
-        : agentKey === 'system'
-          ? Settings
-          : Bot
+    agentKey === 'computer'
+      ? MonitorCog
+      : agentKey === 'media'
+        ? ImageIcon
+        : agentKey === 'knowledge'
+          ? BookOpen
+          : agentKey === 'system'
+            ? Settings
+            : Bot
 
   return createPortal(
     <aside

@@ -1,4 +1,13 @@
-import { BookOpen, Bot, ChevronRight, Cpu, Image as ImageIcon, Settings, X } from 'lucide-react'
+import {
+  BookOpen,
+  Bot,
+  ChevronRight,
+  Cpu,
+  Image as ImageIcon,
+  MonitorCog,
+  Settings,
+  X,
+} from 'lucide-react'
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { BuiltinAgent } from '../../api/types'
@@ -23,13 +32,15 @@ export function BuiltinNodeDrawer({
   if (!agent) return null
 
   const IdentityIcon =
-    agent.key === 'media'
-      ? ImageIcon
-      : agent.key === 'knowledge'
-        ? BookOpen
-        : agent.key === 'system'
-          ? Settings
-          : Bot
+    agent.key === 'computer'
+      ? MonitorCog
+      : agent.key === 'media'
+        ? ImageIcon
+        : agent.key === 'knowledge'
+          ? BookOpen
+          : agent.key === 'system'
+            ? Settings
+            : Bot
 
   return createPortal(
     <aside className="node-drawer" role="dialog" aria-modal="false" aria-labelledby="builtin-title">

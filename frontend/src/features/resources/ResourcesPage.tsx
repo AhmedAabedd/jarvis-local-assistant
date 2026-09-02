@@ -872,8 +872,8 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         title={editing ? `Edit ${editing.name}` : 'Add subagent'}
         description={
           editing
-            ? 'Update its role, skills, tools, and security.'
-            : 'Configure its role, skills, tools, and security.'
+            ? 'Update its role, skills, tools, security, and developer limits.'
+            : 'Configure its role, skills, tools, security, and developer limits.'
         }
         headingActions={
           editing ? (
@@ -936,7 +936,7 @@ export function ResourcesPage({ kind }: { kind: Kind }) {
         integrated
         className="modal--compact-write-form modal--subagent-write-form modal--builtin-agent-write-form"
         title={`Edit ${editing?.name || 'built-in subagent'}`}
-        description="Update this built-in specialist's models, skills, and security."
+        description="Update this built-in specialist's models, skills, security, and developer limits."
         headingActions={
           <Button
             className="modal-heading-save-button"

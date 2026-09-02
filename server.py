@@ -1760,6 +1760,8 @@ async def update_builtin_agent(agent_key: str, req: dict):
             changes["embedding_model_id"] = req.get("embedding_model_id")
         if "confirm_tools" in req:
             changes["confirm_tools"] = req.get("confirm_tools")
+        if "max_tool_rounds" in req:
+            changes["max_tool_rounds"] = req.get("max_tool_rounds")
         if "skill_ids" in req:
             changes["skill_ids"] = req.get("skill_ids")
         if agent_key == "knowledge" and (
@@ -2526,6 +2528,15 @@ async def list_subagents():
     return [db.subagent_for_api(agent) for agent in db.list_subagents()]
 
 
+@app.get("/api/subagents/defaults")
+async def subagent_developer_defaults():
+    return {
+        "max_tool_rounds": cfg.SUBAGENT_MAX_TOOL_ROUNDS,
+        "tool_timeout_seconds": cfg.SUBAGENT_TOOL_TIMEOUT_SECONDS,
+        "task_timeout_seconds": cfg.SUBAGENT_TASK_TIMEOUT_SECONDS,
+    }
+
+
 @app.get("/api/subagent-nodes")
 async def list_subagent_nodes(workflow_id: int | None = None):
     return db.list_subagent_nodes(workflow_id)
@@ -2644,6 +2655,15 @@ async def create_subagent(req: dict):
             position=req.get("position"),
             mcp_sources=req.get("mcp_sources"),
             skill_ids=req.get("skill_ids"),
+            max_tool_rounds=req.get(
+                "max_tool_rounds", cfg.SUBAGENT_MAX_TOOL_ROUNDS
+            ),
+            tool_timeout_seconds=req.get(
+                "tool_timeout_seconds", cfg.SUBAGENT_TOOL_TIMEOUT_SECONDS
+            ),
+            task_timeout_seconds=req.get(
+                "task_timeout_seconds", cfg.SUBAGENT_TASK_TIMEOUT_SECONDS
+            ),
             **icon,
         )
         return db.subagent_for_api(subagent)

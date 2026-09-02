@@ -275,6 +275,11 @@ async def _run_async(
     confirmation_tools: set[str] | None = None,
     prior_history: list[dict] | None = None,
 ) -> str:
+    try:
+        max_tool_rounds = int(runtime.get("_max_tool_rounds", MAX_TOOL_ROUNDS))
+    except (TypeError, ValueError):
+        max_tool_rounds = MAX_TOOL_ROUNDS
+    max_tool_rounds = min(100, max(1, max_tool_rounds))
     executed: list[dict] = []
     protected_attempts: set[str] = set()
     effective_confirmation_tools = set(
@@ -387,7 +392,7 @@ async def _run_async(
                 messages,
                 framework_tools,
                 call_model,
-                max_rounds=MAX_TOOL_ROUNDS,
+                max_rounds=max_tool_rounds,
                 empty_response=(
                     "Knowledge agent failed: the model returned an empty response twice."
                 ),
@@ -435,6 +440,10 @@ def run(
         fallback_base_url=config.GEMINI_BASE_URL,
         fallback_api_key=config.GEMINI_API_KEY,
         fallback_provider="Gemini",
+    )
+    runtime = dict(runtime)
+    runtime["_max_tool_rounds"] = db.get_builtin_max_tool_rounds(
+        "knowledge", MAX_TOOL_ROUNDS
     )
     confirmation_tools = set(db.get_builtin_confirmation_tools("knowledge"))
 

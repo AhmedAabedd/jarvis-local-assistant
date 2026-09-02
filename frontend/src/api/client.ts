@@ -29,6 +29,7 @@ import type {
   SetupActionResult,
   SpeechAdapterSpec,
   Subagent,
+  SubagentDeveloperDefaults,
   SubagentNode,
   SubagentPlacement,
   TelegramSettings,
@@ -223,6 +224,7 @@ export const api = {
   },
   agents: {
     list: () => request<Subagent[]>('/api/subagents'),
+    defaults: () => request<SubagentDeveloperDefaults>('/api/subagents/defaults'),
     create: (body: object) => request<Subagent>('/api/subagents', json('POST', body)),
     update: (id: number, body: object) =>
       request<Subagent>(`/api/subagents/${id}`, json('PUT', body)),

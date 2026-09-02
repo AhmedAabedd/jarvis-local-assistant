@@ -41,7 +41,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import builtin_agents, config as cfg, knowledge_protocol
+from . import (
+    builtin_agents,
+    config as cfg,
+    knowledge_protocol,
+    local_computer,
+)
 
 DB_PATH: Path = cfg.DATA_DIR / "mounir.db"
 LEGACY_REGISTRY: Path = cfg.DATA_DIR / "mcp_agents.json"
@@ -155,6 +160,12 @@ def _allow_prompt_only_subagents(conn: sqlite3.Connection) -> None:
                 confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
                 confirm_tools TEXT NOT NULL DEFAULT '["*"]',
                 dedupe_tools TEXT NOT NULL DEFAULT '[]',
+                max_tool_rounds INTEGER NOT NULL DEFAULT 8
+                    CHECK (max_tool_rounds BETWEEN 1 AND 100),
+                tool_timeout_seconds REAL NOT NULL DEFAULT 60
+                    CHECK (tool_timeout_seconds >= 1),
+                task_timeout_seconds REAL NOT NULL DEFAULT 300
+                    CHECK (task_timeout_seconds >= 1),
                 enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
                 enabled_tools TEXT,
                 parent_agent_id INTEGER
@@ -164,11 +175,15 @@ def _allow_prompt_only_subagents(conn: sqlite3.Connection) -> None:
             INSERT INTO subagents_nullable_upgrade (
                 id, name, description, system_prompt, icon_data, icon_mime,
                 model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
-                dedupe_tools, enabled, enabled_tools, parent_agent_id, created_at
+                dedupe_tools, max_tool_rounds, tool_timeout_seconds,
+                task_timeout_seconds, enabled, enabled_tools,
+                parent_agent_id, created_at
             )
             SELECT id, name, description, system_prompt, icon_data, icon_mime,
                    model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
-                   dedupe_tools, enabled, enabled_tools, parent_agent_id, created_at
+                   dedupe_tools, max_tool_rounds, tool_timeout_seconds,
+                   task_timeout_seconds, enabled, enabled_tools,
+                   parent_agent_id, created_at
             FROM subagents;
             DROP TABLE subagents;
             ALTER TABLE subagents_nullable_upgrade RENAME TO subagents;
@@ -368,6 +383,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             confirm_tool_calls INTEGER NOT NULL DEFAULT 1,
             confirm_tools TEXT NOT NULL DEFAULT '["*"]',
             dedupe_tools TEXT NOT NULL DEFAULT '[]',
+            max_tool_rounds INTEGER NOT NULL DEFAULT 8
+                CHECK (max_tool_rounds BETWEEN 1 AND 100),
+            tool_timeout_seconds REAL NOT NULL DEFAULT 60
+                CHECK (tool_timeout_seconds >= 1),
+            task_timeout_seconds REAL NOT NULL DEFAULT 300
+                CHECK (task_timeout_seconds >= 1),
             enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
             -- NULL inherits every tool; a JSON list is this agent's allowlist.
             enabled_tools TEXT,
@@ -548,6 +569,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 CHECK (embedding_enabled IN (0, 1)),
             embedding_model_id INTEGER REFERENCES embedding_model_details(model_id) ON DELETE RESTRICT,
             confirm_tools TEXT NOT NULL DEFAULT '[]',
+            max_tool_rounds INTEGER CHECK (max_tool_rounds BETWEEN 1 AND 100),
             connected INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1)),
             enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
             updated_at TEXT NOT NULL
@@ -766,6 +788,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             ON meta_whatsapp_messages(connection_id, contact_phone, occurred_at DESC);
         """
     )
+    # Discard the retired Computer service cache. Its package diagnostics are
+    # not user content or configuration.
+    conn.execute("DROP TABLE IF EXISTS builtin_service_states")
     conn.execute(
         """
         INSERT OR IGNORE INTO profile_settings
@@ -936,6 +961,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "embedding_enabled": "INTEGER NOT NULL DEFAULT 0 CHECK (embedding_enabled IN (0, 1))",
             "embedding_model_id": "INTEGER REFERENCES embedding_model_details(model_id) ON DELETE RESTRICT",
             "confirm_tools": "TEXT NOT NULL DEFAULT '[]'",
+            "max_tool_rounds": (
+                "INTEGER CHECK (max_tool_rounds BETWEEN 1 AND 100)"
+            ),
             "connected": "INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1))",
             "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
         },
@@ -967,6 +995,16 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "confirm_tool_calls": "INTEGER NOT NULL DEFAULT 1",
             "confirm_tools": "TEXT NOT NULL DEFAULT '[\"*\"]'",
             "dedupe_tools": "TEXT NOT NULL DEFAULT '[]'",
+            "max_tool_rounds": (
+                "INTEGER NOT NULL DEFAULT 8 "
+                "CHECK (max_tool_rounds BETWEEN 1 AND 100)"
+            ),
+            "tool_timeout_seconds": (
+                "REAL NOT NULL DEFAULT 60 CHECK (tool_timeout_seconds >= 1)"
+            ),
+            "task_timeout_seconds": (
+                "REAL NOT NULL DEFAULT 300 CHECK (task_timeout_seconds >= 1)"
+            ),
             "enabled": "INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
             "enabled_tools": "TEXT",
             "parent_agent_id": "INTEGER REFERENCES subagents(id) ON DELETE RESTRICT",
@@ -1401,6 +1439,23 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "INSERT INTO app_meta (key, value) VALUES (?, ?)",
             (builtin_confirmation_migration, _now()),
         )
+    computer_single_confirmation_migration = "computer_single_confirmation_v1"
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key = ?",
+        (computer_single_confirmation_migration,),
+    ).fetchone() is None:
+        conn.execute(
+            """
+            UPDATE builtin_agent_settings
+            SET confirm_tools = '[]', updated_at = ?
+            WHERE agent_key = 'computer'
+            """,
+            (_now(),),
+        )
+        conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+            (computer_single_confirmation_migration, _now()),
+        )
     # Normalize values accepted by the earlier UI: a full completions URL and
     # Ollama's native /api/chat URL were commonly pasted into "Base URL".
     for row in conn.execute("SELECT id, base_url FROM models"):
@@ -1487,6 +1542,18 @@ def _required(value, field: str) -> str:
     if not text:
         raise ValueError(f"{field} is required.")
     return text
+
+
+def _positive_timeout(value, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be at least 1 second.")
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be at least 1 second.") from exc
+    if not 1 <= seconds < float("inf"):
+        raise ValueError(f"{field} must be at least 1 second.")
+    return seconds
 
 
 def _normalize_model_base_url(value) -> str:
@@ -2212,6 +2279,11 @@ def subagent_for_api(subagent: dict | None) -> dict | None:
     _, env_configured = _masked_json_object(env)
     result["mcp_credentials_configured"] = headers_configured or env_configured
     result["mcp_server_name"] = result.get("server_name") or ""
+    result["developer_defaults"] = {
+        "max_tool_rounds": cfg.SUBAGENT_MAX_TOOL_ROUNDS,
+        "tool_timeout_seconds": cfg.SUBAGENT_TOOL_TIMEOUT_SECONDS,
+        "task_timeout_seconds": cfg.SUBAGENT_TASK_TIMEOUT_SECONDS,
+    }
     return result
 
 
@@ -2839,6 +2911,8 @@ def _rebuild_model_reference_tables(
                     embedding_model_id INTEGER
                         REFERENCES embedding_model_details(model_id) ON DELETE RESTRICT,
                     confirm_tools TEXT NOT NULL DEFAULT '[]',
+                    max_tool_rounds INTEGER
+                        CHECK (max_tool_rounds BETWEEN 1 AND 100),
                     connected INTEGER NOT NULL DEFAULT 1 CHECK (connected IN (0, 1)),
                     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
                     updated_at TEXT NOT NULL
@@ -2859,8 +2933,9 @@ def _rebuild_model_reference_tables(
                          knowledge_service_status, knowledge_service_last_tested_at,
                          knowledge_service_last_error, knowledge_service_tools,
                          automatic_knowledge_enabled, embedding_enabled,
-                         embedding_model_id, confirm_tools, connected, enabled, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         embedding_model_id, confirm_tools, max_tool_rounds,
+                         connected, enabled, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     tuple(
                         row.get(column)
@@ -2871,7 +2946,7 @@ def _rebuild_model_reference_tables(
                             "knowledge_service_last_error", "knowledge_service_tools",
                             "automatic_knowledge_enabled",
                             "embedding_enabled", "embedding_model_id", "confirm_tools",
-                            "connected", "enabled", "updated_at",
+                            "max_tool_rounds", "connected", "enabled", "updated_at",
                         )
                     ),
                 )
@@ -5297,6 +5372,8 @@ def record_knowledge_service_failure(error: str) -> dict:
 def get_builtin_confirmation_tools(agent_key: str) -> list[str]:
     """Return the persisted confirmation rules for one built-in specialist."""
     key = str(agent_key or "").removeprefix("builtin:").strip()
+    if key == "computer":
+        return []
     try:
         with _connect() as conn:
             row = conn.execute(
@@ -5315,6 +5392,26 @@ def get_builtin_confirmation_tools(agent_key: str) -> list[str]:
     except (json.JSONDecodeError, TypeError):
         return builtin_agents.default_confirmation_tools(key)
     return [str(item) for item in parsed if str(item)] if isinstance(parsed, list) else []
+
+
+def get_builtin_max_tool_rounds(agent_key: str, fallback: int) -> int:
+    """Resolve an agent's saved round limit without loading its full UI state."""
+    default = min(100, max(1, int(fallback)))
+    key = str(agent_key or "").removeprefix("builtin:").strip()
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT max_tool_rounds FROM builtin_agent_settings WHERE agent_key = ?",
+                (key,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return default
+    if row is None or row["max_tool_rounds"] is None:
+        return default
+    try:
+        return min(100, max(1, int(row["max_tool_rounds"])))
+    except (TypeError, ValueError):
+        return default
 
 
 def _builtin_capabilities_with_confirmation() -> list[dict]:
@@ -5338,6 +5435,8 @@ def _builtin_capabilities_with_confirmation() -> list[dict]:
             )
         except (json.JSONDecodeError, TypeError):
             rules = set(builtin_agents.default_confirmation_tools(agent["builtin_key"]))
+        if agent["builtin_key"] == "computer":
+            rules = set()
         for tool in agent["tools"]:
             tool["requires_confirmation"] = (
                 "*" in rules or tool["name"] in rules
@@ -5368,7 +5467,7 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                 SELECT s.model_id, s.generation_model_id,
                        s.automatic_knowledge_enabled,
                        s.embedding_enabled, s.embedding_model_id,
-                       s.confirm_tools, s.connected, s.enabled,
+                       s.confirm_tools, s.max_tool_rounds, s.connected, s.enabled,
                        COALESCE(m.model, s.model) AS model,
                        gm.model AS generation_model
                 FROM builtin_agent_settings s
@@ -5380,7 +5479,11 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
             ).fetchone()
         capability = capabilities[key]
         default_prompt = builtin_agents.system_prompt(key)
+        default_max_tool_rounds = builtin_agents.default_max_tool_rounds(key)
         knowledge_state = get_knowledge_service_state() if key == "knowledge" else None
+        local_computer_state = (
+            local_computer.availability() if key == "computer" else None
+        )
         protocol_missing: list[str] = []
         advertised_names: set[str] = set()
         exposed_tools = capability["tools"]
@@ -5407,6 +5510,12 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                 "model": (
                     setting["model"] if setting else definition["default_model"]
                 ),
+                "max_tool_rounds": (
+                    int(setting["max_tool_rounds"])
+                    if setting and setting["max_tool_rounds"] is not None
+                    else default_max_tool_rounds
+                ),
+                "default_max_tool_rounds": default_max_tool_rounds,
                 "generation_model_id": (
                     setting["generation_model_id"] if setting else None
                 ) if key == "media" else None,
@@ -5434,6 +5543,30 @@ def list_builtin_agents(*, connected_only: bool = False) -> list[dict]:
                 ) if key == "knowledge" else None,
                 "knowledge_protocol_missing_tools": (
                     protocol_missing if key == "knowledge" else []
+                ),
+                "computer_diagnostics": (
+                    {
+                        "active_backend": (
+                            local_computer_state.get("backend")
+                            if local_computer_state else None
+                        ),
+                        "native_backend_reason": (
+                            local_computer_state.get("reason", "")
+                            if local_computer_state else ""
+                        ),
+                        "screenshot_backend": (
+                            local_computer_state.get("screenshot_backend")
+                            if local_computer_state else None
+                        ),
+                    } if key == "computer" else {}
+                ),
+                "computer_backend": (
+                    local_computer_state.get("backend")
+                    if local_computer_state else None
+                ),
+                "computer_backend_reason": (
+                    local_computer_state.get("reason", "")
+                    if local_computer_state else ""
                 ),
                 "automatic_knowledge_enabled": (
                     bool(setting["automatic_knowledge_enabled"])
@@ -5485,6 +5618,7 @@ def update_builtin_agent(
     embedding_enabled: bool | None = None,
     embedding_model_id: int | None | object = _UNSET,
     confirm_tools: list[str] | str | object = _UNSET,
+    max_tool_rounds: int | None | object = _UNSET,
     connected: bool | None = None,
     enabled: bool | None = None,
     skill_ids: list[int] | None | object = _UNSET,
@@ -5497,6 +5631,7 @@ def update_builtin_agent(
         and generation_model_id is _UNSET
         and embedding_model_id is _UNSET
         and confirm_tools is _UNSET
+        and max_tool_rounds is _UNSET
         and skill_ids is _UNSET
         and automatic_knowledge_enabled is None
         and embedding_enabled is None
@@ -5558,8 +5693,10 @@ def update_builtin_agent(
     confirmation_requested = confirm_tools is not _UNSET
     normalized_confirm_tools = None
     if confirmation_requested:
-        normalized_confirm_tools = _json_string_list(
-            confirm_tools, "confirmation tools"
+        normalized_confirm_tools = (
+            "[]"
+            if definition["key"] == "computer"
+            else _json_string_list(confirm_tools, "confirmation tools")
         )
         rules = set(json.loads(normalized_confirm_tools))
         known_tools = {
@@ -5573,6 +5710,19 @@ def update_builtin_agent(
             raise ValueError(
                 "one or more confirmation tools are unavailable for this built-in subagent"
             )
+    max_rounds_requested = max_tool_rounds is not _UNSET
+    normalized_max_tool_rounds = None
+    if max_rounds_requested and max_tool_rounds is not None:
+        if isinstance(max_tool_rounds, bool):
+            raise ValueError("Maximum tool rounds must be between 1 and 100.")
+        try:
+            normalized_max_tool_rounds = int(max_tool_rounds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Maximum tool rounds must be between 1 and 100."
+            ) from exc
+        if not 1 <= normalized_max_tool_rounds <= 100:
+            raise ValueError("Maximum tool rounds must be between 1 and 100.")
     if embedding_requested or normalized_embedding_enabled is not None:
         with _connect() as conn:
             current_embedding = conn.execute(
@@ -5673,6 +5823,15 @@ def update_builtin_agent(
                 WHERE agent_key = ?
                 """,
                 (normalized_confirm_tools, _now(), definition["key"]),
+            )
+        if max_rounds_requested:
+            conn.execute(
+                """
+                UPDATE builtin_agent_settings
+                SET max_tool_rounds = ?, updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (normalized_max_tool_rounds, _now(), definition["key"]),
             )
         if normalized_connected is not None:
             conn.execute(
@@ -8637,6 +8796,9 @@ def _add_subagent(
     position=None,
     mcp_sources=None,
     skill_ids=None,
+    max_tool_rounds: int = cfg.SUBAGENT_MAX_TOOL_ROUNDS,
+    tool_timeout_seconds: float = cfg.SUBAGENT_TOOL_TIMEOUT_SECONDS,
+    task_timeout_seconds: float = cfg.SUBAGENT_TASK_TIMEOUT_SECONDS,
 ) -> int:
     try:
         selected_model_id = int(model_id)
@@ -8657,6 +8819,20 @@ def _add_subagent(
         confirm_tools = ["*"] if _bool(confirm_tool_calls, "confirm_tool_calls") else []
     confirm_tools_json = _json_string_list(confirm_tools, "confirmation tools")
     dedupe_tools_json = _json_string_list(dedupe_tools or [], "duplicate protection tools")
+    if isinstance(max_tool_rounds, bool):
+        raise ValueError("Maximum tool rounds must be between 1 and 100.")
+    try:
+        selected_max_tool_rounds = int(max_tool_rounds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Maximum tool rounds must be between 1 and 100.") from exc
+    if not 1 <= selected_max_tool_rounds <= 100:
+        raise ValueError("Maximum tool rounds must be between 1 and 100.")
+    selected_tool_timeout = _positive_timeout(
+        tool_timeout_seconds, "Tool timeout"
+    )
+    selected_task_timeout = _positive_timeout(
+        task_timeout_seconds, "Task timeout"
+    )
     has_confirmations = bool(json.loads(confirm_tools_json))
     selected_workflow_id = (
         None if workflow_id in (None, "") else int(workflow_id)
@@ -8705,8 +8881,10 @@ def _add_subagent(
             INSERT INTO subagents
                 (name, description, system_prompt, icon_data, icon_mime,
                  model_id, mcp_server_id, confirm_tool_calls, confirm_tools,
-                 dedupe_tools, enabled, enabled_tools, parent_agent_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 dedupe_tools, max_tool_rounds, tool_timeout_seconds,
+                 task_timeout_seconds, enabled, enabled_tools, parent_agent_id,
+                 created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _required(name, "name"),
@@ -8719,6 +8897,9 @@ def _add_subagent(
                 int(has_confirmations),
                 confirm_tools_json,
                 dedupe_tools_json,
+                selected_max_tool_rounds,
+                selected_tool_timeout,
+                selected_task_timeout,
                 int(_bool(enabled, "enabled")),
                 enabled_tools_json,
                 selected_parent_id if selected_workflow_id is None else None,
@@ -8769,6 +8950,9 @@ def add_subagent(
     position=None,
     mcp_sources=None,
     skill_ids=None,
+    max_tool_rounds: int = cfg.SUBAGENT_MAX_TOOL_ROUNDS,
+    tool_timeout_seconds: float = cfg.SUBAGENT_TOOL_TIMEOUT_SECONDS,
+    task_timeout_seconds: float = cfg.SUBAGENT_TASK_TIMEOUT_SECONDS,
 ) -> dict:
     with _connect() as conn:
         aid = _add_subagent(
@@ -8776,6 +8960,7 @@ def add_subagent(
             confirm_tool_calls, parent_agent_id, confirm_tools, icon_data, icon_mime,
             dedupe_tools, enabled, enabled_tools, parent_node_id,
             connect_to_workflow, workflow_id, position, mcp_sources, skill_ids,
+            max_tool_rounds, tool_timeout_seconds, task_timeout_seconds,
         )
         return get_subagent(aid)
 
@@ -8783,7 +8968,9 @@ def add_subagent(
 _SUBAGENT_SELECT = """
     SELECT s.id, s.name, s.description, s.system_prompt,
            s.model_id, s.mcp_server_id, s.confirm_tool_calls, s.confirm_tools,
-           s.dedupe_tools, s.enabled, s.enabled_tools, s.parent_agent_id,
+           s.dedupe_tools, s.max_tool_rounds, s.tool_timeout_seconds,
+           s.task_timeout_seconds, s.enabled, s.enabled_tools,
+           s.parent_agent_id,
            s.created_at,
            CASE WHEN length(s.icon_data) > 0 THEN 1 ELSE 0 END AS has_icon,
            m.name AS model_name, m.model, m.provider, m.base_url, m.api_key,
@@ -9314,7 +9501,8 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     allowed = {
         "name", "description", "system_prompt", "model_id",
         "mcp_server_id", "confirm_tool_calls", "confirm_tools",
-        "icon_data", "icon_mime", "dedupe_tools", "enabled", "enabled_tools",
+        "icon_data", "icon_mime", "dedupe_tools", "max_tool_rounds",
+        "tool_timeout_seconds", "task_timeout_seconds", "enabled", "enabled_tools",
     }
     fields = {
         k: v
@@ -9366,6 +9554,23 @@ def update_subagent(subagent_id: int, **kwargs) -> dict | None:
     if "dedupe_tools" in fields:
         fields["dedupe_tools"] = _json_string_list(
             fields["dedupe_tools"], "duplicate protection tools"
+        )
+    if "max_tool_rounds" in fields:
+        if isinstance(fields["max_tool_rounds"], bool):
+            raise ValueError("Maximum tool rounds must be between 1 and 100.")
+        try:
+            fields["max_tool_rounds"] = int(fields["max_tool_rounds"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Maximum tool rounds must be between 1 and 100.") from exc
+        if not 1 <= fields["max_tool_rounds"] <= 100:
+            raise ValueError("Maximum tool rounds must be between 1 and 100.")
+    if "tool_timeout_seconds" in fields:
+        fields["tool_timeout_seconds"] = _positive_timeout(
+            fields["tool_timeout_seconds"], "Tool timeout"
+        )
+    if "task_timeout_seconds" in fields:
+        fields["task_timeout_seconds"] = _positive_timeout(
+            fields["task_timeout_seconds"], "Task timeout"
         )
     if "enabled" in fields:
         fields["enabled"] = int(_bool(fields["enabled"], "enabled"))
@@ -9571,9 +9776,9 @@ def build_knowledge_service_spec() -> dict:
 def get_builtin_agent_server_spec(agent_key: str) -> dict | None:
     """Resolve an internal service owned by a built-in specialist."""
     key = str(agent_key or "").removeprefix("builtin:").strip()
-    if key != "knowledge":
-        return None
-    return build_knowledge_service_spec()
+    if key == "knowledge":
+        return build_knowledge_service_spec()
+    return None
 
 
 def build_specs(workflow_id: int | None = None) -> list[dict]:
@@ -9679,6 +9884,17 @@ def build_specs(workflow_id: int | None = None) -> list[dict]:
                     s.get("dedupe_tools") or "[]",
                     "duplicate protection tools",
                 )
+            ),
+            "max_tool_rounds": int(
+                s.get("max_tool_rounds") or cfg.SUBAGENT_MAX_TOOL_ROUNDS
+            ),
+            "tool_timeout_seconds": float(
+                s.get("tool_timeout_seconds")
+                or cfg.SUBAGENT_TOOL_TIMEOUT_SECONDS
+            ),
+            "task_timeout_seconds": float(
+                s.get("task_timeout_seconds")
+                or cfg.SUBAGENT_TASK_TIMEOUT_SECONDS
             ),
         })
     return specs

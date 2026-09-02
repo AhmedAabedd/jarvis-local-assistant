@@ -5,6 +5,7 @@ import {
   GitBranch,
   Image as ImageIcon,
   ListChecks,
+  MonitorCog,
   Plus,
   Settings,
   Workflow,
@@ -83,15 +84,17 @@ export function AgentFlowNode({ data }: NodeProps<Node<FlowData>>) {
   const Icon =
     data.kind === 'supervisor'
       ? Bot
-      : data.kind === 'workflow'
-        ? Workflow
-        : data.agentKey === 'media'
-          ? ImageIcon
-          : data.agentKey === 'knowledge'
-            ? BookOpen
-            : data.agentKey === 'system'
-              ? Settings
-              : Bot
+      : data.agentKey === 'computer'
+        ? MonitorCog
+        : data.kind === 'workflow'
+          ? Workflow
+          : data.agentKey === 'media'
+            ? ImageIcon
+            : data.agentKey === 'knowledge'
+              ? BookOpen
+              : data.agentKey === 'system'
+                ? Settings
+                : Bot
 
   return (
     <div

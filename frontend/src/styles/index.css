@@ -1320,6 +1320,44 @@ textarea {
   display: grid;
   gap: 18px;
 }
+.developer-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+.technical-warning {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  color: #e8d39f;
+  border: 1px solid rgb(240 195 106 / 38%);
+  border-radius: 10px;
+  background: rgb(240 195 106 / 8%);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.technical-warning > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--warning);
+}
+.technical-warning strong {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--warning);
+  font-size: 11px;
+}
+.technical-warning--compact {
+  margin-top: 8px;
+  padding: 10px 11px;
+}
+.developer-settings__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+}
 .node-drawer {
   position: fixed;
   z-index: 90;
@@ -5912,7 +5950,8 @@ button.panel-close-button svg {
   .settings-grid,
   .heartbeat-channel-list,
   .form-grid,
-  .detail-grid {
+  .detail-grid,
+  .developer-settings {
     grid-template-columns: 1fr;
   }
   .meta-platform-intro,

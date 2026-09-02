@@ -185,7 +185,7 @@ def run(
             base_url=runtime["base_url"],
             api_key=runtime["api_key"],
         ),
-        max_rounds=MAX_TOOL_ROUNDS,
+        max_rounds=db.get_builtin_max_tool_rounds("media", MAX_TOOL_ROUNDS),
         empty_response="Nothing to report.",
         exhausted_response="Files and Media reached max tool rounds — partial result only.",
         error_formatter=lambda _executed, error: f"Files and Media failed: {error}",

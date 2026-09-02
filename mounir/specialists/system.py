@@ -470,7 +470,7 @@ def run(
             base_url=runtime["base_url"],
             api_key=runtime["api_key"],
         ),
-        max_rounds=MAX_TOOL_ROUNDS,
+        max_rounds=db.get_builtin_max_tool_rounds("system", MAX_TOOL_ROUNDS),
         empty_response=(
             "System agent failed: the model returned an empty response twice — "
             "nothing was changed. Try again."

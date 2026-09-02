@@ -270,6 +270,23 @@ embedding requests.
 Controls supported desktop functions such as audio, display brightness, media,
 Wi-Fi, Bluetooth, power actions, browser actions, and approved commands.
 
+### Computer
+
+Controls visible desktop applications after one task-level confirmation. On
+Linux it uses restricted native screenshot, mouse, and keyboard tools through
+XTest on X11 or the RemoteDesktop and ScreenCast portals on Wayland. During an
+approved Wayland session, screenshots come from the newest completed frame of
+the portal's PipeWire ScreenCast stream; the single-frame queue drops older
+frames and does not record video. If sharing is stopped or PipeWire capture
+fails, the Computer task stops explicitly instead of switching capture methods.
+Screenshot bytes remain inside the active agent turn and are not stored in
+conversation history.
+
+Each subagent exposes a Developer tab with its persisted execution limits and
+the defaults shipped by its runtime. Built-in specialists expose only maximum
+tool rounds. Dynamic subagents additionally expose per-tool and whole-task
+timeouts; Reset to defaults restores the current installation defaults.
+
 Inactive specialists are removed from runtime delegation—not merely hidden in the
 UI. The workflow keeps them visible as muted nodes with a red relationship so the
 configured architecture remains understandable.
@@ -598,6 +615,9 @@ instructions, permissions, and knowledge sources it trusts.
 - Node.js 20.19+ (or 22.12+) to build the React interface and run Node-based MCP servers
 - FFmpeg for browser voice uploads
 - Provider credentials only for cloud services you choose to enable
+- Optional native Linux Computer tools: XDG Desktop Portal, PipeWire, and
+  GStreamer with the PipeWire/app/video/JPEG plugins for Wayland; XTest plus
+  `gnome-screenshot` or `scrot` for X11
 
 ### Install and launch
 
@@ -671,8 +691,12 @@ edited in Agent Studio and take precedence after their initial import.
 | `MOUNIR_CHAT_ATTACHMENT_MAX_BYTES` | `10485760` | Maximum size of one directly attached conversation image |
 | `MOUNIR_TELEGRAM_ATTACHMENT_DIR` | `<data dir>/telegram/attachments` | Persistent incoming Telegram videos and ordinary files |
 | `MOUNIR_TELEGRAM_MAX_ATTACHMENT_BYTES` | `20971520` | Maximum Telegram attachment download size |
+| `MOUNIR_MCP_MAX_ROUNDS` | `8` | Default maximum model/tool cycles for dynamic subagents |
 | `MOUNIR_MCP_TOOL_TIMEOUT` | `60` | Maximum seconds for one MCP tool call |
 | `MOUNIR_MCP_AGENT_TIMEOUT` | `300` | Maximum seconds for one delegated MCP task |
+| `MOUNIR_COMPUTER_MAX_ROUNDS` | `40` | Maximum model/tool cycles for one Computer task |
+| `MOUNIR_COMPUTER_MAX_OBSERVATIONS` | `40` | Maximum desktop observations in one Computer task |
+| `MOUNIR_COMPUTER_SCREENSHOT_WIDTH` | `1280` | Model-visible native screenshot width, capped at 2560 |
 | `MOUNIR_KNOWLEDGE_TOOL_TIMEOUT` | `300` | Maximum seconds for one knowledge MCP verb |
 | `MOUNIR_KNOWLEDGE_AGENT_TIMEOUT` | `600` | Maximum seconds for one delegated Knowledge task |
 | `MOUNIR_GBRAIN_HOME` | `<MOUNIR_DATA_DIR>/gbrain` | Parent directory for the isolated built-in GBrain instance |

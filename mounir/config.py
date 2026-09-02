@@ -23,6 +23,19 @@ DATA_DIR: Path = Path(os.environ.get("MOUNIR_DATA_DIR", Path.home() / ".mounir")
 # messages (system prompt excluded) before each request.
 MAX_HISTORY_MESSAGES: int = int(os.environ.get("MOUNIR_MAX_HISTORY", "20"))
 
+# Dynamic subagent developer defaults. Agent-specific values are persisted in
+# SQLite; these remain the source of truth for new agents and Reset to defaults.
+SUBAGENT_MAX_TOOL_ROUNDS: int = max(
+    1, min(int(os.environ.get("MOUNIR_MCP_MAX_ROUNDS", "8")), 100)
+)
+SUBAGENT_TOOL_TIMEOUT_SECONDS: float = max(
+    1.0, float(os.environ.get("MOUNIR_MCP_TOOL_TIMEOUT", "60"))
+)
+SUBAGENT_TASK_TIMEOUT_SECONDS: float = max(
+    SUBAGENT_TOOL_TIMEOUT_SECONDS,
+    float(os.environ.get("MOUNIR_MCP_AGENT_TIMEOUT", "300")),
+)
+
 # Optional first-run profile values. Personal fields stay empty until configured.
 DEFAULT_USER_NAME: str = os.environ.get("MOUNIR_USER_NAME", "").strip()
 DEFAULT_ASSISTANT_NAME: str = os.environ.get("MOUNIR_ASSISTANT_NAME", "Mounir")
@@ -64,7 +77,12 @@ def build_system_prompt(profile: dict | None = None) -> str:
         "that you have no saved knowledge about it. Use Knowledge for all durable "
         "memory retrieval and changes.\n"
         "5. If information or a required capability is unavailable, say so; never "
-        "invent an answer or result."
+        "invent an answer or result.\n"
+        "6. Prefer a direct purpose-built tool over visible GUI automation. Use "
+        "Computer only when the request truly requires interaction with the visible "
+        "desktop.\n"
+        "7. If one valid route fails but another succeeds, report the verified outcome "
+        "without narrating internal retries or disparaging another specialist."
     )
 SUBAGENT_CAPABILITY_PROMPT = """\
 CAPABILITY BOUNDARY
